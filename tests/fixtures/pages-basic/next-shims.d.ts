@@ -107,9 +107,42 @@ declare module "next/dynamic" {
 
 declare module "next/app" {
   import { ComponentType } from "react";
-  export interface AppProps {
+  export type AppTree = ComponentType<AppInitialProps & { [name: string]: unknown }>;
+  export interface AppInitialProps<PageProps = unknown> {
+    pageProps: PageProps;
+  }
+  export interface AppContext {
     Component: ComponentType<any>;
-    pageProps: Record<string, unknown>;
+    AppTree: AppTree;
+    ctx: {
+      req?: unknown;
+      res?: unknown;
+      pathname: string;
+      query: Record<string, string | string[]>;
+      asPath: string;
+      err?: Error & { statusCode?: number };
+      locale?: string;
+      locales?: readonly string[];
+      defaultLocale?: string;
+    };
+    router: {
+      pathname: string;
+      query: Record<string, string | string[]>;
+      asPath: string;
+      locale?: string;
+      locales?: readonly string[];
+      defaultLocale?: string;
+      [key: string]: unknown;
+    };
+  }
+  export interface AppProps<P = Record<string, unknown>> {
+    Component: ComponentType<P>;
+    pageProps: P;
+    router: AppContext["router"];
+  }
+  export default class App<P = unknown> {
+    static getInitialProps(ctx: AppContext): Promise<AppInitialProps>;
+    render(): JSX.Element;
   }
 }
 

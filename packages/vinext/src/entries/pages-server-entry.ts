@@ -736,7 +736,20 @@ async function renderErrorPageResponse(statusCode, url, request) {
     var errorProps = { statusCode: statusCode };
     var errorElement;
     if (AppComponent) {
-      errorElement = React.createElement(AppComponent, { Component: ErrorComponent, pageProps: errorProps });
+      var _errAppProps = {};
+      if (typeof AppComponent.getInitialProps === "function") {
+        var _errParsedQuery = request ? Object.fromEntries(new URL(request.url).searchParams.entries()) : {};
+        var _errPathname = (url || "/").split("?")[0] || "/";
+        try {
+          _errAppProps = await AppComponent.getInitialProps({
+            Component: ErrorComponent,
+            AppTree: AppComponent,
+            router: { pathname: _errPathname, query: _errParsedQuery, asPath: url || "/" },
+            ctx: { pathname: _errPathname, query: _errParsedQuery, asPath: url || "/" },
+          });
+        } catch (e) { /* ignore getInitialProps errors on error pages */ }
+      }
+      errorElement = React.createElement(AppComponent, { Component: ErrorComponent, pageProps: errorProps, ..._errAppProps });
     } else {
       errorElement = React.createElement(ErrorComponent, errorProps);
     }
@@ -975,7 +988,7 @@ async function _renderPage(request, url, manifest) {
                 // Re-render the page with fresh props inside fresh render sub-scopes
                 // so head/cache state cannot leak across passes.
                 var _el = AppComponent
-                  ? React.createElement(AppComponent, { Component: PageComponent, pageProps: _fp })
+                  ? React.createElement(AppComponent, { Component: PageComponent, pageProps: _fp, ..._appProps })
                   : React.createElement(PageComponent, _fp);
                 _el = wrapWithRouterContext(_el);
                 var _freshBody = await renderIsrPassToStringAsync(_el);
@@ -1053,7 +1066,18 @@ async function _renderPage(request, url, manifest) {
 
     let element;
     if (AppComponent) {
-      element = React.createElement(AppComponent, { Component: PageComponent, pageProps });
+      var _appProps = {};
+      if (typeof AppComponent.getInitialProps === "function") {
+        var _parsedQ = parseQuery(routeUrl);
+        var _pathname = routeUrl.split("?")[0];
+        _appProps = await AppComponent.getInitialProps({
+          Component: PageComponent,
+          AppTree: AppComponent,
+          router: { pathname: _pathname, query: { ...params, ..._parsedQ }, asPath: routeUrl },
+          ctx: { pathname: _pathname, query: { ...params, ..._parsedQ }, asPath: routeUrl },
+        });
+      }
+      element = React.createElement(AppComponent, { Component: PageComponent, pageProps, ..._appProps });
     } else {
       element = React.createElement(PageComponent, pageProps);
     }
@@ -1083,7 +1107,7 @@ async function _renderPage(request, url, manifest) {
     const pageModuleIds = route.filePath ? [route.filePath] : [];
     const assetTags = collectAssetTags(manifest, pageModuleIds);
     const nextDataPayload = {
-      props: { pageProps }, page: patternToNextFormat(route.pattern), query: params, buildId, isFallback: false,
+      props: { pageProps, ..._appProps }, page: patternToNextFormat(route.pattern), query: params, buildId, isFallback: false,
     };
     if (i18nConfig) {
       nextDataPayload.locale = locale;
@@ -1179,7 +1203,7 @@ async function _renderPage(request, url, manifest) {
       // but ISR responses are rare on first hit. Re-render to get complete HTML for cache.
       var isrElement;
       if (AppComponent) {
-        isrElement = React.createElement(AppComponent, { Component: PageComponent, pageProps });
+        isrElement = React.createElement(AppComponent, { Component: PageComponent, pageProps, ..._appProps });
       } else {
         isrElement = React.createElement(PageComponent, pageProps);
       }

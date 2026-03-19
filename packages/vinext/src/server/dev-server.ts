@@ -703,12 +703,44 @@ export function createSSRHandler(
                       }
                     }
 
-                    let el = RegenApp
-                      ? React.createElement(RegenApp, {
-                          Component: pageModule.default,
-                          pageProps: freshProps,
-                        })
-                      : React.createElement(pageModule.default, freshProps);
+                    let el: React.ReactElement;
+                    let _regenAppProps: Record<string, unknown> = {};
+                    if (RegenApp) {
+                      if (
+                        typeof (RegenApp as { getInitialProps?: unknown }).getInitialProps ===
+                        "function"
+                      ) {
+                        const _regenParsedQ = parseQuery(url);
+                        const _regenPathname = url.split("?")[0];
+                        try {
+                          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                          _regenAppProps =
+                            (await (RegenApp as any).getInitialProps({
+                              Component: pageModule.default,
+                              AppTree: RegenApp,
+                              router: {
+                                pathname: _regenPathname,
+                                query: { ...params, ..._regenParsedQ },
+                                asPath: url,
+                              },
+                              ctx: {
+                                pathname: _regenPathname,
+                                query: { ...params, ..._regenParsedQ },
+                                asPath: url,
+                              },
+                            })) ?? {};
+                        } catch {
+                          /* ignore */
+                        }
+                      }
+                      el = React.createElement(RegenApp, {
+                        Component: pageModule.default,
+                        pageProps: freshProps,
+                        ..._regenAppProps,
+                      });
+                    } else {
+                      el = React.createElement(pageModule.default, freshProps);
+                    }
                     if (routerShim.wrapWithRouterContext) {
                       el = routerShim.wrapWithRouterContext(el);
                     }
@@ -728,7 +760,7 @@ export function createSSRHandler(
                       : null;
 
                     const freshNextData = `<script>window.__NEXT_DATA__ = ${safeJsonStringify({
-                      props: { pageProps: freshProps },
+                      props: { pageProps: freshProps, ..._regenAppProps },
                       page: patternToNextFormat(route.pattern),
                       query: params,
                       buildId: process.env.__VINEXT_BUILD_ID,
@@ -837,10 +869,35 @@ export function createSSRHandler(
         // next/compat/router's useRouter() returns the real router.
         const wrapWithRouterContext = routerShim.wrapWithRouterContext;
 
+        // App.getInitialProps: call if _app defines it, spread result into AppComponent props.
+        let _devAppProps: Record<string, unknown> = {};
+        if (
+          AppComponent &&
+          typeof (AppComponent as { getInitialProps?: unknown }).getInitialProps === "function"
+        ) {
+          const _devParsedQ = parseQuery(url);
+          const _devPathname = url.split("?")[0];
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          _devAppProps =
+            (await (AppComponent as any).getInitialProps({
+              Component: PageComponent,
+              AppTree: AppComponent,
+              router: { pathname: _devPathname, query: { ...params, ..._devParsedQ }, asPath: url },
+              ctx: {
+                pathname: _devPathname,
+                query: { ...params, ..._devParsedQ },
+                asPath: url,
+                req,
+                res,
+              },
+            })) ?? {};
+        }
+
         if (AppComponent) {
           element = createElement(AppComponent, {
             Component: PageComponent,
             pageProps,
+            ..._devAppProps,
           });
         } else {
           element = createElement(PageComponent, pageProps);
@@ -929,7 +986,7 @@ import { hydrateRoot } from "react-dom/client";
 import { wrapWithRouterContext } from "next/router";
 
 const nextData = window.__NEXT_DATA__;
-const { pageProps } = nextData.props;
+const { pageProps, ...appInitialProps } = nextData.props;
 
 async function hydrate() {
   const pageModule = await import("${pageModuleUrl}");
@@ -941,7 +998,7 @@ async function hydrate() {
   const appModule = await import("${appModuleUrl}");
   const AppComponent = appModule.default;
   window.__VINEXT_APP__ = AppComponent;
-  element = React.createElement(AppComponent, { Component: PageComponent, pageProps });
+  element = React.createElement(AppComponent, { Component: PageComponent, pageProps, ...appInitialProps });
   `
       : `
   element = React.createElement(PageComponent, pageProps);
@@ -955,7 +1012,7 @@ hydrate();
 </script>`;
 
         const nextDataScript = `<script>window.__NEXT_DATA__ = ${safeJsonStringify({
-          props: { pageProps },
+          props: { pageProps, ..._devAppProps },
           page: patternToNextFormat(route.pattern),
           query: params,
           buildId: process.env.__VINEXT_BUILD_ID,
@@ -1037,6 +1094,7 @@ hydrate();
             ? createElement(AppComponent, {
                 Component: pageModule.default,
                 pageProps,
+                ..._devAppProps,
               })
             : createElement(pageModule.default, pageProps);
           if (wrapWithRouterContext) {
@@ -1158,9 +1216,33 @@ async function renderErrorPage(
 
       let element: React.ReactElement;
       if (AppComponent) {
+        let _errDevAppProps: Record<string, unknown> = {};
+        if (typeof (AppComponent as { getInitialProps?: unknown }).getInitialProps === "function") {
+          const _errParsedQ = url ? parseQuery(url) : {};
+          const _errPathname = url ? url.split("?")[0] : "/";
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            _errDevAppProps =
+              (await (AppComponent as any).getInitialProps({
+                Component: ErrorComponent,
+                AppTree: AppComponent,
+                router: { pathname: _errPathname, query: _errParsedQ, asPath: url ?? "/" },
+                ctx: {
+                  pathname: _errPathname,
+                  query: _errParsedQ,
+                  asPath: url ?? "/",
+                  req: _req,
+                  res,
+                },
+              })) ?? {};
+          } catch {
+            /* ignore getInitialProps errors on error pages */
+          }
+        }
         element = createElement(AppComponent, {
           Component: ErrorComponent,
           pageProps: errorProps,
+          ..._errDevAppProps,
         });
       } else {
         element = createElement(ErrorComponent, errorProps);
