@@ -514,22 +514,29 @@ function __proxyRouteRequest(req, markDynamic) {
       // Accessing .headers marks as dynamic (headers vary per request)
       if (prop === "headers") {
         markDynamic();
-        return Reflect.get(target, prop, receiver);
+        return target.headers;
       }
       // .nextUrl returns a proxied URL where .searchParams triggers dynamic
       if (prop === "nextUrl") {
         if (!_nextUrl) {
           const realUrl = new URL(target.url);
           _nextUrl = new Proxy(realUrl, {
-            get(urlTarget, urlProp, urlReceiver) {
+            get(urlTarget, urlProp) {
               if (urlProp === "searchParams") markDynamic();
-              return Reflect.get(urlTarget, urlProp, urlReceiver);
+              const val = Reflect.get(urlTarget, urlProp);
+              return typeof val === "function" ? val.bind(urlTarget) : val;
             },
           });
         }
         return _nextUrl;
       }
-      return Reflect.get(target, prop, receiver);
+      // Bind methods to the original Request to preserve internal slots.
+      // Web API objects like Request use internal slots for .json(),
+      // .text(), .arrayBuffer(), etc. that break when called through
+      // a Proxy (the Proxy becomes "this" instead of the real Request).
+      const value = Reflect.get(target, prop);
+      if (typeof value === "function") return value.bind(target);
+      return value;
     },
   });
 }
