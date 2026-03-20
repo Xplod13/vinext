@@ -495,6 +495,37 @@ const __isrDebug = process.env.NEXT_PRIVATE_DEBUG_CACHE
   ? console.debug.bind(console, "[vinext] ISR:")
   : undefined;
 
+/** @type {Set<string>} */
+const __dynamicRouteHandlers = new Set();
+
+function __proxyRouteRequest(req, markDynamic) {
+  let _nextUrl;
+  return new Proxy(req, {
+    get(target, prop, receiver) {
+      if (prop === "headers") {
+        markDynamic();
+        return target.headers;
+      }
+      if (prop === "nextUrl") {
+        if (!_nextUrl) {
+          const realUrl = new URL(target.url);
+          _nextUrl = new Proxy(realUrl, {
+            get(urlTarget, urlProp) {
+              if (urlProp === "searchParams") markDynamic();
+              const val = Reflect.get(urlTarget, urlProp);
+              return typeof val === "function" ? val.bind(urlTarget) : val;
+            },
+          });
+        }
+        return _nextUrl;
+      }
+      const value = Reflect.get(target, prop);
+      if (typeof value === "function") return value.bind(target);
+      return value;
+    },
+  });
+}
+
 // Normalize null-prototype objects from matchPattern() into thenable objects
 // that work both as Promises (for Next.js 15+ async params) and as plain
 // objects with synchronous property access (for pre-15 code like params.id).
@@ -2257,11 +2288,12 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
 
     // ISR cache read for route handlers (production only).
     // Only GET/HEAD (auto-HEAD) with finite revalidate > 0 are ISR-eligible.
-    // This runs before handler execution so a cache HIT skips the handler entirely.
+    // Skip cache read if this handler was previously detected as dynamic.
     if (
       process.env.NODE_ENV === "production" &&
       revalidateSeconds !== null &&
       handler.dynamic !== "force-dynamic" &&
+      !__dynamicRouteHandlers.has(handler.pattern) &&
       (method === "GET" || isAutoHead) &&
       typeof handlerFn === "function"
     ) {
@@ -2299,11 +2331,15 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
             await _runWithUnifiedCtx(__revalUCtx, async () => {
               _ensureFetchPatch();
               setNavigationContext({ pathname: cleanPathname, searchParams: __revalSearchParams, params: __revalParams });
-              const __syntheticReq = new Request(__revalUrl, { method: "GET" });
+              const __syntheticReq = __proxyRouteRequest(
+                new Request(__revalUrl, { method: "GET" }),
+                markDynamicUsage,
+              );
               const __revalResponse = await __revalHandlerFn(__syntheticReq, { params: __revalParams });
               const __regenDynamic = consumeDynamicUsage();
               setNavigationContext(null);
               if (__regenDynamic) {
+                __dynamicRouteHandlers.add(handler.pattern);
                 __isrDebug?.("route regen skipped (dynamic usage)", cleanPathname);
                 return;
               }
@@ -2336,10 +2372,15 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
 
     if (typeof handlerFn === "function") {
       const previousHeadersPhase = setHeadersAccessPhase("route-handler");
+      const __proxiedRequest = __proxyRouteRequest(request, markDynamicUsage);
       try {
-        const response = await handlerFn(request, { params });
+        const response = await handlerFn(__proxiedRequest, { params });
         const dynamicUsedInHandler = consumeDynamicUsage();
         const handlerSetCacheControl = response.headers.has("cache-control");
+
+        if (dynamicUsedInHandler) {
+          __dynamicRouteHandlers.add(handler.pattern);
+        }
 
         // Apply Cache-Control from route segment config (export const revalidate = N).
         // Runtime request APIs like headers() / cookies() make GET handlers dynamic,
