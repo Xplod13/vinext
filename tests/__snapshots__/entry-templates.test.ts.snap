@@ -374,7 +374,7 @@ function renderToReadableStream(model, options) {
 }
 import { createElement, Suspense, Fragment } from "react";
 import { setNavigationContext as _setNavigationContextOrig, getNavigationContext as _getNavigationContext } from "next/navigation";
-import { setHeadersContext, headersContextFromRequest, getDraftModeCookieHeader, getAndClearPendingCookies, consumeDynamicUsage, markDynamicUsage, applyMiddlewareRequestHeaders, getHeadersContext, setHeadersAccessPhase } from "next/headers";
+import { setHeadersContext, headersContextFromRequest, getDraftModeCookieHeader, getAndClearPendingCookies, consumeDynamicUsage, markDynamicUsage, getDynamicUsageCount, applyMiddlewareRequestHeaders, getHeadersContext, setHeadersAccessPhase } from "next/headers";
 import { NextRequest, NextFetchEvent } from "next/server";
 import { ErrorBoundary, NotFoundBoundary } from "vinext/error-boundary";
 import { LayoutSegmentProvider } from "vinext/layout-segment-context";
@@ -588,6 +588,141 @@ function __proxyRouteRequest(req, markDynamic) {
       return value;
     },
   });
+}
+
+/**
+ * ISR cache wrapper for route handlers. Centralizes cache read, dynamic
+ * detection, cache write, and stale-while-revalidate background regen
+ * into a single function. Uses getDynamicUsageCount() to bracket handler
+ * execution, avoiding the fragile clear-before/read-after pattern.
+ *
+ * Returns { response, dynamicUsed } so the caller can still apply
+ * Cache-Control headers and middleware transforms.
+ */
+async function __handleRouteWithIsrCache(opts) {
+  const {
+    pattern, routeKey, revalidateSeconds, isProduction,
+    isForceDynamic, isGetOrHead, handlerFn, request, params,
+    cleanPathname, url, execCtx, createRegenContext,
+  } = opts;
+
+  const isIsrEligible =
+    isProduction &&
+    revalidateSeconds !== null &&
+    !isForceDynamic &&
+    isGetOrHead;
+
+  // ── 1. Cache read (skip for known-dynamic handlers) ──────────
+  if (isIsrEligible && !__dynamicRouteHandlers.has(pattern)) {
+    try {
+      const cached = await __isrGet(routeKey);
+
+      if (cached && !cached.isStale && cached.value.value && cached.value.value.kind === "APP_ROUTE") {
+        // HIT
+        const cv = cached.value.value;
+        __isrDebug?.("HIT (route)", cleanPathname);
+        const headers = Object.assign({}, cv.headers || {});
+        headers["X-Vinext-Cache"] = "HIT";
+        headers["Cache-Control"] = "s-maxage=" + revalidateSeconds + ", stale-while-revalidate";
+        return {
+          response: new Response(opts.isAutoHead ? null : cv.body, { status: cv.status, headers }),
+          dynamicUsed: false,
+          cacheStatus: "HIT",
+        };
+      }
+
+      if (cached && cached.isStale && cached.value.value && cached.value.value.kind === "APP_ROUTE") {
+        // STALE: serve stale, trigger background regen
+        const sv = cached.value.value;
+        const revalSecs = revalidateSeconds;
+        const revalUrl = request.url;
+        const revalSearchParams = new URLSearchParams(url.searchParams);
+        const revalParams = params;
+
+        __triggerBackgroundRegeneration(routeKey, async function() {
+          const regenCtx = createRegenContext();
+          await _runWithUnifiedCtx(regenCtx, async () => {
+            _ensureFetchPatch();
+            setNavigationContext({ pathname: cleanPathname, searchParams: revalSearchParams, params: revalParams });
+            const syntheticReq = __proxyRouteRequest(
+              new Request(revalUrl, { method: "GET" }),
+              markDynamicUsage,
+            );
+            // Bracket handler execution with counter to isolate its dynamic usage
+            const before = getDynamicUsageCount();
+            const revalResponse = await handlerFn(syntheticReq, { params: revalParams });
+            const regenDynamic = getDynamicUsageCount() > before;
+            setNavigationContext(null);
+            if (regenDynamic) {
+              __dynamicRouteHandlers.add(pattern);
+              __isrDebug?.("route regen skipped (dynamic usage)", cleanPathname);
+              return;
+            }
+            const freshBody = await revalResponse.arrayBuffer();
+            const freshHeaders = {};
+            revalResponse.headers.forEach(function(v, k) {
+              if (k !== "x-vinext-cache" && k !== "cache-control") freshHeaders[k] = v;
+            });
+            const routeTags = __pageCacheTags(cleanPathname, getCollectedFetchTags());
+            await __isrSet(routeKey, { kind: "APP_ROUTE", body: freshBody, status: revalResponse.status, headers: freshHeaders }, revalSecs, routeTags);
+            __isrDebug?.("route regen complete", routeKey);
+          });
+        });
+
+        __isrDebug?.("STALE (route)", cleanPathname);
+        const staleHeaders = Object.assign({}, sv.headers || {});
+        staleHeaders["X-Vinext-Cache"] = "STALE";
+        staleHeaders["Cache-Control"] = "s-maxage=0, stale-while-revalidate";
+        return {
+          response: new Response(opts.isAutoHead ? null : sv.body, { status: sv.status, headers: staleHeaders }),
+          dynamicUsed: false,
+          cacheStatus: "STALE",
+        };
+      }
+    } catch (err) {
+      console.error("[vinext] ISR route cache read error:", err);
+    }
+  }
+
+  // ── 2. Run handler with scoped dynamic detection ─────────────
+  const proxiedRequest = __proxyRouteRequest(request, markDynamicUsage);
+  const before = getDynamicUsageCount();
+  const response = await handlerFn(proxiedRequest, { params });
+  const dynamicUsed = getDynamicUsageCount() > before;
+  const handlerSetCacheControl = response.headers.has("cache-control");
+
+  // ── 3. Remember dynamic handlers ────────────────────────────
+  if (dynamicUsed) {
+    __dynamicRouteHandlers.add(pattern);
+  }
+
+  // ── 4. Apply ISR Cache-Control ──────────────────────────────
+  if (revalidateSeconds !== null && !dynamicUsed && isGetOrHead && !handlerSetCacheControl) {
+    response.headers.set("cache-control", "s-maxage=" + revalidateSeconds + ", stale-while-revalidate");
+  }
+
+  // ── 5. Cache write (MISS) ───────────────────────────────────
+  if (isIsrEligible && !dynamicUsed && !handlerSetCacheControl) {
+    response.headers.set("X-Vinext-Cache", "MISS");
+    const routeClone = response.clone();
+    const routeTags = __pageCacheTags(cleanPathname, getCollectedFetchTags());
+    const writePromise = (async () => {
+      try {
+        const buf = await routeClone.arrayBuffer();
+        const hdrs = {};
+        routeClone.headers.forEach(function(v, k) {
+          if (k !== "x-vinext-cache" && k !== "cache-control") hdrs[k] = v;
+        });
+        await __isrSet(routeKey, { kind: "APP_ROUTE", body: buf, status: routeClone.status, headers: hdrs }, revalidateSeconds, routeTags);
+        __isrDebug?.("route cache written", routeKey);
+      } catch (cacheErr) {
+        console.error("[vinext] ISR route cache write error:", cacheErr);
+      }
+    })();
+    execCtx?.waitUntil(writePromise);
+  }
+
+  return { response, dynamicUsed, cacheStatus: "MISS" };
 }
 
 // Normalize null-prototype objects from matchPattern() into thenable objects
@@ -2318,156 +2453,38 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       isAutoHead = true;
     }
 
-    // ISR cache read for route handlers (production only).
-    // Only GET/HEAD (auto-HEAD) with finite revalidate > 0 are ISR-eligible.
-    // Skip cache read if this handler pattern was previously detected as dynamic
-    // (accessed headers, cookies, or searchParams on a prior request).
-    if (
-      process.env.NODE_ENV === "production" &&
-      revalidateSeconds !== null &&
-      handler.dynamic !== "force-dynamic" &&
-      !__dynamicRouteHandlers.has(handler.pattern) &&
-      (method === "GET" || isAutoHead) &&
-      typeof handlerFn === "function"
-    ) {
-      const __routeKey = __isrRouteKey(cleanPathname);
-      try {
-        const __cached = await __isrGet(__routeKey);
-        if (__cached && !__cached.isStale && __cached.value.value && __cached.value.value.kind === "APP_ROUTE") {
-          // HIT — return cached response immediately
-          const __cv = __cached.value.value;
-          __isrDebug?.("HIT (route)", cleanPathname);
-          setHeadersContext(null);
-          setNavigationContext(null);
-          const __hitHeaders = Object.assign({}, __cv.headers || {});
-          __hitHeaders["X-Vinext-Cache"] = "HIT";
-          __hitHeaders["Cache-Control"] = "s-maxage=" + revalidateSeconds + ", stale-while-revalidate";
-          if (isAutoHead) {
-            return attachRouteHandlerMiddlewareContext(new Response(null, { status: __cv.status, headers: __hitHeaders }));
-          }
-          return attachRouteHandlerMiddlewareContext(new Response(__cv.body, { status: __cv.status, headers: __hitHeaders }));
-        }
-        if (__cached && __cached.isStale && __cached.value.value && __cached.value.value.kind === "APP_ROUTE") {
-          // STALE — serve stale response, trigger background regeneration
-          const __sv = __cached.value.value;
-          const __revalSecs = revalidateSeconds;
-          const __revalHandlerFn = handlerFn;
-          const __revalParams = params;
-          const __revalUrl = request.url;
-          const __revalSearchParams = new URLSearchParams(url.searchParams);
-          __triggerBackgroundRegeneration(__routeKey, async function() {
-            const __revalHeadCtx = { headers: new Headers(), cookies: new Map() };
-            const __revalUCtx = _createUnifiedCtx({
-              headersContext: __revalHeadCtx,
-              executionContext: _getRequestExecutionContext(),
-            });
-            await _runWithUnifiedCtx(__revalUCtx, async () => {
-              _ensureFetchPatch();
-              setNavigationContext({ pathname: cleanPathname, searchParams: __revalSearchParams, params: __revalParams });
-              const __syntheticReq = __proxyRouteRequest(
-                new Request(__revalUrl, { method: "GET" }),
-                markDynamicUsage,
-              );
-              // Clear dynamic usage from regen pipeline setup before running handler
-              consumeDynamicUsage();
-              const __revalResponse = await __revalHandlerFn(__syntheticReq, { params: __revalParams });
-              const __regenDynamic = consumeDynamicUsage();
-              setNavigationContext(null);
-              if (__regenDynamic) {
-                __dynamicRouteHandlers.add(handler.pattern);
-                __isrDebug?.("route regen skipped (dynamic usage)", cleanPathname);
-                return;
-              }
-              const __freshBody = await __revalResponse.arrayBuffer();
-              const __freshHeaders = {};
-              __revalResponse.headers.forEach(function(v, k) {
-                if (k !== "x-vinext-cache" && k !== "cache-control") __freshHeaders[k] = v;
-              });
-              const __routeTags = __pageCacheTags(cleanPathname, getCollectedFetchTags());
-              await __isrSet(__routeKey, { kind: "APP_ROUTE", body: __freshBody, status: __revalResponse.status, headers: __freshHeaders }, __revalSecs, __routeTags);
-              __isrDebug?.("route regen complete", __routeKey);
-            });
-          });
-          __isrDebug?.("STALE (route)", cleanPathname);
-          setHeadersContext(null);
-          setNavigationContext(null);
-          const __staleHeaders = Object.assign({}, __sv.headers || {});
-          __staleHeaders["X-Vinext-Cache"] = "STALE";
-          __staleHeaders["Cache-Control"] = "s-maxage=0, stale-while-revalidate";
-          if (isAutoHead) {
-            return attachRouteHandlerMiddlewareContext(new Response(null, { status: __sv.status, headers: __staleHeaders }));
-          }
-          return attachRouteHandlerMiddlewareContext(new Response(__sv.body, { status: __sv.status, headers: __staleHeaders }));
-        }
-      } catch (__routeCacheErr) {
-        // Cache read failure — fall through to normal handler execution
-        console.error("[vinext] ISR route cache read error:", __routeCacheErr);
-      }
-    }
-
     if (typeof handlerFn === "function") {
       const previousHeadersPhase = setHeadersAccessPhase("route-handler");
-      // Wrap request in a Proxy that detects dynamic API access (headers,
-      // nextUrl.searchParams). This triggers markDynamicUsage() so the ISR
-      // cache write path knows to skip caching for this handler.
-      const __proxiedRequest = __proxyRouteRequest(request, markDynamicUsage);
-      // Clear any dynamic usage flags set by earlier pipeline stages
-      // (middleware, headers context setup) so we only detect dynamic
-      // usage from the handler itself.
-      consumeDynamicUsage();
       try {
-        const response = await handlerFn(__proxiedRequest, { params });
-        const dynamicUsedInHandler = consumeDynamicUsage();
-        const handlerSetCacheControl = response.headers.has("cache-control");
+        const __isrResult = await __handleRouteWithIsrCache({
+          pattern: handler.pattern,
+          routeKey: __isrRouteKey(cleanPathname),
+          revalidateSeconds,
+          isProduction: process.env.NODE_ENV === "production",
+          isForceDynamic: handler.dynamic === "force-dynamic",
+          isGetOrHead: method === "GET" || isAutoHead,
+          isAutoHead,
+          handlerFn,
+          request,
+          params,
+          cleanPathname,
+          url,
+          execCtx: _getRequestExecutionContext(),
+          createRegenContext: () => _createUnifiedCtx({
+            headersContext: { headers: new Headers(), cookies: new Map() },
+            executionContext: _getRequestExecutionContext(),
+          }),
+        });
 
-        // Remember this handler as dynamic so future requests skip cache read.
-        if (dynamicUsedInHandler) {
-          __dynamicRouteHandlers.add(handler.pattern);
+        // HIT/STALE — return cached response directly
+        if (__isrResult.cacheStatus === "HIT" || __isrResult.cacheStatus === "STALE") {
+          setHeadersContext(null);
+          setNavigationContext(null);
+          return attachRouteHandlerMiddlewareContext(__isrResult.response);
         }
 
-        // Apply Cache-Control from route segment config (export const revalidate = N).
-        // Runtime request APIs like headers() / cookies() make GET handlers dynamic,
-        // so only attach ISR headers when the handler stayed static.
-        if (
-          revalidateSeconds !== null &&
-          !dynamicUsedInHandler &&
-          (method === "GET" || isAutoHead) &&
-          !handlerSetCacheControl
-        ) {
-          response.headers.set("cache-control", "s-maxage=" + revalidateSeconds + ", stale-while-revalidate");
-        }
-
-        // ISR cache write for route handlers (production, MISS).
-        // Store the raw handler response before cookie/middleware transforms
-        // (those are request-specific and shouldn't be cached).
-        if (
-          process.env.NODE_ENV === "production" &&
-          revalidateSeconds !== null &&
-          handler.dynamic !== "force-dynamic" &&
-          !dynamicUsedInHandler &&
-          (method === "GET" || isAutoHead) &&
-          !handlerSetCacheControl
-        ) {
-          response.headers.set("X-Vinext-Cache", "MISS");
-          const __routeClone = response.clone();
-          const __routeKey = __isrRouteKey(cleanPathname);
-          const __revalSecs = revalidateSeconds;
-          const __routeTags = __pageCacheTags(cleanPathname, getCollectedFetchTags());
-          const __routeWritePromise = (async () => {
-            try {
-              const __buf = await __routeClone.arrayBuffer();
-              const __hdrs = {};
-              __routeClone.headers.forEach(function(v, k) {
-                if (k !== "x-vinext-cache" && k !== "cache-control") __hdrs[k] = v;
-              });
-              await __isrSet(__routeKey, { kind: "APP_ROUTE", body: __buf, status: __routeClone.status, headers: __hdrs }, __revalSecs, __routeTags);
-              __isrDebug?.("route cache written", __routeKey);
-            } catch (__cacheErr) {
-              console.error("[vinext] ISR route cache write error:", __cacheErr);
-            }
-          })();
-          _getRequestExecutionContext()?.waitUntil(__routeWritePromise);
-        }
+        const response = __isrResult.response;
+        const dynamicUsedInHandler = __isrResult.dynamicUsed;
 
         // Collect any Set-Cookie headers from cookies().set()/delete() calls
         const pendingCookies = getAndClearPendingCookies();
@@ -3427,7 +3444,7 @@ function renderToReadableStream(model, options) {
 }
 import { createElement, Suspense, Fragment } from "react";
 import { setNavigationContext as _setNavigationContextOrig, getNavigationContext as _getNavigationContext } from "next/navigation";
-import { setHeadersContext, headersContextFromRequest, getDraftModeCookieHeader, getAndClearPendingCookies, consumeDynamicUsage, markDynamicUsage, applyMiddlewareRequestHeaders, getHeadersContext, setHeadersAccessPhase } from "next/headers";
+import { setHeadersContext, headersContextFromRequest, getDraftModeCookieHeader, getAndClearPendingCookies, consumeDynamicUsage, markDynamicUsage, getDynamicUsageCount, applyMiddlewareRequestHeaders, getHeadersContext, setHeadersAccessPhase } from "next/headers";
 import { NextRequest, NextFetchEvent } from "next/server";
 import { ErrorBoundary, NotFoundBoundary } from "vinext/error-boundary";
 import { LayoutSegmentProvider } from "vinext/layout-segment-context";
@@ -3641,6 +3658,141 @@ function __proxyRouteRequest(req, markDynamic) {
       return value;
     },
   });
+}
+
+/**
+ * ISR cache wrapper for route handlers. Centralizes cache read, dynamic
+ * detection, cache write, and stale-while-revalidate background regen
+ * into a single function. Uses getDynamicUsageCount() to bracket handler
+ * execution, avoiding the fragile clear-before/read-after pattern.
+ *
+ * Returns { response, dynamicUsed } so the caller can still apply
+ * Cache-Control headers and middleware transforms.
+ */
+async function __handleRouteWithIsrCache(opts) {
+  const {
+    pattern, routeKey, revalidateSeconds, isProduction,
+    isForceDynamic, isGetOrHead, handlerFn, request, params,
+    cleanPathname, url, execCtx, createRegenContext,
+  } = opts;
+
+  const isIsrEligible =
+    isProduction &&
+    revalidateSeconds !== null &&
+    !isForceDynamic &&
+    isGetOrHead;
+
+  // ── 1. Cache read (skip for known-dynamic handlers) ──────────
+  if (isIsrEligible && !__dynamicRouteHandlers.has(pattern)) {
+    try {
+      const cached = await __isrGet(routeKey);
+
+      if (cached && !cached.isStale && cached.value.value && cached.value.value.kind === "APP_ROUTE") {
+        // HIT
+        const cv = cached.value.value;
+        __isrDebug?.("HIT (route)", cleanPathname);
+        const headers = Object.assign({}, cv.headers || {});
+        headers["X-Vinext-Cache"] = "HIT";
+        headers["Cache-Control"] = "s-maxage=" + revalidateSeconds + ", stale-while-revalidate";
+        return {
+          response: new Response(opts.isAutoHead ? null : cv.body, { status: cv.status, headers }),
+          dynamicUsed: false,
+          cacheStatus: "HIT",
+        };
+      }
+
+      if (cached && cached.isStale && cached.value.value && cached.value.value.kind === "APP_ROUTE") {
+        // STALE: serve stale, trigger background regen
+        const sv = cached.value.value;
+        const revalSecs = revalidateSeconds;
+        const revalUrl = request.url;
+        const revalSearchParams = new URLSearchParams(url.searchParams);
+        const revalParams = params;
+
+        __triggerBackgroundRegeneration(routeKey, async function() {
+          const regenCtx = createRegenContext();
+          await _runWithUnifiedCtx(regenCtx, async () => {
+            _ensureFetchPatch();
+            setNavigationContext({ pathname: cleanPathname, searchParams: revalSearchParams, params: revalParams });
+            const syntheticReq = __proxyRouteRequest(
+              new Request(revalUrl, { method: "GET" }),
+              markDynamicUsage,
+            );
+            // Bracket handler execution with counter to isolate its dynamic usage
+            const before = getDynamicUsageCount();
+            const revalResponse = await handlerFn(syntheticReq, { params: revalParams });
+            const regenDynamic = getDynamicUsageCount() > before;
+            setNavigationContext(null);
+            if (regenDynamic) {
+              __dynamicRouteHandlers.add(pattern);
+              __isrDebug?.("route regen skipped (dynamic usage)", cleanPathname);
+              return;
+            }
+            const freshBody = await revalResponse.arrayBuffer();
+            const freshHeaders = {};
+            revalResponse.headers.forEach(function(v, k) {
+              if (k !== "x-vinext-cache" && k !== "cache-control") freshHeaders[k] = v;
+            });
+            const routeTags = __pageCacheTags(cleanPathname, getCollectedFetchTags());
+            await __isrSet(routeKey, { kind: "APP_ROUTE", body: freshBody, status: revalResponse.status, headers: freshHeaders }, revalSecs, routeTags);
+            __isrDebug?.("route regen complete", routeKey);
+          });
+        });
+
+        __isrDebug?.("STALE (route)", cleanPathname);
+        const staleHeaders = Object.assign({}, sv.headers || {});
+        staleHeaders["X-Vinext-Cache"] = "STALE";
+        staleHeaders["Cache-Control"] = "s-maxage=0, stale-while-revalidate";
+        return {
+          response: new Response(opts.isAutoHead ? null : sv.body, { status: sv.status, headers: staleHeaders }),
+          dynamicUsed: false,
+          cacheStatus: "STALE",
+        };
+      }
+    } catch (err) {
+      console.error("[vinext] ISR route cache read error:", err);
+    }
+  }
+
+  // ── 2. Run handler with scoped dynamic detection ─────────────
+  const proxiedRequest = __proxyRouteRequest(request, markDynamicUsage);
+  const before = getDynamicUsageCount();
+  const response = await handlerFn(proxiedRequest, { params });
+  const dynamicUsed = getDynamicUsageCount() > before;
+  const handlerSetCacheControl = response.headers.has("cache-control");
+
+  // ── 3. Remember dynamic handlers ────────────────────────────
+  if (dynamicUsed) {
+    __dynamicRouteHandlers.add(pattern);
+  }
+
+  // ── 4. Apply ISR Cache-Control ──────────────────────────────
+  if (revalidateSeconds !== null && !dynamicUsed && isGetOrHead && !handlerSetCacheControl) {
+    response.headers.set("cache-control", "s-maxage=" + revalidateSeconds + ", stale-while-revalidate");
+  }
+
+  // ── 5. Cache write (MISS) ───────────────────────────────────
+  if (isIsrEligible && !dynamicUsed && !handlerSetCacheControl) {
+    response.headers.set("X-Vinext-Cache", "MISS");
+    const routeClone = response.clone();
+    const routeTags = __pageCacheTags(cleanPathname, getCollectedFetchTags());
+    const writePromise = (async () => {
+      try {
+        const buf = await routeClone.arrayBuffer();
+        const hdrs = {};
+        routeClone.headers.forEach(function(v, k) {
+          if (k !== "x-vinext-cache" && k !== "cache-control") hdrs[k] = v;
+        });
+        await __isrSet(routeKey, { kind: "APP_ROUTE", body: buf, status: routeClone.status, headers: hdrs }, revalidateSeconds, routeTags);
+        __isrDebug?.("route cache written", routeKey);
+      } catch (cacheErr) {
+        console.error("[vinext] ISR route cache write error:", cacheErr);
+      }
+    })();
+    execCtx?.waitUntil(writePromise);
+  }
+
+  return { response, dynamicUsed, cacheStatus: "MISS" };
 }
 
 // Normalize null-prototype objects from matchPattern() into thenable objects
@@ -5374,156 +5526,38 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       isAutoHead = true;
     }
 
-    // ISR cache read for route handlers (production only).
-    // Only GET/HEAD (auto-HEAD) with finite revalidate > 0 are ISR-eligible.
-    // Skip cache read if this handler pattern was previously detected as dynamic
-    // (accessed headers, cookies, or searchParams on a prior request).
-    if (
-      process.env.NODE_ENV === "production" &&
-      revalidateSeconds !== null &&
-      handler.dynamic !== "force-dynamic" &&
-      !__dynamicRouteHandlers.has(handler.pattern) &&
-      (method === "GET" || isAutoHead) &&
-      typeof handlerFn === "function"
-    ) {
-      const __routeKey = __isrRouteKey(cleanPathname);
-      try {
-        const __cached = await __isrGet(__routeKey);
-        if (__cached && !__cached.isStale && __cached.value.value && __cached.value.value.kind === "APP_ROUTE") {
-          // HIT — return cached response immediately
-          const __cv = __cached.value.value;
-          __isrDebug?.("HIT (route)", cleanPathname);
-          setHeadersContext(null);
-          setNavigationContext(null);
-          const __hitHeaders = Object.assign({}, __cv.headers || {});
-          __hitHeaders["X-Vinext-Cache"] = "HIT";
-          __hitHeaders["Cache-Control"] = "s-maxage=" + revalidateSeconds + ", stale-while-revalidate";
-          if (isAutoHead) {
-            return attachRouteHandlerMiddlewareContext(new Response(null, { status: __cv.status, headers: __hitHeaders }));
-          }
-          return attachRouteHandlerMiddlewareContext(new Response(__cv.body, { status: __cv.status, headers: __hitHeaders }));
-        }
-        if (__cached && __cached.isStale && __cached.value.value && __cached.value.value.kind === "APP_ROUTE") {
-          // STALE — serve stale response, trigger background regeneration
-          const __sv = __cached.value.value;
-          const __revalSecs = revalidateSeconds;
-          const __revalHandlerFn = handlerFn;
-          const __revalParams = params;
-          const __revalUrl = request.url;
-          const __revalSearchParams = new URLSearchParams(url.searchParams);
-          __triggerBackgroundRegeneration(__routeKey, async function() {
-            const __revalHeadCtx = { headers: new Headers(), cookies: new Map() };
-            const __revalUCtx = _createUnifiedCtx({
-              headersContext: __revalHeadCtx,
-              executionContext: _getRequestExecutionContext(),
-            });
-            await _runWithUnifiedCtx(__revalUCtx, async () => {
-              _ensureFetchPatch();
-              setNavigationContext({ pathname: cleanPathname, searchParams: __revalSearchParams, params: __revalParams });
-              const __syntheticReq = __proxyRouteRequest(
-                new Request(__revalUrl, { method: "GET" }),
-                markDynamicUsage,
-              );
-              // Clear dynamic usage from regen pipeline setup before running handler
-              consumeDynamicUsage();
-              const __revalResponse = await __revalHandlerFn(__syntheticReq, { params: __revalParams });
-              const __regenDynamic = consumeDynamicUsage();
-              setNavigationContext(null);
-              if (__regenDynamic) {
-                __dynamicRouteHandlers.add(handler.pattern);
-                __isrDebug?.("route regen skipped (dynamic usage)", cleanPathname);
-                return;
-              }
-              const __freshBody = await __revalResponse.arrayBuffer();
-              const __freshHeaders = {};
-              __revalResponse.headers.forEach(function(v, k) {
-                if (k !== "x-vinext-cache" && k !== "cache-control") __freshHeaders[k] = v;
-              });
-              const __routeTags = __pageCacheTags(cleanPathname, getCollectedFetchTags());
-              await __isrSet(__routeKey, { kind: "APP_ROUTE", body: __freshBody, status: __revalResponse.status, headers: __freshHeaders }, __revalSecs, __routeTags);
-              __isrDebug?.("route regen complete", __routeKey);
-            });
-          });
-          __isrDebug?.("STALE (route)", cleanPathname);
-          setHeadersContext(null);
-          setNavigationContext(null);
-          const __staleHeaders = Object.assign({}, __sv.headers || {});
-          __staleHeaders["X-Vinext-Cache"] = "STALE";
-          __staleHeaders["Cache-Control"] = "s-maxage=0, stale-while-revalidate";
-          if (isAutoHead) {
-            return attachRouteHandlerMiddlewareContext(new Response(null, { status: __sv.status, headers: __staleHeaders }));
-          }
-          return attachRouteHandlerMiddlewareContext(new Response(__sv.body, { status: __sv.status, headers: __staleHeaders }));
-        }
-      } catch (__routeCacheErr) {
-        // Cache read failure — fall through to normal handler execution
-        console.error("[vinext] ISR route cache read error:", __routeCacheErr);
-      }
-    }
-
     if (typeof handlerFn === "function") {
       const previousHeadersPhase = setHeadersAccessPhase("route-handler");
-      // Wrap request in a Proxy that detects dynamic API access (headers,
-      // nextUrl.searchParams). This triggers markDynamicUsage() so the ISR
-      // cache write path knows to skip caching for this handler.
-      const __proxiedRequest = __proxyRouteRequest(request, markDynamicUsage);
-      // Clear any dynamic usage flags set by earlier pipeline stages
-      // (middleware, headers context setup) so we only detect dynamic
-      // usage from the handler itself.
-      consumeDynamicUsage();
       try {
-        const response = await handlerFn(__proxiedRequest, { params });
-        const dynamicUsedInHandler = consumeDynamicUsage();
-        const handlerSetCacheControl = response.headers.has("cache-control");
+        const __isrResult = await __handleRouteWithIsrCache({
+          pattern: handler.pattern,
+          routeKey: __isrRouteKey(cleanPathname),
+          revalidateSeconds,
+          isProduction: process.env.NODE_ENV === "production",
+          isForceDynamic: handler.dynamic === "force-dynamic",
+          isGetOrHead: method === "GET" || isAutoHead,
+          isAutoHead,
+          handlerFn,
+          request,
+          params,
+          cleanPathname,
+          url,
+          execCtx: _getRequestExecutionContext(),
+          createRegenContext: () => _createUnifiedCtx({
+            headersContext: { headers: new Headers(), cookies: new Map() },
+            executionContext: _getRequestExecutionContext(),
+          }),
+        });
 
-        // Remember this handler as dynamic so future requests skip cache read.
-        if (dynamicUsedInHandler) {
-          __dynamicRouteHandlers.add(handler.pattern);
+        // HIT/STALE — return cached response directly
+        if (__isrResult.cacheStatus === "HIT" || __isrResult.cacheStatus === "STALE") {
+          setHeadersContext(null);
+          setNavigationContext(null);
+          return attachRouteHandlerMiddlewareContext(__isrResult.response);
         }
 
-        // Apply Cache-Control from route segment config (export const revalidate = N).
-        // Runtime request APIs like headers() / cookies() make GET handlers dynamic,
-        // so only attach ISR headers when the handler stayed static.
-        if (
-          revalidateSeconds !== null &&
-          !dynamicUsedInHandler &&
-          (method === "GET" || isAutoHead) &&
-          !handlerSetCacheControl
-        ) {
-          response.headers.set("cache-control", "s-maxage=" + revalidateSeconds + ", stale-while-revalidate");
-        }
-
-        // ISR cache write for route handlers (production, MISS).
-        // Store the raw handler response before cookie/middleware transforms
-        // (those are request-specific and shouldn't be cached).
-        if (
-          process.env.NODE_ENV === "production" &&
-          revalidateSeconds !== null &&
-          handler.dynamic !== "force-dynamic" &&
-          !dynamicUsedInHandler &&
-          (method === "GET" || isAutoHead) &&
-          !handlerSetCacheControl
-        ) {
-          response.headers.set("X-Vinext-Cache", "MISS");
-          const __routeClone = response.clone();
-          const __routeKey = __isrRouteKey(cleanPathname);
-          const __revalSecs = revalidateSeconds;
-          const __routeTags = __pageCacheTags(cleanPathname, getCollectedFetchTags());
-          const __routeWritePromise = (async () => {
-            try {
-              const __buf = await __routeClone.arrayBuffer();
-              const __hdrs = {};
-              __routeClone.headers.forEach(function(v, k) {
-                if (k !== "x-vinext-cache" && k !== "cache-control") __hdrs[k] = v;
-              });
-              await __isrSet(__routeKey, { kind: "APP_ROUTE", body: __buf, status: __routeClone.status, headers: __hdrs }, __revalSecs, __routeTags);
-              __isrDebug?.("route cache written", __routeKey);
-            } catch (__cacheErr) {
-              console.error("[vinext] ISR route cache write error:", __cacheErr);
-            }
-          })();
-          _getRequestExecutionContext()?.waitUntil(__routeWritePromise);
-        }
+        const response = __isrResult.response;
+        const dynamicUsedInHandler = __isrResult.dynamicUsed;
 
         // Collect any Set-Cookie headers from cookies().set()/delete() calls
         const pendingCookies = getAndClearPendingCookies();
@@ -6483,7 +6517,7 @@ function renderToReadableStream(model, options) {
 }
 import { createElement, Suspense, Fragment } from "react";
 import { setNavigationContext as _setNavigationContextOrig, getNavigationContext as _getNavigationContext } from "next/navigation";
-import { setHeadersContext, headersContextFromRequest, getDraftModeCookieHeader, getAndClearPendingCookies, consumeDynamicUsage, markDynamicUsage, applyMiddlewareRequestHeaders, getHeadersContext, setHeadersAccessPhase } from "next/headers";
+import { setHeadersContext, headersContextFromRequest, getDraftModeCookieHeader, getAndClearPendingCookies, consumeDynamicUsage, markDynamicUsage, getDynamicUsageCount, applyMiddlewareRequestHeaders, getHeadersContext, setHeadersAccessPhase } from "next/headers";
 import { NextRequest, NextFetchEvent } from "next/server";
 import { ErrorBoundary, NotFoundBoundary } from "vinext/error-boundary";
 import { LayoutSegmentProvider } from "vinext/layout-segment-context";
@@ -6697,6 +6731,141 @@ function __proxyRouteRequest(req, markDynamic) {
       return value;
     },
   });
+}
+
+/**
+ * ISR cache wrapper for route handlers. Centralizes cache read, dynamic
+ * detection, cache write, and stale-while-revalidate background regen
+ * into a single function. Uses getDynamicUsageCount() to bracket handler
+ * execution, avoiding the fragile clear-before/read-after pattern.
+ *
+ * Returns { response, dynamicUsed } so the caller can still apply
+ * Cache-Control headers and middleware transforms.
+ */
+async function __handleRouteWithIsrCache(opts) {
+  const {
+    pattern, routeKey, revalidateSeconds, isProduction,
+    isForceDynamic, isGetOrHead, handlerFn, request, params,
+    cleanPathname, url, execCtx, createRegenContext,
+  } = opts;
+
+  const isIsrEligible =
+    isProduction &&
+    revalidateSeconds !== null &&
+    !isForceDynamic &&
+    isGetOrHead;
+
+  // ── 1. Cache read (skip for known-dynamic handlers) ──────────
+  if (isIsrEligible && !__dynamicRouteHandlers.has(pattern)) {
+    try {
+      const cached = await __isrGet(routeKey);
+
+      if (cached && !cached.isStale && cached.value.value && cached.value.value.kind === "APP_ROUTE") {
+        // HIT
+        const cv = cached.value.value;
+        __isrDebug?.("HIT (route)", cleanPathname);
+        const headers = Object.assign({}, cv.headers || {});
+        headers["X-Vinext-Cache"] = "HIT";
+        headers["Cache-Control"] = "s-maxage=" + revalidateSeconds + ", stale-while-revalidate";
+        return {
+          response: new Response(opts.isAutoHead ? null : cv.body, { status: cv.status, headers }),
+          dynamicUsed: false,
+          cacheStatus: "HIT",
+        };
+      }
+
+      if (cached && cached.isStale && cached.value.value && cached.value.value.kind === "APP_ROUTE") {
+        // STALE: serve stale, trigger background regen
+        const sv = cached.value.value;
+        const revalSecs = revalidateSeconds;
+        const revalUrl = request.url;
+        const revalSearchParams = new URLSearchParams(url.searchParams);
+        const revalParams = params;
+
+        __triggerBackgroundRegeneration(routeKey, async function() {
+          const regenCtx = createRegenContext();
+          await _runWithUnifiedCtx(regenCtx, async () => {
+            _ensureFetchPatch();
+            setNavigationContext({ pathname: cleanPathname, searchParams: revalSearchParams, params: revalParams });
+            const syntheticReq = __proxyRouteRequest(
+              new Request(revalUrl, { method: "GET" }),
+              markDynamicUsage,
+            );
+            // Bracket handler execution with counter to isolate its dynamic usage
+            const before = getDynamicUsageCount();
+            const revalResponse = await handlerFn(syntheticReq, { params: revalParams });
+            const regenDynamic = getDynamicUsageCount() > before;
+            setNavigationContext(null);
+            if (regenDynamic) {
+              __dynamicRouteHandlers.add(pattern);
+              __isrDebug?.("route regen skipped (dynamic usage)", cleanPathname);
+              return;
+            }
+            const freshBody = await revalResponse.arrayBuffer();
+            const freshHeaders = {};
+            revalResponse.headers.forEach(function(v, k) {
+              if (k !== "x-vinext-cache" && k !== "cache-control") freshHeaders[k] = v;
+            });
+            const routeTags = __pageCacheTags(cleanPathname, getCollectedFetchTags());
+            await __isrSet(routeKey, { kind: "APP_ROUTE", body: freshBody, status: revalResponse.status, headers: freshHeaders }, revalSecs, routeTags);
+            __isrDebug?.("route regen complete", routeKey);
+          });
+        });
+
+        __isrDebug?.("STALE (route)", cleanPathname);
+        const staleHeaders = Object.assign({}, sv.headers || {});
+        staleHeaders["X-Vinext-Cache"] = "STALE";
+        staleHeaders["Cache-Control"] = "s-maxage=0, stale-while-revalidate";
+        return {
+          response: new Response(opts.isAutoHead ? null : sv.body, { status: sv.status, headers: staleHeaders }),
+          dynamicUsed: false,
+          cacheStatus: "STALE",
+        };
+      }
+    } catch (err) {
+      console.error("[vinext] ISR route cache read error:", err);
+    }
+  }
+
+  // ── 2. Run handler with scoped dynamic detection ─────────────
+  const proxiedRequest = __proxyRouteRequest(request, markDynamicUsage);
+  const before = getDynamicUsageCount();
+  const response = await handlerFn(proxiedRequest, { params });
+  const dynamicUsed = getDynamicUsageCount() > before;
+  const handlerSetCacheControl = response.headers.has("cache-control");
+
+  // ── 3. Remember dynamic handlers ────────────────────────────
+  if (dynamicUsed) {
+    __dynamicRouteHandlers.add(pattern);
+  }
+
+  // ── 4. Apply ISR Cache-Control ──────────────────────────────
+  if (revalidateSeconds !== null && !dynamicUsed && isGetOrHead && !handlerSetCacheControl) {
+    response.headers.set("cache-control", "s-maxage=" + revalidateSeconds + ", stale-while-revalidate");
+  }
+
+  // ── 5. Cache write (MISS) ───────────────────────────────────
+  if (isIsrEligible && !dynamicUsed && !handlerSetCacheControl) {
+    response.headers.set("X-Vinext-Cache", "MISS");
+    const routeClone = response.clone();
+    const routeTags = __pageCacheTags(cleanPathname, getCollectedFetchTags());
+    const writePromise = (async () => {
+      try {
+        const buf = await routeClone.arrayBuffer();
+        const hdrs = {};
+        routeClone.headers.forEach(function(v, k) {
+          if (k !== "x-vinext-cache" && k !== "cache-control") hdrs[k] = v;
+        });
+        await __isrSet(routeKey, { kind: "APP_ROUTE", body: buf, status: routeClone.status, headers: hdrs }, revalidateSeconds, routeTags);
+        __isrDebug?.("route cache written", routeKey);
+      } catch (cacheErr) {
+        console.error("[vinext] ISR route cache write error:", cacheErr);
+      }
+    })();
+    execCtx?.waitUntil(writePromise);
+  }
+
+  return { response, dynamicUsed, cacheStatus: "MISS" };
 }
 
 // Normalize null-prototype objects from matchPattern() into thenable objects
@@ -8457,156 +8626,38 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       isAutoHead = true;
     }
 
-    // ISR cache read for route handlers (production only).
-    // Only GET/HEAD (auto-HEAD) with finite revalidate > 0 are ISR-eligible.
-    // Skip cache read if this handler pattern was previously detected as dynamic
-    // (accessed headers, cookies, or searchParams on a prior request).
-    if (
-      process.env.NODE_ENV === "production" &&
-      revalidateSeconds !== null &&
-      handler.dynamic !== "force-dynamic" &&
-      !__dynamicRouteHandlers.has(handler.pattern) &&
-      (method === "GET" || isAutoHead) &&
-      typeof handlerFn === "function"
-    ) {
-      const __routeKey = __isrRouteKey(cleanPathname);
-      try {
-        const __cached = await __isrGet(__routeKey);
-        if (__cached && !__cached.isStale && __cached.value.value && __cached.value.value.kind === "APP_ROUTE") {
-          // HIT — return cached response immediately
-          const __cv = __cached.value.value;
-          __isrDebug?.("HIT (route)", cleanPathname);
-          setHeadersContext(null);
-          setNavigationContext(null);
-          const __hitHeaders = Object.assign({}, __cv.headers || {});
-          __hitHeaders["X-Vinext-Cache"] = "HIT";
-          __hitHeaders["Cache-Control"] = "s-maxage=" + revalidateSeconds + ", stale-while-revalidate";
-          if (isAutoHead) {
-            return attachRouteHandlerMiddlewareContext(new Response(null, { status: __cv.status, headers: __hitHeaders }));
-          }
-          return attachRouteHandlerMiddlewareContext(new Response(__cv.body, { status: __cv.status, headers: __hitHeaders }));
-        }
-        if (__cached && __cached.isStale && __cached.value.value && __cached.value.value.kind === "APP_ROUTE") {
-          // STALE — serve stale response, trigger background regeneration
-          const __sv = __cached.value.value;
-          const __revalSecs = revalidateSeconds;
-          const __revalHandlerFn = handlerFn;
-          const __revalParams = params;
-          const __revalUrl = request.url;
-          const __revalSearchParams = new URLSearchParams(url.searchParams);
-          __triggerBackgroundRegeneration(__routeKey, async function() {
-            const __revalHeadCtx = { headers: new Headers(), cookies: new Map() };
-            const __revalUCtx = _createUnifiedCtx({
-              headersContext: __revalHeadCtx,
-              executionContext: _getRequestExecutionContext(),
-            });
-            await _runWithUnifiedCtx(__revalUCtx, async () => {
-              _ensureFetchPatch();
-              setNavigationContext({ pathname: cleanPathname, searchParams: __revalSearchParams, params: __revalParams });
-              const __syntheticReq = __proxyRouteRequest(
-                new Request(__revalUrl, { method: "GET" }),
-                markDynamicUsage,
-              );
-              // Clear dynamic usage from regen pipeline setup before running handler
-              consumeDynamicUsage();
-              const __revalResponse = await __revalHandlerFn(__syntheticReq, { params: __revalParams });
-              const __regenDynamic = consumeDynamicUsage();
-              setNavigationContext(null);
-              if (__regenDynamic) {
-                __dynamicRouteHandlers.add(handler.pattern);
-                __isrDebug?.("route regen skipped (dynamic usage)", cleanPathname);
-                return;
-              }
-              const __freshBody = await __revalResponse.arrayBuffer();
-              const __freshHeaders = {};
-              __revalResponse.headers.forEach(function(v, k) {
-                if (k !== "x-vinext-cache" && k !== "cache-control") __freshHeaders[k] = v;
-              });
-              const __routeTags = __pageCacheTags(cleanPathname, getCollectedFetchTags());
-              await __isrSet(__routeKey, { kind: "APP_ROUTE", body: __freshBody, status: __revalResponse.status, headers: __freshHeaders }, __revalSecs, __routeTags);
-              __isrDebug?.("route regen complete", __routeKey);
-            });
-          });
-          __isrDebug?.("STALE (route)", cleanPathname);
-          setHeadersContext(null);
-          setNavigationContext(null);
-          const __staleHeaders = Object.assign({}, __sv.headers || {});
-          __staleHeaders["X-Vinext-Cache"] = "STALE";
-          __staleHeaders["Cache-Control"] = "s-maxage=0, stale-while-revalidate";
-          if (isAutoHead) {
-            return attachRouteHandlerMiddlewareContext(new Response(null, { status: __sv.status, headers: __staleHeaders }));
-          }
-          return attachRouteHandlerMiddlewareContext(new Response(__sv.body, { status: __sv.status, headers: __staleHeaders }));
-        }
-      } catch (__routeCacheErr) {
-        // Cache read failure — fall through to normal handler execution
-        console.error("[vinext] ISR route cache read error:", __routeCacheErr);
-      }
-    }
-
     if (typeof handlerFn === "function") {
       const previousHeadersPhase = setHeadersAccessPhase("route-handler");
-      // Wrap request in a Proxy that detects dynamic API access (headers,
-      // nextUrl.searchParams). This triggers markDynamicUsage() so the ISR
-      // cache write path knows to skip caching for this handler.
-      const __proxiedRequest = __proxyRouteRequest(request, markDynamicUsage);
-      // Clear any dynamic usage flags set by earlier pipeline stages
-      // (middleware, headers context setup) so we only detect dynamic
-      // usage from the handler itself.
-      consumeDynamicUsage();
       try {
-        const response = await handlerFn(__proxiedRequest, { params });
-        const dynamicUsedInHandler = consumeDynamicUsage();
-        const handlerSetCacheControl = response.headers.has("cache-control");
+        const __isrResult = await __handleRouteWithIsrCache({
+          pattern: handler.pattern,
+          routeKey: __isrRouteKey(cleanPathname),
+          revalidateSeconds,
+          isProduction: process.env.NODE_ENV === "production",
+          isForceDynamic: handler.dynamic === "force-dynamic",
+          isGetOrHead: method === "GET" || isAutoHead,
+          isAutoHead,
+          handlerFn,
+          request,
+          params,
+          cleanPathname,
+          url,
+          execCtx: _getRequestExecutionContext(),
+          createRegenContext: () => _createUnifiedCtx({
+            headersContext: { headers: new Headers(), cookies: new Map() },
+            executionContext: _getRequestExecutionContext(),
+          }),
+        });
 
-        // Remember this handler as dynamic so future requests skip cache read.
-        if (dynamicUsedInHandler) {
-          __dynamicRouteHandlers.add(handler.pattern);
+        // HIT/STALE — return cached response directly
+        if (__isrResult.cacheStatus === "HIT" || __isrResult.cacheStatus === "STALE") {
+          setHeadersContext(null);
+          setNavigationContext(null);
+          return attachRouteHandlerMiddlewareContext(__isrResult.response);
         }
 
-        // Apply Cache-Control from route segment config (export const revalidate = N).
-        // Runtime request APIs like headers() / cookies() make GET handlers dynamic,
-        // so only attach ISR headers when the handler stayed static.
-        if (
-          revalidateSeconds !== null &&
-          !dynamicUsedInHandler &&
-          (method === "GET" || isAutoHead) &&
-          !handlerSetCacheControl
-        ) {
-          response.headers.set("cache-control", "s-maxage=" + revalidateSeconds + ", stale-while-revalidate");
-        }
-
-        // ISR cache write for route handlers (production, MISS).
-        // Store the raw handler response before cookie/middleware transforms
-        // (those are request-specific and shouldn't be cached).
-        if (
-          process.env.NODE_ENV === "production" &&
-          revalidateSeconds !== null &&
-          handler.dynamic !== "force-dynamic" &&
-          !dynamicUsedInHandler &&
-          (method === "GET" || isAutoHead) &&
-          !handlerSetCacheControl
-        ) {
-          response.headers.set("X-Vinext-Cache", "MISS");
-          const __routeClone = response.clone();
-          const __routeKey = __isrRouteKey(cleanPathname);
-          const __revalSecs = revalidateSeconds;
-          const __routeTags = __pageCacheTags(cleanPathname, getCollectedFetchTags());
-          const __routeWritePromise = (async () => {
-            try {
-              const __buf = await __routeClone.arrayBuffer();
-              const __hdrs = {};
-              __routeClone.headers.forEach(function(v, k) {
-                if (k !== "x-vinext-cache" && k !== "cache-control") __hdrs[k] = v;
-              });
-              await __isrSet(__routeKey, { kind: "APP_ROUTE", body: __buf, status: __routeClone.status, headers: __hdrs }, __revalSecs, __routeTags);
-              __isrDebug?.("route cache written", __routeKey);
-            } catch (__cacheErr) {
-              console.error("[vinext] ISR route cache write error:", __cacheErr);
-            }
-          })();
-          _getRequestExecutionContext()?.waitUntil(__routeWritePromise);
-        }
+        const response = __isrResult.response;
+        const dynamicUsedInHandler = __isrResult.dynamicUsed;
 
         // Collect any Set-Cookie headers from cookies().set()/delete() calls
         const pendingCookies = getAndClearPendingCookies();
@@ -9574,7 +9625,7 @@ function renderToReadableStream(model, options) {
 }
 import { createElement, Suspense, Fragment } from "react";
 import { setNavigationContext as _setNavigationContextOrig, getNavigationContext as _getNavigationContext } from "next/navigation";
-import { setHeadersContext, headersContextFromRequest, getDraftModeCookieHeader, getAndClearPendingCookies, consumeDynamicUsage, markDynamicUsage, applyMiddlewareRequestHeaders, getHeadersContext, setHeadersAccessPhase } from "next/headers";
+import { setHeadersContext, headersContextFromRequest, getDraftModeCookieHeader, getAndClearPendingCookies, consumeDynamicUsage, markDynamicUsage, getDynamicUsageCount, applyMiddlewareRequestHeaders, getHeadersContext, setHeadersAccessPhase } from "next/headers";
 import { NextRequest, NextFetchEvent } from "next/server";
 import { ErrorBoundary, NotFoundBoundary } from "vinext/error-boundary";
 import { LayoutSegmentProvider } from "vinext/layout-segment-context";
@@ -9788,6 +9839,141 @@ function __proxyRouteRequest(req, markDynamic) {
       return value;
     },
   });
+}
+
+/**
+ * ISR cache wrapper for route handlers. Centralizes cache read, dynamic
+ * detection, cache write, and stale-while-revalidate background regen
+ * into a single function. Uses getDynamicUsageCount() to bracket handler
+ * execution, avoiding the fragile clear-before/read-after pattern.
+ *
+ * Returns { response, dynamicUsed } so the caller can still apply
+ * Cache-Control headers and middleware transforms.
+ */
+async function __handleRouteWithIsrCache(opts) {
+  const {
+    pattern, routeKey, revalidateSeconds, isProduction,
+    isForceDynamic, isGetOrHead, handlerFn, request, params,
+    cleanPathname, url, execCtx, createRegenContext,
+  } = opts;
+
+  const isIsrEligible =
+    isProduction &&
+    revalidateSeconds !== null &&
+    !isForceDynamic &&
+    isGetOrHead;
+
+  // ── 1. Cache read (skip for known-dynamic handlers) ──────────
+  if (isIsrEligible && !__dynamicRouteHandlers.has(pattern)) {
+    try {
+      const cached = await __isrGet(routeKey);
+
+      if (cached && !cached.isStale && cached.value.value && cached.value.value.kind === "APP_ROUTE") {
+        // HIT
+        const cv = cached.value.value;
+        __isrDebug?.("HIT (route)", cleanPathname);
+        const headers = Object.assign({}, cv.headers || {});
+        headers["X-Vinext-Cache"] = "HIT";
+        headers["Cache-Control"] = "s-maxage=" + revalidateSeconds + ", stale-while-revalidate";
+        return {
+          response: new Response(opts.isAutoHead ? null : cv.body, { status: cv.status, headers }),
+          dynamicUsed: false,
+          cacheStatus: "HIT",
+        };
+      }
+
+      if (cached && cached.isStale && cached.value.value && cached.value.value.kind === "APP_ROUTE") {
+        // STALE: serve stale, trigger background regen
+        const sv = cached.value.value;
+        const revalSecs = revalidateSeconds;
+        const revalUrl = request.url;
+        const revalSearchParams = new URLSearchParams(url.searchParams);
+        const revalParams = params;
+
+        __triggerBackgroundRegeneration(routeKey, async function() {
+          const regenCtx = createRegenContext();
+          await _runWithUnifiedCtx(regenCtx, async () => {
+            _ensureFetchPatch();
+            setNavigationContext({ pathname: cleanPathname, searchParams: revalSearchParams, params: revalParams });
+            const syntheticReq = __proxyRouteRequest(
+              new Request(revalUrl, { method: "GET" }),
+              markDynamicUsage,
+            );
+            // Bracket handler execution with counter to isolate its dynamic usage
+            const before = getDynamicUsageCount();
+            const revalResponse = await handlerFn(syntheticReq, { params: revalParams });
+            const regenDynamic = getDynamicUsageCount() > before;
+            setNavigationContext(null);
+            if (regenDynamic) {
+              __dynamicRouteHandlers.add(pattern);
+              __isrDebug?.("route regen skipped (dynamic usage)", cleanPathname);
+              return;
+            }
+            const freshBody = await revalResponse.arrayBuffer();
+            const freshHeaders = {};
+            revalResponse.headers.forEach(function(v, k) {
+              if (k !== "x-vinext-cache" && k !== "cache-control") freshHeaders[k] = v;
+            });
+            const routeTags = __pageCacheTags(cleanPathname, getCollectedFetchTags());
+            await __isrSet(routeKey, { kind: "APP_ROUTE", body: freshBody, status: revalResponse.status, headers: freshHeaders }, revalSecs, routeTags);
+            __isrDebug?.("route regen complete", routeKey);
+          });
+        });
+
+        __isrDebug?.("STALE (route)", cleanPathname);
+        const staleHeaders = Object.assign({}, sv.headers || {});
+        staleHeaders["X-Vinext-Cache"] = "STALE";
+        staleHeaders["Cache-Control"] = "s-maxage=0, stale-while-revalidate";
+        return {
+          response: new Response(opts.isAutoHead ? null : sv.body, { status: sv.status, headers: staleHeaders }),
+          dynamicUsed: false,
+          cacheStatus: "STALE",
+        };
+      }
+    } catch (err) {
+      console.error("[vinext] ISR route cache read error:", err);
+    }
+  }
+
+  // ── 2. Run handler with scoped dynamic detection ─────────────
+  const proxiedRequest = __proxyRouteRequest(request, markDynamicUsage);
+  const before = getDynamicUsageCount();
+  const response = await handlerFn(proxiedRequest, { params });
+  const dynamicUsed = getDynamicUsageCount() > before;
+  const handlerSetCacheControl = response.headers.has("cache-control");
+
+  // ── 3. Remember dynamic handlers ────────────────────────────
+  if (dynamicUsed) {
+    __dynamicRouteHandlers.add(pattern);
+  }
+
+  // ── 4. Apply ISR Cache-Control ──────────────────────────────
+  if (revalidateSeconds !== null && !dynamicUsed && isGetOrHead && !handlerSetCacheControl) {
+    response.headers.set("cache-control", "s-maxage=" + revalidateSeconds + ", stale-while-revalidate");
+  }
+
+  // ── 5. Cache write (MISS) ───────────────────────────────────
+  if (isIsrEligible && !dynamicUsed && !handlerSetCacheControl) {
+    response.headers.set("X-Vinext-Cache", "MISS");
+    const routeClone = response.clone();
+    const routeTags = __pageCacheTags(cleanPathname, getCollectedFetchTags());
+    const writePromise = (async () => {
+      try {
+        const buf = await routeClone.arrayBuffer();
+        const hdrs = {};
+        routeClone.headers.forEach(function(v, k) {
+          if (k !== "x-vinext-cache" && k !== "cache-control") hdrs[k] = v;
+        });
+        await __isrSet(routeKey, { kind: "APP_ROUTE", body: buf, status: routeClone.status, headers: hdrs }, revalidateSeconds, routeTags);
+        __isrDebug?.("route cache written", routeKey);
+      } catch (cacheErr) {
+        console.error("[vinext] ISR route cache write error:", cacheErr);
+      }
+    })();
+    execCtx?.waitUntil(writePromise);
+  }
+
+  return { response, dynamicUsed, cacheStatus: "MISS" };
 }
 
 // Normalize null-prototype objects from matchPattern() into thenable objects
@@ -11551,156 +11737,38 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       isAutoHead = true;
     }
 
-    // ISR cache read for route handlers (production only).
-    // Only GET/HEAD (auto-HEAD) with finite revalidate > 0 are ISR-eligible.
-    // Skip cache read if this handler pattern was previously detected as dynamic
-    // (accessed headers, cookies, or searchParams on a prior request).
-    if (
-      process.env.NODE_ENV === "production" &&
-      revalidateSeconds !== null &&
-      handler.dynamic !== "force-dynamic" &&
-      !__dynamicRouteHandlers.has(handler.pattern) &&
-      (method === "GET" || isAutoHead) &&
-      typeof handlerFn === "function"
-    ) {
-      const __routeKey = __isrRouteKey(cleanPathname);
-      try {
-        const __cached = await __isrGet(__routeKey);
-        if (__cached && !__cached.isStale && __cached.value.value && __cached.value.value.kind === "APP_ROUTE") {
-          // HIT — return cached response immediately
-          const __cv = __cached.value.value;
-          __isrDebug?.("HIT (route)", cleanPathname);
-          setHeadersContext(null);
-          setNavigationContext(null);
-          const __hitHeaders = Object.assign({}, __cv.headers || {});
-          __hitHeaders["X-Vinext-Cache"] = "HIT";
-          __hitHeaders["Cache-Control"] = "s-maxage=" + revalidateSeconds + ", stale-while-revalidate";
-          if (isAutoHead) {
-            return attachRouteHandlerMiddlewareContext(new Response(null, { status: __cv.status, headers: __hitHeaders }));
-          }
-          return attachRouteHandlerMiddlewareContext(new Response(__cv.body, { status: __cv.status, headers: __hitHeaders }));
-        }
-        if (__cached && __cached.isStale && __cached.value.value && __cached.value.value.kind === "APP_ROUTE") {
-          // STALE — serve stale response, trigger background regeneration
-          const __sv = __cached.value.value;
-          const __revalSecs = revalidateSeconds;
-          const __revalHandlerFn = handlerFn;
-          const __revalParams = params;
-          const __revalUrl = request.url;
-          const __revalSearchParams = new URLSearchParams(url.searchParams);
-          __triggerBackgroundRegeneration(__routeKey, async function() {
-            const __revalHeadCtx = { headers: new Headers(), cookies: new Map() };
-            const __revalUCtx = _createUnifiedCtx({
-              headersContext: __revalHeadCtx,
-              executionContext: _getRequestExecutionContext(),
-            });
-            await _runWithUnifiedCtx(__revalUCtx, async () => {
-              _ensureFetchPatch();
-              setNavigationContext({ pathname: cleanPathname, searchParams: __revalSearchParams, params: __revalParams });
-              const __syntheticReq = __proxyRouteRequest(
-                new Request(__revalUrl, { method: "GET" }),
-                markDynamicUsage,
-              );
-              // Clear dynamic usage from regen pipeline setup before running handler
-              consumeDynamicUsage();
-              const __revalResponse = await __revalHandlerFn(__syntheticReq, { params: __revalParams });
-              const __regenDynamic = consumeDynamicUsage();
-              setNavigationContext(null);
-              if (__regenDynamic) {
-                __dynamicRouteHandlers.add(handler.pattern);
-                __isrDebug?.("route regen skipped (dynamic usage)", cleanPathname);
-                return;
-              }
-              const __freshBody = await __revalResponse.arrayBuffer();
-              const __freshHeaders = {};
-              __revalResponse.headers.forEach(function(v, k) {
-                if (k !== "x-vinext-cache" && k !== "cache-control") __freshHeaders[k] = v;
-              });
-              const __routeTags = __pageCacheTags(cleanPathname, getCollectedFetchTags());
-              await __isrSet(__routeKey, { kind: "APP_ROUTE", body: __freshBody, status: __revalResponse.status, headers: __freshHeaders }, __revalSecs, __routeTags);
-              __isrDebug?.("route regen complete", __routeKey);
-            });
-          });
-          __isrDebug?.("STALE (route)", cleanPathname);
-          setHeadersContext(null);
-          setNavigationContext(null);
-          const __staleHeaders = Object.assign({}, __sv.headers || {});
-          __staleHeaders["X-Vinext-Cache"] = "STALE";
-          __staleHeaders["Cache-Control"] = "s-maxage=0, stale-while-revalidate";
-          if (isAutoHead) {
-            return attachRouteHandlerMiddlewareContext(new Response(null, { status: __sv.status, headers: __staleHeaders }));
-          }
-          return attachRouteHandlerMiddlewareContext(new Response(__sv.body, { status: __sv.status, headers: __staleHeaders }));
-        }
-      } catch (__routeCacheErr) {
-        // Cache read failure — fall through to normal handler execution
-        console.error("[vinext] ISR route cache read error:", __routeCacheErr);
-      }
-    }
-
     if (typeof handlerFn === "function") {
       const previousHeadersPhase = setHeadersAccessPhase("route-handler");
-      // Wrap request in a Proxy that detects dynamic API access (headers,
-      // nextUrl.searchParams). This triggers markDynamicUsage() so the ISR
-      // cache write path knows to skip caching for this handler.
-      const __proxiedRequest = __proxyRouteRequest(request, markDynamicUsage);
-      // Clear any dynamic usage flags set by earlier pipeline stages
-      // (middleware, headers context setup) so we only detect dynamic
-      // usage from the handler itself.
-      consumeDynamicUsage();
       try {
-        const response = await handlerFn(__proxiedRequest, { params });
-        const dynamicUsedInHandler = consumeDynamicUsage();
-        const handlerSetCacheControl = response.headers.has("cache-control");
+        const __isrResult = await __handleRouteWithIsrCache({
+          pattern: handler.pattern,
+          routeKey: __isrRouteKey(cleanPathname),
+          revalidateSeconds,
+          isProduction: process.env.NODE_ENV === "production",
+          isForceDynamic: handler.dynamic === "force-dynamic",
+          isGetOrHead: method === "GET" || isAutoHead,
+          isAutoHead,
+          handlerFn,
+          request,
+          params,
+          cleanPathname,
+          url,
+          execCtx: _getRequestExecutionContext(),
+          createRegenContext: () => _createUnifiedCtx({
+            headersContext: { headers: new Headers(), cookies: new Map() },
+            executionContext: _getRequestExecutionContext(),
+          }),
+        });
 
-        // Remember this handler as dynamic so future requests skip cache read.
-        if (dynamicUsedInHandler) {
-          __dynamicRouteHandlers.add(handler.pattern);
+        // HIT/STALE — return cached response directly
+        if (__isrResult.cacheStatus === "HIT" || __isrResult.cacheStatus === "STALE") {
+          setHeadersContext(null);
+          setNavigationContext(null);
+          return attachRouteHandlerMiddlewareContext(__isrResult.response);
         }
 
-        // Apply Cache-Control from route segment config (export const revalidate = N).
-        // Runtime request APIs like headers() / cookies() make GET handlers dynamic,
-        // so only attach ISR headers when the handler stayed static.
-        if (
-          revalidateSeconds !== null &&
-          !dynamicUsedInHandler &&
-          (method === "GET" || isAutoHead) &&
-          !handlerSetCacheControl
-        ) {
-          response.headers.set("cache-control", "s-maxage=" + revalidateSeconds + ", stale-while-revalidate");
-        }
-
-        // ISR cache write for route handlers (production, MISS).
-        // Store the raw handler response before cookie/middleware transforms
-        // (those are request-specific and shouldn't be cached).
-        if (
-          process.env.NODE_ENV === "production" &&
-          revalidateSeconds !== null &&
-          handler.dynamic !== "force-dynamic" &&
-          !dynamicUsedInHandler &&
-          (method === "GET" || isAutoHead) &&
-          !handlerSetCacheControl
-        ) {
-          response.headers.set("X-Vinext-Cache", "MISS");
-          const __routeClone = response.clone();
-          const __routeKey = __isrRouteKey(cleanPathname);
-          const __revalSecs = revalidateSeconds;
-          const __routeTags = __pageCacheTags(cleanPathname, getCollectedFetchTags());
-          const __routeWritePromise = (async () => {
-            try {
-              const __buf = await __routeClone.arrayBuffer();
-              const __hdrs = {};
-              __routeClone.headers.forEach(function(v, k) {
-                if (k !== "x-vinext-cache" && k !== "cache-control") __hdrs[k] = v;
-              });
-              await __isrSet(__routeKey, { kind: "APP_ROUTE", body: __buf, status: __routeClone.status, headers: __hdrs }, __revalSecs, __routeTags);
-              __isrDebug?.("route cache written", __routeKey);
-            } catch (__cacheErr) {
-              console.error("[vinext] ISR route cache write error:", __cacheErr);
-            }
-          })();
-          _getRequestExecutionContext()?.waitUntil(__routeWritePromise);
-        }
+        const response = __isrResult.response;
+        const dynamicUsedInHandler = __isrResult.dynamicUsed;
 
         // Collect any Set-Cookie headers from cookies().set()/delete() calls
         const pendingCookies = getAndClearPendingCookies();
@@ -12660,7 +12728,7 @@ function renderToReadableStream(model, options) {
 }
 import { createElement, Suspense, Fragment } from "react";
 import { setNavigationContext as _setNavigationContextOrig, getNavigationContext as _getNavigationContext } from "next/navigation";
-import { setHeadersContext, headersContextFromRequest, getDraftModeCookieHeader, getAndClearPendingCookies, consumeDynamicUsage, markDynamicUsage, applyMiddlewareRequestHeaders, getHeadersContext, setHeadersAccessPhase } from "next/headers";
+import { setHeadersContext, headersContextFromRequest, getDraftModeCookieHeader, getAndClearPendingCookies, consumeDynamicUsage, markDynamicUsage, getDynamicUsageCount, applyMiddlewareRequestHeaders, getHeadersContext, setHeadersAccessPhase } from "next/headers";
 import { NextRequest, NextFetchEvent } from "next/server";
 import { ErrorBoundary, NotFoundBoundary } from "vinext/error-boundary";
 import { LayoutSegmentProvider } from "vinext/layout-segment-context";
@@ -12874,6 +12942,141 @@ function __proxyRouteRequest(req, markDynamic) {
       return value;
     },
   });
+}
+
+/**
+ * ISR cache wrapper for route handlers. Centralizes cache read, dynamic
+ * detection, cache write, and stale-while-revalidate background regen
+ * into a single function. Uses getDynamicUsageCount() to bracket handler
+ * execution, avoiding the fragile clear-before/read-after pattern.
+ *
+ * Returns { response, dynamicUsed } so the caller can still apply
+ * Cache-Control headers and middleware transforms.
+ */
+async function __handleRouteWithIsrCache(opts) {
+  const {
+    pattern, routeKey, revalidateSeconds, isProduction,
+    isForceDynamic, isGetOrHead, handlerFn, request, params,
+    cleanPathname, url, execCtx, createRegenContext,
+  } = opts;
+
+  const isIsrEligible =
+    isProduction &&
+    revalidateSeconds !== null &&
+    !isForceDynamic &&
+    isGetOrHead;
+
+  // ── 1. Cache read (skip for known-dynamic handlers) ──────────
+  if (isIsrEligible && !__dynamicRouteHandlers.has(pattern)) {
+    try {
+      const cached = await __isrGet(routeKey);
+
+      if (cached && !cached.isStale && cached.value.value && cached.value.value.kind === "APP_ROUTE") {
+        // HIT
+        const cv = cached.value.value;
+        __isrDebug?.("HIT (route)", cleanPathname);
+        const headers = Object.assign({}, cv.headers || {});
+        headers["X-Vinext-Cache"] = "HIT";
+        headers["Cache-Control"] = "s-maxage=" + revalidateSeconds + ", stale-while-revalidate";
+        return {
+          response: new Response(opts.isAutoHead ? null : cv.body, { status: cv.status, headers }),
+          dynamicUsed: false,
+          cacheStatus: "HIT",
+        };
+      }
+
+      if (cached && cached.isStale && cached.value.value && cached.value.value.kind === "APP_ROUTE") {
+        // STALE: serve stale, trigger background regen
+        const sv = cached.value.value;
+        const revalSecs = revalidateSeconds;
+        const revalUrl = request.url;
+        const revalSearchParams = new URLSearchParams(url.searchParams);
+        const revalParams = params;
+
+        __triggerBackgroundRegeneration(routeKey, async function() {
+          const regenCtx = createRegenContext();
+          await _runWithUnifiedCtx(regenCtx, async () => {
+            _ensureFetchPatch();
+            setNavigationContext({ pathname: cleanPathname, searchParams: revalSearchParams, params: revalParams });
+            const syntheticReq = __proxyRouteRequest(
+              new Request(revalUrl, { method: "GET" }),
+              markDynamicUsage,
+            );
+            // Bracket handler execution with counter to isolate its dynamic usage
+            const before = getDynamicUsageCount();
+            const revalResponse = await handlerFn(syntheticReq, { params: revalParams });
+            const regenDynamic = getDynamicUsageCount() > before;
+            setNavigationContext(null);
+            if (regenDynamic) {
+              __dynamicRouteHandlers.add(pattern);
+              __isrDebug?.("route regen skipped (dynamic usage)", cleanPathname);
+              return;
+            }
+            const freshBody = await revalResponse.arrayBuffer();
+            const freshHeaders = {};
+            revalResponse.headers.forEach(function(v, k) {
+              if (k !== "x-vinext-cache" && k !== "cache-control") freshHeaders[k] = v;
+            });
+            const routeTags = __pageCacheTags(cleanPathname, getCollectedFetchTags());
+            await __isrSet(routeKey, { kind: "APP_ROUTE", body: freshBody, status: revalResponse.status, headers: freshHeaders }, revalSecs, routeTags);
+            __isrDebug?.("route regen complete", routeKey);
+          });
+        });
+
+        __isrDebug?.("STALE (route)", cleanPathname);
+        const staleHeaders = Object.assign({}, sv.headers || {});
+        staleHeaders["X-Vinext-Cache"] = "STALE";
+        staleHeaders["Cache-Control"] = "s-maxage=0, stale-while-revalidate";
+        return {
+          response: new Response(opts.isAutoHead ? null : sv.body, { status: sv.status, headers: staleHeaders }),
+          dynamicUsed: false,
+          cacheStatus: "STALE",
+        };
+      }
+    } catch (err) {
+      console.error("[vinext] ISR route cache read error:", err);
+    }
+  }
+
+  // ── 2. Run handler with scoped dynamic detection ─────────────
+  const proxiedRequest = __proxyRouteRequest(request, markDynamicUsage);
+  const before = getDynamicUsageCount();
+  const response = await handlerFn(proxiedRequest, { params });
+  const dynamicUsed = getDynamicUsageCount() > before;
+  const handlerSetCacheControl = response.headers.has("cache-control");
+
+  // ── 3. Remember dynamic handlers ────────────────────────────
+  if (dynamicUsed) {
+    __dynamicRouteHandlers.add(pattern);
+  }
+
+  // ── 4. Apply ISR Cache-Control ──────────────────────────────
+  if (revalidateSeconds !== null && !dynamicUsed && isGetOrHead && !handlerSetCacheControl) {
+    response.headers.set("cache-control", "s-maxage=" + revalidateSeconds + ", stale-while-revalidate");
+  }
+
+  // ── 5. Cache write (MISS) ───────────────────────────────────
+  if (isIsrEligible && !dynamicUsed && !handlerSetCacheControl) {
+    response.headers.set("X-Vinext-Cache", "MISS");
+    const routeClone = response.clone();
+    const routeTags = __pageCacheTags(cleanPathname, getCollectedFetchTags());
+    const writePromise = (async () => {
+      try {
+        const buf = await routeClone.arrayBuffer();
+        const hdrs = {};
+        routeClone.headers.forEach(function(v, k) {
+          if (k !== "x-vinext-cache" && k !== "cache-control") hdrs[k] = v;
+        });
+        await __isrSet(routeKey, { kind: "APP_ROUTE", body: buf, status: routeClone.status, headers: hdrs }, revalidateSeconds, routeTags);
+        __isrDebug?.("route cache written", routeKey);
+      } catch (cacheErr) {
+        console.error("[vinext] ISR route cache write error:", cacheErr);
+      }
+    })();
+    execCtx?.waitUntil(writePromise);
+  }
+
+  return { response, dynamicUsed, cacheStatus: "MISS" };
 }
 
 // Normalize null-prototype objects from matchPattern() into thenable objects
@@ -14611,156 +14814,38 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       isAutoHead = true;
     }
 
-    // ISR cache read for route handlers (production only).
-    // Only GET/HEAD (auto-HEAD) with finite revalidate > 0 are ISR-eligible.
-    // Skip cache read if this handler pattern was previously detected as dynamic
-    // (accessed headers, cookies, or searchParams on a prior request).
-    if (
-      process.env.NODE_ENV === "production" &&
-      revalidateSeconds !== null &&
-      handler.dynamic !== "force-dynamic" &&
-      !__dynamicRouteHandlers.has(handler.pattern) &&
-      (method === "GET" || isAutoHead) &&
-      typeof handlerFn === "function"
-    ) {
-      const __routeKey = __isrRouteKey(cleanPathname);
-      try {
-        const __cached = await __isrGet(__routeKey);
-        if (__cached && !__cached.isStale && __cached.value.value && __cached.value.value.kind === "APP_ROUTE") {
-          // HIT — return cached response immediately
-          const __cv = __cached.value.value;
-          __isrDebug?.("HIT (route)", cleanPathname);
-          setHeadersContext(null);
-          setNavigationContext(null);
-          const __hitHeaders = Object.assign({}, __cv.headers || {});
-          __hitHeaders["X-Vinext-Cache"] = "HIT";
-          __hitHeaders["Cache-Control"] = "s-maxage=" + revalidateSeconds + ", stale-while-revalidate";
-          if (isAutoHead) {
-            return attachRouteHandlerMiddlewareContext(new Response(null, { status: __cv.status, headers: __hitHeaders }));
-          }
-          return attachRouteHandlerMiddlewareContext(new Response(__cv.body, { status: __cv.status, headers: __hitHeaders }));
-        }
-        if (__cached && __cached.isStale && __cached.value.value && __cached.value.value.kind === "APP_ROUTE") {
-          // STALE — serve stale response, trigger background regeneration
-          const __sv = __cached.value.value;
-          const __revalSecs = revalidateSeconds;
-          const __revalHandlerFn = handlerFn;
-          const __revalParams = params;
-          const __revalUrl = request.url;
-          const __revalSearchParams = new URLSearchParams(url.searchParams);
-          __triggerBackgroundRegeneration(__routeKey, async function() {
-            const __revalHeadCtx = { headers: new Headers(), cookies: new Map() };
-            const __revalUCtx = _createUnifiedCtx({
-              headersContext: __revalHeadCtx,
-              executionContext: _getRequestExecutionContext(),
-            });
-            await _runWithUnifiedCtx(__revalUCtx, async () => {
-              _ensureFetchPatch();
-              setNavigationContext({ pathname: cleanPathname, searchParams: __revalSearchParams, params: __revalParams });
-              const __syntheticReq = __proxyRouteRequest(
-                new Request(__revalUrl, { method: "GET" }),
-                markDynamicUsage,
-              );
-              // Clear dynamic usage from regen pipeline setup before running handler
-              consumeDynamicUsage();
-              const __revalResponse = await __revalHandlerFn(__syntheticReq, { params: __revalParams });
-              const __regenDynamic = consumeDynamicUsage();
-              setNavigationContext(null);
-              if (__regenDynamic) {
-                __dynamicRouteHandlers.add(handler.pattern);
-                __isrDebug?.("route regen skipped (dynamic usage)", cleanPathname);
-                return;
-              }
-              const __freshBody = await __revalResponse.arrayBuffer();
-              const __freshHeaders = {};
-              __revalResponse.headers.forEach(function(v, k) {
-                if (k !== "x-vinext-cache" && k !== "cache-control") __freshHeaders[k] = v;
-              });
-              const __routeTags = __pageCacheTags(cleanPathname, getCollectedFetchTags());
-              await __isrSet(__routeKey, { kind: "APP_ROUTE", body: __freshBody, status: __revalResponse.status, headers: __freshHeaders }, __revalSecs, __routeTags);
-              __isrDebug?.("route regen complete", __routeKey);
-            });
-          });
-          __isrDebug?.("STALE (route)", cleanPathname);
-          setHeadersContext(null);
-          setNavigationContext(null);
-          const __staleHeaders = Object.assign({}, __sv.headers || {});
-          __staleHeaders["X-Vinext-Cache"] = "STALE";
-          __staleHeaders["Cache-Control"] = "s-maxage=0, stale-while-revalidate";
-          if (isAutoHead) {
-            return attachRouteHandlerMiddlewareContext(new Response(null, { status: __sv.status, headers: __staleHeaders }));
-          }
-          return attachRouteHandlerMiddlewareContext(new Response(__sv.body, { status: __sv.status, headers: __staleHeaders }));
-        }
-      } catch (__routeCacheErr) {
-        // Cache read failure — fall through to normal handler execution
-        console.error("[vinext] ISR route cache read error:", __routeCacheErr);
-      }
-    }
-
     if (typeof handlerFn === "function") {
       const previousHeadersPhase = setHeadersAccessPhase("route-handler");
-      // Wrap request in a Proxy that detects dynamic API access (headers,
-      // nextUrl.searchParams). This triggers markDynamicUsage() so the ISR
-      // cache write path knows to skip caching for this handler.
-      const __proxiedRequest = __proxyRouteRequest(request, markDynamicUsage);
-      // Clear any dynamic usage flags set by earlier pipeline stages
-      // (middleware, headers context setup) so we only detect dynamic
-      // usage from the handler itself.
-      consumeDynamicUsage();
       try {
-        const response = await handlerFn(__proxiedRequest, { params });
-        const dynamicUsedInHandler = consumeDynamicUsage();
-        const handlerSetCacheControl = response.headers.has("cache-control");
+        const __isrResult = await __handleRouteWithIsrCache({
+          pattern: handler.pattern,
+          routeKey: __isrRouteKey(cleanPathname),
+          revalidateSeconds,
+          isProduction: process.env.NODE_ENV === "production",
+          isForceDynamic: handler.dynamic === "force-dynamic",
+          isGetOrHead: method === "GET" || isAutoHead,
+          isAutoHead,
+          handlerFn,
+          request,
+          params,
+          cleanPathname,
+          url,
+          execCtx: _getRequestExecutionContext(),
+          createRegenContext: () => _createUnifiedCtx({
+            headersContext: { headers: new Headers(), cookies: new Map() },
+            executionContext: _getRequestExecutionContext(),
+          }),
+        });
 
-        // Remember this handler as dynamic so future requests skip cache read.
-        if (dynamicUsedInHandler) {
-          __dynamicRouteHandlers.add(handler.pattern);
+        // HIT/STALE — return cached response directly
+        if (__isrResult.cacheStatus === "HIT" || __isrResult.cacheStatus === "STALE") {
+          setHeadersContext(null);
+          setNavigationContext(null);
+          return attachRouteHandlerMiddlewareContext(__isrResult.response);
         }
 
-        // Apply Cache-Control from route segment config (export const revalidate = N).
-        // Runtime request APIs like headers() / cookies() make GET handlers dynamic,
-        // so only attach ISR headers when the handler stayed static.
-        if (
-          revalidateSeconds !== null &&
-          !dynamicUsedInHandler &&
-          (method === "GET" || isAutoHead) &&
-          !handlerSetCacheControl
-        ) {
-          response.headers.set("cache-control", "s-maxage=" + revalidateSeconds + ", stale-while-revalidate");
-        }
-
-        // ISR cache write for route handlers (production, MISS).
-        // Store the raw handler response before cookie/middleware transforms
-        // (those are request-specific and shouldn't be cached).
-        if (
-          process.env.NODE_ENV === "production" &&
-          revalidateSeconds !== null &&
-          handler.dynamic !== "force-dynamic" &&
-          !dynamicUsedInHandler &&
-          (method === "GET" || isAutoHead) &&
-          !handlerSetCacheControl
-        ) {
-          response.headers.set("X-Vinext-Cache", "MISS");
-          const __routeClone = response.clone();
-          const __routeKey = __isrRouteKey(cleanPathname);
-          const __revalSecs = revalidateSeconds;
-          const __routeTags = __pageCacheTags(cleanPathname, getCollectedFetchTags());
-          const __routeWritePromise = (async () => {
-            try {
-              const __buf = await __routeClone.arrayBuffer();
-              const __hdrs = {};
-              __routeClone.headers.forEach(function(v, k) {
-                if (k !== "x-vinext-cache" && k !== "cache-control") __hdrs[k] = v;
-              });
-              await __isrSet(__routeKey, { kind: "APP_ROUTE", body: __buf, status: __routeClone.status, headers: __hdrs }, __revalSecs, __routeTags);
-              __isrDebug?.("route cache written", __routeKey);
-            } catch (__cacheErr) {
-              console.error("[vinext] ISR route cache write error:", __cacheErr);
-            }
-          })();
-          _getRequestExecutionContext()?.waitUntil(__routeWritePromise);
-        }
+        const response = __isrResult.response;
+        const dynamicUsedInHandler = __isrResult.dynamicUsed;
 
         // Collect any Set-Cookie headers from cookies().set()/delete() calls
         const pendingCookies = getAndClearPendingCookies();
@@ -15720,7 +15805,7 @@ function renderToReadableStream(model, options) {
 }
 import { createElement, Suspense, Fragment } from "react";
 import { setNavigationContext as _setNavigationContextOrig, getNavigationContext as _getNavigationContext } from "next/navigation";
-import { setHeadersContext, headersContextFromRequest, getDraftModeCookieHeader, getAndClearPendingCookies, consumeDynamicUsage, markDynamicUsage, applyMiddlewareRequestHeaders, getHeadersContext, setHeadersAccessPhase } from "next/headers";
+import { setHeadersContext, headersContextFromRequest, getDraftModeCookieHeader, getAndClearPendingCookies, consumeDynamicUsage, markDynamicUsage, getDynamicUsageCount, applyMiddlewareRequestHeaders, getHeadersContext, setHeadersAccessPhase } from "next/headers";
 import { NextRequest, NextFetchEvent } from "next/server";
 import { ErrorBoundary, NotFoundBoundary } from "vinext/error-boundary";
 import { LayoutSegmentProvider } from "vinext/layout-segment-context";
@@ -15934,6 +16019,141 @@ function __proxyRouteRequest(req, markDynamic) {
       return value;
     },
   });
+}
+
+/**
+ * ISR cache wrapper for route handlers. Centralizes cache read, dynamic
+ * detection, cache write, and stale-while-revalidate background regen
+ * into a single function. Uses getDynamicUsageCount() to bracket handler
+ * execution, avoiding the fragile clear-before/read-after pattern.
+ *
+ * Returns { response, dynamicUsed } so the caller can still apply
+ * Cache-Control headers and middleware transforms.
+ */
+async function __handleRouteWithIsrCache(opts) {
+  const {
+    pattern, routeKey, revalidateSeconds, isProduction,
+    isForceDynamic, isGetOrHead, handlerFn, request, params,
+    cleanPathname, url, execCtx, createRegenContext,
+  } = opts;
+
+  const isIsrEligible =
+    isProduction &&
+    revalidateSeconds !== null &&
+    !isForceDynamic &&
+    isGetOrHead;
+
+  // ── 1. Cache read (skip for known-dynamic handlers) ──────────
+  if (isIsrEligible && !__dynamicRouteHandlers.has(pattern)) {
+    try {
+      const cached = await __isrGet(routeKey);
+
+      if (cached && !cached.isStale && cached.value.value && cached.value.value.kind === "APP_ROUTE") {
+        // HIT
+        const cv = cached.value.value;
+        __isrDebug?.("HIT (route)", cleanPathname);
+        const headers = Object.assign({}, cv.headers || {});
+        headers["X-Vinext-Cache"] = "HIT";
+        headers["Cache-Control"] = "s-maxage=" + revalidateSeconds + ", stale-while-revalidate";
+        return {
+          response: new Response(opts.isAutoHead ? null : cv.body, { status: cv.status, headers }),
+          dynamicUsed: false,
+          cacheStatus: "HIT",
+        };
+      }
+
+      if (cached && cached.isStale && cached.value.value && cached.value.value.kind === "APP_ROUTE") {
+        // STALE: serve stale, trigger background regen
+        const sv = cached.value.value;
+        const revalSecs = revalidateSeconds;
+        const revalUrl = request.url;
+        const revalSearchParams = new URLSearchParams(url.searchParams);
+        const revalParams = params;
+
+        __triggerBackgroundRegeneration(routeKey, async function() {
+          const regenCtx = createRegenContext();
+          await _runWithUnifiedCtx(regenCtx, async () => {
+            _ensureFetchPatch();
+            setNavigationContext({ pathname: cleanPathname, searchParams: revalSearchParams, params: revalParams });
+            const syntheticReq = __proxyRouteRequest(
+              new Request(revalUrl, { method: "GET" }),
+              markDynamicUsage,
+            );
+            // Bracket handler execution with counter to isolate its dynamic usage
+            const before = getDynamicUsageCount();
+            const revalResponse = await handlerFn(syntheticReq, { params: revalParams });
+            const regenDynamic = getDynamicUsageCount() > before;
+            setNavigationContext(null);
+            if (regenDynamic) {
+              __dynamicRouteHandlers.add(pattern);
+              __isrDebug?.("route regen skipped (dynamic usage)", cleanPathname);
+              return;
+            }
+            const freshBody = await revalResponse.arrayBuffer();
+            const freshHeaders = {};
+            revalResponse.headers.forEach(function(v, k) {
+              if (k !== "x-vinext-cache" && k !== "cache-control") freshHeaders[k] = v;
+            });
+            const routeTags = __pageCacheTags(cleanPathname, getCollectedFetchTags());
+            await __isrSet(routeKey, { kind: "APP_ROUTE", body: freshBody, status: revalResponse.status, headers: freshHeaders }, revalSecs, routeTags);
+            __isrDebug?.("route regen complete", routeKey);
+          });
+        });
+
+        __isrDebug?.("STALE (route)", cleanPathname);
+        const staleHeaders = Object.assign({}, sv.headers || {});
+        staleHeaders["X-Vinext-Cache"] = "STALE";
+        staleHeaders["Cache-Control"] = "s-maxage=0, stale-while-revalidate";
+        return {
+          response: new Response(opts.isAutoHead ? null : sv.body, { status: sv.status, headers: staleHeaders }),
+          dynamicUsed: false,
+          cacheStatus: "STALE",
+        };
+      }
+    } catch (err) {
+      console.error("[vinext] ISR route cache read error:", err);
+    }
+  }
+
+  // ── 2. Run handler with scoped dynamic detection ─────────────
+  const proxiedRequest = __proxyRouteRequest(request, markDynamicUsage);
+  const before = getDynamicUsageCount();
+  const response = await handlerFn(proxiedRequest, { params });
+  const dynamicUsed = getDynamicUsageCount() > before;
+  const handlerSetCacheControl = response.headers.has("cache-control");
+
+  // ── 3. Remember dynamic handlers ────────────────────────────
+  if (dynamicUsed) {
+    __dynamicRouteHandlers.add(pattern);
+  }
+
+  // ── 4. Apply ISR Cache-Control ──────────────────────────────
+  if (revalidateSeconds !== null && !dynamicUsed && isGetOrHead && !handlerSetCacheControl) {
+    response.headers.set("cache-control", "s-maxage=" + revalidateSeconds + ", stale-while-revalidate");
+  }
+
+  // ── 5. Cache write (MISS) ───────────────────────────────────
+  if (isIsrEligible && !dynamicUsed && !handlerSetCacheControl) {
+    response.headers.set("X-Vinext-Cache", "MISS");
+    const routeClone = response.clone();
+    const routeTags = __pageCacheTags(cleanPathname, getCollectedFetchTags());
+    const writePromise = (async () => {
+      try {
+        const buf = await routeClone.arrayBuffer();
+        const hdrs = {};
+        routeClone.headers.forEach(function(v, k) {
+          if (k !== "x-vinext-cache" && k !== "cache-control") hdrs[k] = v;
+        });
+        await __isrSet(routeKey, { kind: "APP_ROUTE", body: buf, status: routeClone.status, headers: hdrs }, revalidateSeconds, routeTags);
+        __isrDebug?.("route cache written", routeKey);
+      } catch (cacheErr) {
+        console.error("[vinext] ISR route cache write error:", cacheErr);
+      }
+    })();
+    execCtx?.waitUntil(writePromise);
+  }
+
+  return { response, dynamicUsed, cacheStatus: "MISS" };
 }
 
 // Normalize null-prototype objects from matchPattern() into thenable objects
@@ -18024,156 +18244,38 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       isAutoHead = true;
     }
 
-    // ISR cache read for route handlers (production only).
-    // Only GET/HEAD (auto-HEAD) with finite revalidate > 0 are ISR-eligible.
-    // Skip cache read if this handler pattern was previously detected as dynamic
-    // (accessed headers, cookies, or searchParams on a prior request).
-    if (
-      process.env.NODE_ENV === "production" &&
-      revalidateSeconds !== null &&
-      handler.dynamic !== "force-dynamic" &&
-      !__dynamicRouteHandlers.has(handler.pattern) &&
-      (method === "GET" || isAutoHead) &&
-      typeof handlerFn === "function"
-    ) {
-      const __routeKey = __isrRouteKey(cleanPathname);
-      try {
-        const __cached = await __isrGet(__routeKey);
-        if (__cached && !__cached.isStale && __cached.value.value && __cached.value.value.kind === "APP_ROUTE") {
-          // HIT — return cached response immediately
-          const __cv = __cached.value.value;
-          __isrDebug?.("HIT (route)", cleanPathname);
-          setHeadersContext(null);
-          setNavigationContext(null);
-          const __hitHeaders = Object.assign({}, __cv.headers || {});
-          __hitHeaders["X-Vinext-Cache"] = "HIT";
-          __hitHeaders["Cache-Control"] = "s-maxage=" + revalidateSeconds + ", stale-while-revalidate";
-          if (isAutoHead) {
-            return attachRouteHandlerMiddlewareContext(new Response(null, { status: __cv.status, headers: __hitHeaders }));
-          }
-          return attachRouteHandlerMiddlewareContext(new Response(__cv.body, { status: __cv.status, headers: __hitHeaders }));
-        }
-        if (__cached && __cached.isStale && __cached.value.value && __cached.value.value.kind === "APP_ROUTE") {
-          // STALE — serve stale response, trigger background regeneration
-          const __sv = __cached.value.value;
-          const __revalSecs = revalidateSeconds;
-          const __revalHandlerFn = handlerFn;
-          const __revalParams = params;
-          const __revalUrl = request.url;
-          const __revalSearchParams = new URLSearchParams(url.searchParams);
-          __triggerBackgroundRegeneration(__routeKey, async function() {
-            const __revalHeadCtx = { headers: new Headers(), cookies: new Map() };
-            const __revalUCtx = _createUnifiedCtx({
-              headersContext: __revalHeadCtx,
-              executionContext: _getRequestExecutionContext(),
-            });
-            await _runWithUnifiedCtx(__revalUCtx, async () => {
-              _ensureFetchPatch();
-              setNavigationContext({ pathname: cleanPathname, searchParams: __revalSearchParams, params: __revalParams });
-              const __syntheticReq = __proxyRouteRequest(
-                new Request(__revalUrl, { method: "GET" }),
-                markDynamicUsage,
-              );
-              // Clear dynamic usage from regen pipeline setup before running handler
-              consumeDynamicUsage();
-              const __revalResponse = await __revalHandlerFn(__syntheticReq, { params: __revalParams });
-              const __regenDynamic = consumeDynamicUsage();
-              setNavigationContext(null);
-              if (__regenDynamic) {
-                __dynamicRouteHandlers.add(handler.pattern);
-                __isrDebug?.("route regen skipped (dynamic usage)", cleanPathname);
-                return;
-              }
-              const __freshBody = await __revalResponse.arrayBuffer();
-              const __freshHeaders = {};
-              __revalResponse.headers.forEach(function(v, k) {
-                if (k !== "x-vinext-cache" && k !== "cache-control") __freshHeaders[k] = v;
-              });
-              const __routeTags = __pageCacheTags(cleanPathname, getCollectedFetchTags());
-              await __isrSet(__routeKey, { kind: "APP_ROUTE", body: __freshBody, status: __revalResponse.status, headers: __freshHeaders }, __revalSecs, __routeTags);
-              __isrDebug?.("route regen complete", __routeKey);
-            });
-          });
-          __isrDebug?.("STALE (route)", cleanPathname);
-          setHeadersContext(null);
-          setNavigationContext(null);
-          const __staleHeaders = Object.assign({}, __sv.headers || {});
-          __staleHeaders["X-Vinext-Cache"] = "STALE";
-          __staleHeaders["Cache-Control"] = "s-maxage=0, stale-while-revalidate";
-          if (isAutoHead) {
-            return attachRouteHandlerMiddlewareContext(new Response(null, { status: __sv.status, headers: __staleHeaders }));
-          }
-          return attachRouteHandlerMiddlewareContext(new Response(__sv.body, { status: __sv.status, headers: __staleHeaders }));
-        }
-      } catch (__routeCacheErr) {
-        // Cache read failure — fall through to normal handler execution
-        console.error("[vinext] ISR route cache read error:", __routeCacheErr);
-      }
-    }
-
     if (typeof handlerFn === "function") {
       const previousHeadersPhase = setHeadersAccessPhase("route-handler");
-      // Wrap request in a Proxy that detects dynamic API access (headers,
-      // nextUrl.searchParams). This triggers markDynamicUsage() so the ISR
-      // cache write path knows to skip caching for this handler.
-      const __proxiedRequest = __proxyRouteRequest(request, markDynamicUsage);
-      // Clear any dynamic usage flags set by earlier pipeline stages
-      // (middleware, headers context setup) so we only detect dynamic
-      // usage from the handler itself.
-      consumeDynamicUsage();
       try {
-        const response = await handlerFn(__proxiedRequest, { params });
-        const dynamicUsedInHandler = consumeDynamicUsage();
-        const handlerSetCacheControl = response.headers.has("cache-control");
+        const __isrResult = await __handleRouteWithIsrCache({
+          pattern: handler.pattern,
+          routeKey: __isrRouteKey(cleanPathname),
+          revalidateSeconds,
+          isProduction: process.env.NODE_ENV === "production",
+          isForceDynamic: handler.dynamic === "force-dynamic",
+          isGetOrHead: method === "GET" || isAutoHead,
+          isAutoHead,
+          handlerFn,
+          request,
+          params,
+          cleanPathname,
+          url,
+          execCtx: _getRequestExecutionContext(),
+          createRegenContext: () => _createUnifiedCtx({
+            headersContext: { headers: new Headers(), cookies: new Map() },
+            executionContext: _getRequestExecutionContext(),
+          }),
+        });
 
-        // Remember this handler as dynamic so future requests skip cache read.
-        if (dynamicUsedInHandler) {
-          __dynamicRouteHandlers.add(handler.pattern);
+        // HIT/STALE — return cached response directly
+        if (__isrResult.cacheStatus === "HIT" || __isrResult.cacheStatus === "STALE") {
+          setHeadersContext(null);
+          setNavigationContext(null);
+          return attachRouteHandlerMiddlewareContext(__isrResult.response);
         }
 
-        // Apply Cache-Control from route segment config (export const revalidate = N).
-        // Runtime request APIs like headers() / cookies() make GET handlers dynamic,
-        // so only attach ISR headers when the handler stayed static.
-        if (
-          revalidateSeconds !== null &&
-          !dynamicUsedInHandler &&
-          (method === "GET" || isAutoHead) &&
-          !handlerSetCacheControl
-        ) {
-          response.headers.set("cache-control", "s-maxage=" + revalidateSeconds + ", stale-while-revalidate");
-        }
-
-        // ISR cache write for route handlers (production, MISS).
-        // Store the raw handler response before cookie/middleware transforms
-        // (those are request-specific and shouldn't be cached).
-        if (
-          process.env.NODE_ENV === "production" &&
-          revalidateSeconds !== null &&
-          handler.dynamic !== "force-dynamic" &&
-          !dynamicUsedInHandler &&
-          (method === "GET" || isAutoHead) &&
-          !handlerSetCacheControl
-        ) {
-          response.headers.set("X-Vinext-Cache", "MISS");
-          const __routeClone = response.clone();
-          const __routeKey = __isrRouteKey(cleanPathname);
-          const __revalSecs = revalidateSeconds;
-          const __routeTags = __pageCacheTags(cleanPathname, getCollectedFetchTags());
-          const __routeWritePromise = (async () => {
-            try {
-              const __buf = await __routeClone.arrayBuffer();
-              const __hdrs = {};
-              __routeClone.headers.forEach(function(v, k) {
-                if (k !== "x-vinext-cache" && k !== "cache-control") __hdrs[k] = v;
-              });
-              await __isrSet(__routeKey, { kind: "APP_ROUTE", body: __buf, status: __routeClone.status, headers: __hdrs }, __revalSecs, __routeTags);
-              __isrDebug?.("route cache written", __routeKey);
-            } catch (__cacheErr) {
-              console.error("[vinext] ISR route cache write error:", __cacheErr);
-            }
-          })();
-          _getRequestExecutionContext()?.waitUntil(__routeWritePromise);
-        }
+        const response = __isrResult.response;
+        const dynamicUsedInHandler = __isrResult.dynamicUsed;
 
         // Collect any Set-Cookie headers from cookies().set()/delete() calls
         const pendingCookies = getAndClearPendingCookies();

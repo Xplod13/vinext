@@ -3812,35 +3812,27 @@ describe("generateRscEntry ISR code generation", () => {
     expect(code).toContain("__isrRouteKey");
   });
 
-  it("generated code contains APP_ROUTE ISR cache read for route handlers", () => {
+  it("generated code contains APP_ROUTE ISR cache read/write via wrapper", () => {
     const code = generateRscEntry("/tmp/test/app", minimalRoutes);
     expect(code).toContain('"APP_ROUTE"');
-    // Route handler ISR uses __isrRouteKey to build the cache key, then reads via __isrGet
-    expect(code).toContain("__isrRouteKey(cleanPathname)");
-    expect(code).toContain("__isrGet(__routeKey)");
+    // Cache operations are inside __handleRouteWithIsrCache
+    expect(code).toContain("__isrGet(routeKey)");
+    expect(code).toContain("__isrSet(routeKey,");
+    // Dispatch passes routeKey derived from __isrRouteKey
+    expect(code).toContain("routeKey: __isrRouteKey(cleanPathname)");
   });
 
-  it("generated code contains APP_ROUTE ISR cache write for route handlers", () => {
+  it("generated code uses __handleRouteWithIsrCache wrapper for route handler ISR", () => {
     const code = generateRscEntry("/tmp/test/app", minimalRoutes);
-    // Route handler ISR writes use __isrSet with __routeKey and APP_ROUTE kind
-    expect(code).toContain("__isrSet(__routeKey,");
-    expect(code).toContain('kind: "APP_ROUTE"');
-  });
-
-  it("generated code tracks dynamic route handlers to skip cache on subsequent requests", () => {
-    const code = generateRscEntry("/tmp/test/app", minimalRoutes);
-    // Module-level set for remembering dynamic handlers
+    // Wrapper function exists
+    expect(code).toContain("__handleRouteWithIsrCache");
+    // Dynamic handler tracking
     expect(code).toContain("__dynamicRouteHandlers");
-    // Cache read path checks the set before reading
-    expect(code).toContain("!__dynamicRouteHandlers.has(handler.pattern)");
-    // Handler execution path adds to set when dynamic usage detected
-    expect(code).toContain("__dynamicRouteHandlers.add(handler.pattern)");
-  });
-
-  it("generated code wraps route handler request in a dynamic-detection proxy", () => {
-    const code = generateRscEntry("/tmp/test/app", minimalRoutes);
+    // Proxy for dynamic detection
     expect(code).toContain("__proxyRouteRequest");
-    // The proxied request is passed to the handler, not the raw request
-    expect(code).toContain("handlerFn(__proxiedRequest,");
+    // Counter-based dynamic detection (getDynamicUsageCount)
+    expect(code).toContain("getDynamicUsageCount");
+    // Route handler dispatch calls the wrapper
+    expect(code).toContain("__handleRouteWithIsrCache({");
   });
 });
