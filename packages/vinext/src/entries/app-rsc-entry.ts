@@ -499,15 +499,16 @@ const __isrDebug = process.env.NEXT_PRIVATE_DEBUG_CACHE
 // searchParams). On first request (cache MISS), the handler runs and we detect
 // dynamic usage. On subsequent requests, we skip the cache read for handlers
 // in this set, matching Next.js behavior where dynamic handlers are never cached.
-const __dynamicRouteHandlers = new Set<string>();
+/** @type {Set<string>} */
+const __dynamicRouteHandlers = new Set();
 
 // Wrap the Request passed to route handlers in a Proxy that detects dynamic
 // API access. Accessing request.headers or request.nextUrl.searchParams marks
 // the handler as dynamic, preventing ISR caching. This matches Next.js's
 // NextRequest behavior where certain property accesses opt out of static
 // generation.
-function __proxyRouteRequest(req: Request, markDynamic: () => void): Request {
-  let _nextUrl: URL | undefined;
+function __proxyRouteRequest(req, markDynamic) {
+  let _nextUrl;
   return new Proxy(req, {
     get(target, prop, receiver) {
       // Accessing .headers marks as dynamic (headers vary per request)
@@ -524,7 +525,7 @@ function __proxyRouteRequest(req: Request, markDynamic: () => void): Request {
               if (urlProp === "searchParams") markDynamic();
               return Reflect.get(urlTarget, urlProp, urlReceiver);
             },
-          }) as URL;
+          });
         }
         return _nextUrl;
       }
