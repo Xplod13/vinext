@@ -599,10 +599,10 @@ async function __handleRouteWithIsrCache(opts) {
               new Request(revalUrl, { method: "GET" }),
               markDynamicUsage,
             );
-            // Bracket handler execution with counter to isolate its dynamic usage
-            const before = getDynamicUsageCount();
+            // Reset counter before handler execution to isolate its dynamic usage
+            consumeDynamicUsage();
             const revalResponse = await handlerFn(syntheticReq, { params: revalParams });
-            const regenDynamic = getDynamicUsageCount() > before;
+            const regenDynamic = getDynamicUsageCount() > 0;
             setNavigationContext(null);
             if (regenDynamic) {
               __dynamicRouteHandlers.add(pattern);
@@ -637,9 +637,11 @@ async function __handleRouteWithIsrCache(opts) {
 
   // ── 2. Run handler with scoped dynamic detection ─────────────
   const proxiedRequest = __proxyRouteRequest(request, markDynamicUsage);
-  const before = getDynamicUsageCount();
+  // Reset the counter before handler execution so we only measure
+  // dynamic usage from the handler itself, not from pipeline stages.
+  consumeDynamicUsage();
   const response = await handlerFn(proxiedRequest, { params });
-  const dynamicUsed = getDynamicUsageCount() > before;
+  const dynamicUsed = getDynamicUsageCount() > 0;
   const handlerSetCacheControl = response.headers.has("cache-control");
 
   // ── 3. Remember dynamic handlers ────────────────────────────

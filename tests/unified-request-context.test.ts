@@ -179,9 +179,9 @@ describe("unified-request-context", () => {
       });
 
       const [a, b] = await Promise.all([pA, pB]);
-      expect(a.dynamic).toBe(true);
+      expect(a.dynamic).toBe(1);
       expect(a.cookies).toEqual(["a=1"]);
-      expect(b.dynamic).toBe(false);
+      expect(b.dynamic).toBe(0);
       expect(b.cookies).toEqual([]);
     });
   });
