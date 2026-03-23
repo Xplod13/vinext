@@ -404,9 +404,9 @@ Most of these are deployed to Cloudflare Workers and updated on every push to `m
 | Pages Router (minimal) | Minimal Pages Router on Workers                                                                                  | [pages-router-cloudflare.vinext.workers.dev](https://pages-router-cloudflare.vinext.workers.dev) |
 | RealWorld API          | REST API routes example                                                                                          | [realworld-api-rest.vinext.workers.dev](https://realworld-api-rest.vinext.workers.dev)           |
 | Benchmarks Dashboard   | Build performance tracking over time (D1-backed)                                                                 | [benchmarks.vinext.workers.dev](https://benchmarks.vinext.workers.dev)                           |
-| App Router + Nitro     | App Router deployed via Nitro (multi-platform)                                                                   | [examples/app-router-nitro](/Users/steve/.codex/worktrees/8805/vinext/examples/app-router-nitro) |
+| App Router + Nitro     | App Router deployed via Nitro (multi-platform)                                                                   | [examples/app-router-nitro](examples/app-router-nitro) |
 
-Additional checked-in examples that are not part of the auto-deploy matrix live under [`examples/`](/Users/steve/.codex/worktrees/8805/vinext/examples), including `fumadocs-docs-template` and `tpr-demo`.
+Additional checked-in examples that are not part of the auto-deploy matrix live under [`examples/`](examples/), including `fumadocs-docs-template` and `tpr-demo`.
 
 ## API coverage
 

@@ -29,6 +29,24 @@ vp run fmt:check                                 # oxfmt (check only, no writes)
 vp run build                                     # Build the vinext package (via vp pack)
 ```
 
+### Fresh Worktree Bootstrap
+
+**Every new Codex session / git worktree should run this bootstrap before doing feature work.** Assume a fresh worktree does **not** have installed dependencies or a local Next.js reference clone yet.
+
+```bash
+vp install
+
+if [ ! -d .nextjs-ref/.git ]; then
+  git clone --depth 1 --single-branch --branch canary https://github.com/vercel/next.js.git .nextjs-ref
+else
+  git -C .nextjs-ref pull --ff-only
+fi
+```
+
+- `vp install` is required before running tests or builds in a fresh worktree.
+- `.nextjs-ref/` is gitignored and lives per worktree, so clone or update it in each new session.
+- Do this bootstrap before searching the Next.js source or test suite.
+
 ### Project Structure
 
 ```
@@ -582,5 +600,6 @@ This repo treats Vite 8 as the preferred baseline. Keep Vite 7 compatibility whe
 ## Review Checklist for Agents
 
 - [ ] Run `vp install` after pulling remote changes and before getting started.
+- [ ] Ensure `.nextjs-ref/` exists in this worktree; clone it if missing, `git -C .nextjs-ref pull --ff-only` if present.
 - [ ] Run `vp run check` plus the targeted `vp test run ...` commands relevant to your change.
 <!--VITE PLUS END-->
