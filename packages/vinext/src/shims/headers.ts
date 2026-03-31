@@ -160,6 +160,10 @@ export function setHeadersAccessPhase(phase: HeadersAccessPhase): HeadersAccessP
   return _setStatePhase(_getState(), phase);
 }
 
+export function getHeadersAccessPhase(): HeadersAccessPhase {
+  return _getState().phase;
+}
+
 /**
  * Set the headers/cookies context for the current RSC render.
  * Called by the framework's RSC entry before rendering each request.
@@ -612,6 +616,23 @@ type DraftModeResult = {
 };
 
 /**
+ * Check if draft mode is currently enabled for the request.
+ * Unlike draftMode(), this does not throw inside cache scopes or mark dynamic usage.
+ * Used by unstable_cache to bypass the cache in draft mode.
+ * @internal
+ */
+export function _isDraftModeEnabled(): boolean {
+  const state = _getState();
+  if (!state.headersContext) return false;
+  try {
+    const secret = getDraftSecret();
+    return state.headersContext.cookies.get(DRAFT_MODE_COOKIE) === secret;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Draft mode — check/toggle via a `__prerender_bypass` cookie.
  *
  * - `isEnabled`: true if the bypass cookie is present in the request
@@ -619,7 +640,9 @@ type DraftModeResult = {
  * - `disable()`: clears the bypass cookie
  */
 export async function draftMode(): Promise<DraftModeResult> {
-  throwIfInsideCacheScope("draftMode()");
+  // Note: draftMode() is intentionally NOT restricted inside unstable_cache or
+  // "use cache" — it is a special case that must be readable inside cached
+  // functions so that callers can check whether the cache should be bypassed.
 
   const state = _getState();
   if (state.headersContext?.accessError) {

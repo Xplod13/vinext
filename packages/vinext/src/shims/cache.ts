@@ -17,7 +17,7 @@
  *   setCacheHandler(new MyCacheHandler());
  */
 
-import { markDynamicUsage as _markDynamic } from "./headers.js";
+import { markDynamicUsage as _markDynamic, getHeadersAccessPhase, _isDraftModeEnabled } from "./headers.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { fnv1a64 } from "../utils/hash.js";
 import {
@@ -193,7 +193,7 @@ export class MemoryCacheHandler implements CacheHandler {
   private store = new Map<string, MemoryEntry>();
   private tagRevalidatedAt = new Map<string, number>();
 
-  async get(key: string, _ctx?: Record<string, unknown>): Promise<CacheHandlerValue | null> {
+  async get(key: string, ctx?: Record<string, unknown>): Promise<CacheHandlerValue | null> {
     const entry = this.store.get(key);
     if (!entry) return null;
 
@@ -209,8 +209,19 @@ export class MemoryCacheHandler implements CacheHandler {
     }
 
     // Check time-based expiry — return stale entry with cacheState="stale"
-    // instead of deleting, so ISR can serve stale-while-revalidate
-    if (entry.revalidateAt !== null && Date.now() > entry.revalidateAt) {
+    // instead of deleting, so ISR can serve stale-while-revalidate.
+    // If the caller provides a revalidate period (ctx.revalidate), compute its
+    // stale-at timestamp and take the MINIMUM of it and the stored stale-at.
+    // This matches Next.js semantics for the case where the current fetch uses a
+    // shorter TTL than what was stored (e.g. a force-cache entry with 1-year TTL
+    // being fetched with revalidate:3 should be treated as stale after 3 s).
+    const ctxRevalidate = typeof ctx?.revalidate === "number" ? ctx.revalidate : null;
+    const ctxStaleAt = ctxRevalidate !== null ? entry.lastModified + ctxRevalidate * 1000 : null;
+    const staleAt =
+      ctxStaleAt !== null && entry.revalidateAt !== null
+        ? Math.min(ctxStaleAt, entry.revalidateAt)
+        : ctxStaleAt ?? entry.revalidateAt;
+    if (staleAt !== null && Date.now() > staleAt) {
       return {
         lastModified: entry.lastModified,
         value: entry.value,
@@ -401,9 +412,14 @@ export function refresh(): void {}
  * fetches fresh data. Unlike `revalidateTag`, which uses stale-while-revalidate,
  * `updateTag` invalidates synchronously within the same request context.
  */
-export async function updateTag(tag: string): Promise<void> {
+export function updateTag(tag: string): Promise<void> {
+  // Synchronous check — throws before any Promise is created, so callers
+  // that omit `await` still get a synchronous throw (matching Next.js behavior).
+  if (getHeadersAccessPhase() !== "action") {
+    throw new Error("updateTag can only be called from within a Server Action");
+  }
   // Expire the tag immediately (same as revalidateTag without SWR)
-  await _getActiveHandler().revalidateTag(tag);
+  return _getActiveHandler().revalidateTag(tag);
 }
 
 /**
@@ -696,24 +712,34 @@ export function unstable_cache<T extends (...args: any[]) => Promise<any>>(
     const argsKey = JSON.stringify(args);
     const cacheKey = `unstable_cache:${baseKey}:${argsKey}`;
 
-    // Try to get from cache. Check cacheState so time-expired entries
-    // trigger a re-fetch instead of being served indefinitely.
-    const existing = await _getActiveHandler().get(cacheKey, {
-      kind: "FETCH",
-      tags,
-    });
-    if (existing?.value && existing.value.kind === "FETCH" && existing.cacheState !== "stale") {
-      try {
-        return deserializeUnstableCacheResult(existing.value.data.body) as Awaited<ReturnType<T>>;
-      } catch {
-        // Corrupted entry, fall through to re-fetch
+    // Draft mode bypasses the cache — always fetch fresh data.
+    const inDraftMode = _isDraftModeEnabled();
+
+    if (!inDraftMode) {
+      // Try to get from cache. Check cacheState so time-expired entries
+      // trigger a re-fetch instead of being served indefinitely.
+      const existing = await _getActiveHandler().get(cacheKey, {
+        kind: "FETCH",
+        tags,
+      });
+      if (existing?.value && existing.value.kind === "FETCH" && existing.cacheState !== "stale") {
+        try {
+          return deserializeUnstableCacheResult(existing.value.data.body) as Awaited<ReturnType<T>>;
+        } catch {
+          // Corrupted entry, fall through to re-fetch
+        }
       }
     }
 
-    // Cache miss — call the function inside the unstable_cache ALS scope
-    // so that headers()/cookies()/connection() can detect they're in a
-    // cache scope and throw an appropriate error.
+    // Cache miss (or draft mode bypass) — call the function inside the
+    // unstable_cache ALS scope so that headers()/cookies()/connection()
+    // can detect they're in a cache scope and throw an appropriate error.
     const result = await _unstableCacheAls.run(true, () => fn(...args));
+
+    // In draft mode, skip storing to cache so draft results don't pollute it.
+    if (inDraftMode) {
+      return result;
+    }
 
     // Store in cache using the FETCH kind
     const cacheValue: CachedFetchValue = {

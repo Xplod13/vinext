@@ -96,7 +96,8 @@ describe("app page execution helpers", () => {
     });
 
     expect(response.status).toBe(401);
-    await expect(response.text()).resolves.toBe("Unauthorized");
+    expect(response.headers.get("content-type")).toContain("text/html");
+    await expect(response.text()).resolves.toContain("Unauthorized");
     expect(clearRequestContext).toHaveBeenCalledTimes(1);
   });
 

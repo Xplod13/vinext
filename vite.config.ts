@@ -12,7 +12,7 @@ export default defineConfig({
     semi: true,
     singleQuote: false,
     trailingComma: "all",
-    ignorePatterns: ["tests/fixtures/ecosystem/**", "examples/**"],
+    ignorePatterns: ["tests/fixtures/ecosystem/**", "examples/**", "tests/fixtures-repos/*/clone"],
   },
   lint: {
     ignorePatterns: [
@@ -20,6 +20,7 @@ export default defineConfig({
       "tests/fixtures/**",
       "tests/fixtures/ecosystem/**",
       "examples/**",
+      "tests/fixtures-repos/*/clone",
     ],
     options: {
       typeAware: true,
@@ -78,6 +79,7 @@ export default defineConfig({
           include: ["tests/**/*.test.ts"],
           exclude: [
             "tests/fixtures/**/node_modules/**",
+            "tests/fixtures-repos/**/clone/**",
             // Integration tests: spin up Vite dev servers against shared fixture
             // dirs. Must run serially to avoid Vite deps optimizer cache races
             // (node_modules/.vite/*) that produce "outdated pre-bundle" 500s.
@@ -133,5 +135,8 @@ export default defineConfig({
         },
       },
     ],
+  },
+  run: {
+    enablePrePostScripts: true,
   },
 });

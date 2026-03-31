@@ -1,0 +1,78 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "allowJs": true,
+    "noEmit": true,
+
+    "types": ["vitest/globals", "@types/node"],
+
+    "paths": {
+      "e2e-utils": ["./next-test-setup.ts"],
+      "next-test-utils": ["./next-test-utils.ts"],
+      "next-webdriver": ["./next-internal-shims.d.ts"],
+      "router-act": ["./next-internal-shims.d.ts"],
+      "development-sandbox": ["./next-internal-shims.d.ts"],
+      "test-data-service/writer": ["./next-internal-shims.d.ts"],
+      "test-log": ["./next-internal-shims.d.ts"],
+      "e2e-utils/request-tracker": ["./next-internal-shims.d.ts"],
+      "e2e-utils/ppr": ["./next-internal-shims.d.ts"],
+      "e2e-utils/instant-validation": ["./next-internal-shims.d.ts"]
+    }
+  },
+  "include": [
+    "clone",
+    "next-test-setup.ts",
+    "next-test-utils.ts",
+    "vitest-matchers.d.ts",
+    "next-internal-shims.d.ts"
+  ],
+  "exclude": [
+    "clone/**/node_modules",
+    "clone/babel/**",
+
+    // test/lib is not included in the sparse checkout (only test/e2e is cloned).
+    // These fixtures import from relative ../../../lib/ paths that don't exist.
+    "clone/app-dir/actions-unused-args/**",
+    "clone/app-dir/app-root-params-getters/**",
+    "clone/app-dir/instant-validation-causes/**",
+    "clone/app-dir/instant-validation/**",
+    "clone/app-dir/navigation-with-queued-actions/**",
+    "clone/app-dir/next-after-app-static/**",
+    "clone/app-dir/next-after-app/**",
+    "clone/app-dir/trace-build-file/**",
+    "clone/app-dir/segment-cache/prefetch-layout-sharing/**",
+    "clone/app-dir/segment-cache/search-params/**",
+    "clone/filesystem-cache/**",
+
+    // These fixtures test tsconfig path resolution themselves — they intentionally
+    // import from aliases (foo, bar, @/foo) that only resolve within their own
+    // per-fixture tsconfig, not the root one.
+    "clone/tsconfig-path/**",
+    "clone/typescript-custom-tsconfig/**",
+    "clone/app-dir/next-config-ts/**",
+
+    // Fixture-local or monorepo-internal packages that aren't installed here.
+    "clone/app-dir/app-alias/**",
+    "clone/app-dir/next-dist-client-esm-import/**",
+    "clone/app-dir/non-root-project-monorepo/**",
+
+    // Nx plugin fixture — @nx/next is not installed and is out of scope.
+    "clone/app-dir/nx-handling/**",
+
+    // PNG imports in .ts files — no declaration file for image assets.
+    "clone/app-dir/node-worker-threads/app/worker-dir/png-worker.ts",
+    "clone/app-dir/worker/app/png-worker.ts",
+
+    // next/offline and next/src/... are non-public Next.js internals.
+    "clone/app-dir/use-offline/**",
+    "clone/next-form/default/next-form-prefetch.test.ts"
+  ]
+}

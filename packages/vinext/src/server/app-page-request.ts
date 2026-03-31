@@ -1,4 +1,5 @@
 import type { AppPageSpecialError } from "./app-page-execution.js";
+import { buildDefaultNotFoundHtml } from "./app-page-execution.js";
 
 export type AppPageParams = Record<string, string | string[]>;
 
@@ -96,19 +97,51 @@ function areStaticParamsAllowed(
 export async function validateAppPageDynamicParams(
   options: ValidateAppPageDynamicParamsOptions,
 ): Promise<Response | null> {
-  if (
-    !options.enforceStaticParamsOnly ||
-    !options.isDynamicRoute ||
-    typeof options.generateStaticParams !== "function"
-  ) {
+  if (!options.isDynamicRoute || typeof options.generateStaticParams !== "function") {
     return null;
   }
 
   try {
     const staticParams = await options.generateStaticParams({ params: options.params });
-    if (Array.isArray(staticParams) && !areStaticParamsAllowed(options.params, staticParams)) {
-      options.clearRequestContext();
-      return new Response("Not Found", { status: 404 });
+
+    // Validate that all returned params are strings (or string arrays for catch-all).
+    // Next.js throws a descriptive error when a param is a non-string value.
+    if (Array.isArray(staticParams)) {
+      for (const paramSet of staticParams) {
+        if (paramSet && typeof paramSet === "object") {
+          for (const [key, value] of Object.entries(paramSet)) {
+            if (
+              value !== null &&
+              value !== undefined &&
+              typeof value !== "string" &&
+              !(Array.isArray(value) && value.every((v) => typeof v === "string"))
+            ) {
+              const received = Array.isArray(value)
+                ? "array"
+                : typeof value === "object"
+                  ? "object"
+                  : typeof value;
+              const msg =
+                `A required parameter (${key}) was not provided as a string ` +
+                `received ${received} in generateStaticParams for ${options.params ? JSON.stringify(options.params) : "route"}`;
+              options.logGenerateStaticParamsError?.(new Error(msg));
+              options.clearRequestContext();
+              return new Response(msg, { status: 500 });
+            }
+          }
+        }
+      }
+
+      if (
+        options.enforceStaticParamsOnly &&
+        !areStaticParamsAllowed(options.params, staticParams)
+      ) {
+        options.clearRequestContext();
+        return new Response(buildDefaultNotFoundHtml(404), {
+          status: 404,
+          headers: { "Content-Type": "text/html; charset=utf-8" },
+        });
+      }
     }
   } catch (error) {
     options.logGenerateStaticParamsError?.(error);

@@ -213,8 +213,55 @@ export async function handleApiRoute(
     // Enhance req/res with Next.js helpers
     const { apiReq, apiRes } = enhanceApiObjects(req, res, query, body);
 
-    // Call the handler
-    await handler(apiReq, apiRes);
+    // Call the handler.
+    // Edge-runtime API routes return a Response directly instead of using
+    // the Node.js req/res API. Detect this by checking the module's config
+    // export or by duck-typing the return value.
+    const isEdgeRuntime =
+      (apiModule as { config?: { runtime?: string } }).config?.runtime === "edge";
+
+    if (isEdgeRuntime) {
+      // Build a Web API Request from the Node.js IncomingMessage
+      const protocol = (req as { connection?: { encrypted?: boolean } }).connection?.encrypted
+        ? "https"
+        : "http";
+      const host = req.headers.host ?? "localhost";
+      const webRequest = new Request(`${protocol}://${host}${url}`, {
+        method: req.method ?? "GET",
+        headers: Object.fromEntries(
+          Object.entries(req.headers).flatMap(([k, v]) =>
+            Array.isArray(v) ? v.map((val) => [k, val]) : v != null ? [[k, v]] : [],
+          ),
+        ),
+      });
+      const result = await (handler as (req: Request) => Response | Promise<Response>)(webRequest);
+      if (result instanceof Response) {
+        res.statusCode = result.status;
+        result.headers.forEach((value, key) => {
+          res.setHeader(key, value);
+        });
+        const body = await result.arrayBuffer();
+        res.end(Buffer.from(body));
+        return true;
+      }
+      // Fell through — treat as node-style (no return value)
+      if (!res.writableEnded) res.end();
+      return true;
+    }
+
+    const handlerResult = await handler(apiReq, apiRes);
+    // Duck-type fallback: if handler returned a Response despite no config,
+    // write it to the Node.js response.
+    if (handlerResult instanceof Response) {
+      const r = handlerResult as Response;
+      res.statusCode = r.status;
+      r.headers.forEach((value, key) => {
+        res.setHeader(key, value);
+      });
+      const body = await r.arrayBuffer();
+      res.end(Buffer.from(body));
+      return true;
+    }
     return true;
   } catch (e) {
     if (e instanceof PagesBodyParseError) {

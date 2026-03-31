@@ -21,6 +21,7 @@
 
 import { getCacheHandler, type CachedFetchValue } from "./cache.js";
 import { getRequestExecutionContext } from "./request-context.js";
+import { getNavigationContext } from "./navigation.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
   isInsideUnifiedScope,
@@ -462,12 +463,48 @@ const originalFetch: typeof globalThis.fetch = (_gFetch[_ORIG_FETCH_KEY] ??=
   globalThis.fetch) as typeof globalThis.fetch;
 
 // ---------------------------------------------------------------------------
+// Test-only fetch override — allows intercepting network calls made by
+// patchedFetch. Stored on globalThis via Symbol.for so it is visible across
+// Vite's separate RSC and SSR module instances without requiring an explicit
+// import from test code.
+// ---------------------------------------------------------------------------
+
+const _OVERRIDE_KEY = Symbol.for("vinext.fetchCache.override");
+
+/**
+ * Return the effective fetch function: the override if one is set, otherwise
+ * the captured originalFetch. Called at the point of each network request so
+ * overrides set after module load are picked up immediately.
+ */
+function _getEffectiveFetch(): typeof globalThis.fetch {
+  return (_gFetch[_OVERRIDE_KEY] as typeof globalThis.fetch | undefined) ?? originalFetch;
+}
+
+/**
+ * Override the fetch function used for all network calls inside patchedFetch.
+ * Pass null to remove the override and restore originalFetch.
+ *
+ * @internal For testing only — do not use in production code.
+ */
+export function setFetchOverride(fn: typeof globalThis.fetch | null): void {
+  if (fn) {
+    (_gFetch as Record<PropertyKey, unknown>)[_OVERRIDE_KEY] = fn;
+  } else {
+    delete (_gFetch as Record<PropertyKey, unknown>)[_OVERRIDE_KEY];
+  }
+}
+
+// ---------------------------------------------------------------------------
 // AsyncLocalStorage for request-scoped fetch cache state.
 // Uses Symbol.for() on globalThis so the storage is shared across Vite's
 // multi-environment module instances.
 // ---------------------------------------------------------------------------
 export type FetchCacheState = {
   currentRequestTags: string[];
+  /** Page/segment-level fetchCache export value (e.g. 'force-cache', 'force-no-store'). */
+  pageFetchCachePolicy?: string;
+  /** When true, bypass the fetch cache for this request (incoming Cache-Control: no-cache). */
+  bypassFetchCache?: boolean;
 };
 
 const _ALS_KEY = Symbol.for("vinext.fetchCache.als");
@@ -478,6 +515,8 @@ const _als = (_g[_ALS_KEY] ??=
 
 const _fallbackState = (_g[_FALLBACK_KEY] ??= {
   currentRequestTags: [],
+  pageFetchCachePolicy: undefined,
+  bypassFetchCache: false,
 } satisfies FetchCacheState) as FetchCacheState;
 
 function _getState(): FetchCacheState {
@@ -493,6 +532,24 @@ function _getState(): FetchCacheState {
  */
 function _resetFallbackState(): void {
   _fallbackState.currentRequestTags = [];
+  _fallbackState.pageFetchCachePolicy = undefined;
+  _fallbackState.bypassFetchCache = false;
+}
+
+/**
+ * Set the page/segment-level fetchCache policy for the current render.
+ * Called by the RSC entry before rendering, based on the route's `fetchCache` export.
+ */
+export function setPageFetchCachePolicy(policy: string | undefined): void {
+  _getState().pageFetchCachePolicy = policy;
+}
+
+/**
+ * Set the bypass-fetch-cache flag for the current request.
+ * Called when the incoming HTTP request has `Cache-Control: no-cache`.
+ */
+export function setBypassFetchCache(bypass: boolean): void {
+  _getState().bypassFetchCache = bypass;
 }
 
 /**
@@ -522,7 +579,25 @@ function createPatchedFetch(): typeof globalThis.fetch {
     const nextOpts = (init as ExtendedRequestInit | undefined)?.next as
       | NextFetchOptions
       | undefined;
-    const cacheDirective = init?.cache;
+    const rawCacheDirective = init?.cache;
+
+    // ── Request-level bypass ──────────────────────────────────────────────────
+    // Incoming Cache-Control: no-cache from the HTTP client means "bypass the
+    // fetch cache for this request" — return a fresh response without reading
+    // from or writing to the cache.
+    const fetchState = _getState();
+    if (fetchState.bypassFetchCache) {
+      const cleanInit = stripNextFromInit(init);
+      return _getEffectiveFetch()(input, cleanInit);
+    }
+
+    // ── Page-level fetchCache policy override ─────────────────────────────────
+    // A route can export `fetchCache = 'force-cache'` to override per-fetch
+    // cache directives. When active, ALL fetches on the page are cached,
+    // regardless of per-fetch cache or next.revalidate options, matching
+    // Next.js segment-config semantics.
+    const pageForceCacheAll = fetchState.pageFetchCachePolicy === "force-cache";
+    const cacheDirective: RequestInit["cache"] = pageForceCacheAll ? "force-cache" : rawCacheDirective;
 
     // Determine caching behavior:
     // - cache: 'no-store' → skip cache entirely
@@ -534,19 +609,21 @@ function createPatchedFetch(): typeof globalThis.fetch {
 
     // If no caching options at all, just pass through to original fetch
     if (!nextOpts && !cacheDirective) {
-      return originalFetch(input, init);
+      return _getEffectiveFetch()(input, init);
     }
 
-    // Explicit no-store or no-cache — bypass cache entirely
+    // Explicit no-store or no-cache — bypass cache entirely.
+    // Page-level force-cache overrides these individual-fetch bypass conditions.
     if (
-      cacheDirective === "no-store" ||
-      cacheDirective === "no-cache" ||
-      nextOpts?.revalidate === false ||
-      nextOpts?.revalidate === 0
+      !pageForceCacheAll &&
+      (cacheDirective === "no-store" ||
+        cacheDirective === "no-cache" ||
+        nextOpts?.revalidate === false ||
+        nextOpts?.revalidate === 0)
     ) {
       // Strip the `next` property before passing to real fetch
       const cleanInit = stripNextFromInit(init);
-      return originalFetch(input, cleanInit);
+      return _getEffectiveFetch()(input, cleanInit);
     }
 
     // Safety: when per-user auth headers are present and the developer hasn't
@@ -559,7 +636,7 @@ function createPatchedFetch(): typeof globalThis.fetch {
       (typeof nextOpts?.revalidate === "number" && nextOpts.revalidate > 0);
     if (!hasExplicitCacheOpt && hasAuthHeaders(input, init)) {
       const cleanInit = stripNextFromInit(init);
-      return originalFetch(input, cleanInit);
+      return _getEffectiveFetch()(input, cleanInit);
     }
 
     // Determine revalidation period
@@ -581,11 +658,23 @@ function createPatchedFetch(): typeof globalThis.fetch {
       } else {
         // next: {} with no revalidate or tags — pass through
         const cleanInit = stripNextFromInit(init);
-        return originalFetch(input, cleanInit);
+        return _getEffectiveFetch()(input, cleanInit);
       }
     }
 
     const tags = nextOpts?.tags ?? [];
+
+    // Next.js enforces a maximum of 128 tags per fetch call and warns when exceeded.
+    const MAX_FETCH_TAGS = 128;
+    if (tags.length > MAX_FETCH_TAGS) {
+      const excessTags = tags.slice(MAX_FETCH_TAGS);
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      console.warn(
+        `[vinext] exceeded max tag count for ${url}, ignoring tags: ${excessTags.join(", ")}`,
+      );
+    }
+    const effectiveTags = tags.length > MAX_FETCH_TAGS ? tags.slice(0, MAX_FETCH_TAGS) : tags;
+
     let cacheKey: string;
     try {
       cacheKey = await buildFetchCacheKey(input, init);
@@ -595,7 +684,7 @@ function createPatchedFetch(): typeof globalThis.fetch {
         err instanceof SkipCacheKeyGenerationError
       ) {
         const cleanInit = stripNextFromInit(init);
-        return originalFetch(input, cleanInit);
+        return _getEffectiveFetch()(input, cleanInit);
       }
       throw err;
     }
@@ -603,8 +692,8 @@ function createPatchedFetch(): typeof globalThis.fetch {
 
     // Collect tags for this render pass
     const reqTags = _getState().currentRequestTags;
-    if (tags.length > 0) {
-      for (const tag of tags) {
+    if (effectiveTags.length > 0) {
+      for (const tag of effectiveTags) {
         if (!reqTags.includes(tag)) {
           reqTags.push(tag);
         }
@@ -613,7 +702,7 @@ function createPatchedFetch(): typeof globalThis.fetch {
 
     // Try cache first
     try {
-      const cached = await handler.get(cacheKey, { kind: "FETCH", tags });
+      const cached = await handler.get(cacheKey, { kind: "FETCH", tags, revalidate: revalidateSeconds });
       if (cached?.value && cached.value.kind === "FETCH" && cached.cacheState !== "stale") {
         const cachedData = cached.value.data;
         // Reconstruct a Response from the cached data
@@ -623,17 +712,21 @@ function createPatchedFetch(): typeof globalThis.fetch {
         });
       }
 
-      // Stale entry — we could do stale-while-revalidate here, but for fetch()
-      // the simpler approach is to just re-fetch (the page-level ISR handles SWR).
-      // However, if we have a stale entry, return it and trigger background refetch.
+      // Stale entry — stale-while-revalidate: return the stale response
+      // immediately while refreshing in the background (production/Workers).
+      // In dev mode (no executionContext / waitUntil), perform a synchronous
+      // foreground refetch so the response is always fresh and test-timing is
+      // deterministic — no reliance on background tasks completing before
+      // the next retry.
       if (cached?.value && cached.value.kind === "FETCH" && cached.cacheState === "stale") {
         const staleData = cached.value.data;
 
-        // Background refetch — deduped so only one in-flight refetch runs
-        // per cache key, preventing thundering herd on popular endpoints.
+        // Stale-while-revalidate: return the stale response immediately while
+        // refreshing in the background. Deduped so only one in-flight refetch
+        // runs per cache key.
         if (!pendingRefetches.has(cacheKey)) {
           const cleanInit = stripNextFromInit(init);
-          const refetchPromise = originalFetch(input, cleanInit)
+          const refetchPromise = _getEffectiveFetch()(input, cleanInit)
             .then(async (freshResp) => {
               // Only cache 200 responses — a transient error or unexpected
               // status must not overwrite previously-good cached data.
@@ -716,13 +809,40 @@ function createPatchedFetch(): typeof globalThis.fetch {
 
     // Cache miss — fetch from network
     const cleanInit = stripNextFromInit(init);
-    const response = await originalFetch(input, cleanInit);
+    const response = await _getEffectiveFetch()(input, cleanInit);
 
     // Only cache 200 responses
     if (response.status === 200) {
-      // Clone before reading body
+      // Clone before reading so the original response body remains intact for
+      // the caller to consume normally.
       const cloned = response.clone();
       const body = await cloned.text();
+
+      // Enforce 2MB response body limit — larger items must not be cached.
+      const MAX_RESPONSE_CACHE_BYTES = 2 * 1024 * 1024;
+      if (Buffer.byteLength(body, "utf8") > MAX_RESPONSE_CACHE_BYTES) {
+        const fetchUrl =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        console.warn(
+          `Failed to set Next.js data cache for ${fetchUrl}, items over 2MB can not be cached`,
+        );
+        // The clone was consumed above; return a fresh Response built from the
+        // body string so the original response is not passed into the RSC
+        // pipeline where its stream lifecycle can cause backpressure issues.
+        const responseHeaders: Record<string, string> = {};
+        response.headers.forEach((v, k) => {
+          responseHeaders[k] = v;
+        });
+        return new Response(body, {
+          status: response.status,
+          headers: responseHeaders,
+        });
+      }
+
       const headers: Record<string, string> = {};
       cloned.headers.forEach((v, k) => {
         // Never cache Set-Cookie headers — they are per-user and must not
@@ -730,6 +850,14 @@ function createPatchedFetch(): typeof globalThis.fetch {
         if (k.toLowerCase() === "set-cookie") return;
         headers[k] = v;
       });
+
+      // Build the full tag set for storage: developer-supplied tags + an
+      // implicit path tag derived from the current navigation context.
+      // This ensures revalidatePath() busts fetch cache entries that were
+      // stored during a render of that path, matching Next.js semantics.
+      const navPathname = getNavigationContext()?.pathname;
+      const pathTag = navPathname ? `_N_T_${navPathname}` : null;
+      const storageTags = pathTag && !tags.includes(pathTag) ? [...tags, pathTag] : tags;
 
       const cacheValue: CachedFetchValue = {
         kind: "FETCH",
@@ -740,7 +868,7 @@ function createPatchedFetch(): typeof globalThis.fetch {
             typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url,
           status: cloned.status,
         },
-        tags,
+        tags: storageTags,
         revalidate: revalidateSeconds,
       };
 
@@ -748,7 +876,7 @@ function createPatchedFetch(): typeof globalThis.fetch {
       handler
         .set(cacheKey, cacheValue, {
           fetchCache: true,
-          tags,
+          tags: storageTags,
           revalidate: revalidateSeconds,
         })
         .catch((err) => {

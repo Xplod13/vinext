@@ -367,6 +367,7 @@ import { readAppPageCacheResponse as __readAppPageCacheResponse } from ${JSON.st
 import {
   buildAppPageFontLinkHeader as __buildAppPageFontLinkHeader,
   buildAppPageSpecialErrorResponse as __buildAppPageSpecialErrorResponse,
+  buildDefaultNotFoundHtml as __buildDefaultNotFoundHtml,
   readAppPageTextStream as __readAppPageTextStream,
   resolveAppPageSpecialError as __resolveAppPageSpecialError,
   teeAppPageRscStreamForCapture as __teeAppPageRscStreamForCapture,
@@ -388,7 +389,7 @@ import {
 } from ${JSON.stringify(appRouteHandlerResponsePath)};
 import { _consumeRequestScopedCacheLife, getCacheHandler } from "next/cache";
 import { getRequestExecutionContext as _getRequestExecutionContext } from ${JSON.stringify(requestContextShimPath)};
-import { ensureFetchPatch as _ensureFetchPatch, getCollectedFetchTags } from "vinext/fetch-cache";
+import { ensureFetchPatch as _ensureFetchPatch, getCollectedFetchTags, setPageFetchCachePolicy as _setPageFetchCachePolicy, setBypassFetchCache as _setBypassFetchCache } from "vinext/fetch-cache";
 import { buildRouteTrie as _buildRouteTrie, trieMatch as _trieMatch } from ${JSON.stringify(routeTriePath)};
 // Import server-only state module to register ALS-backed accessors.
 import "vinext/navigation-state";
@@ -1353,6 +1354,9 @@ export default async function handler(request, ctx) {
   });
   return _runWithUnifiedCtx(__uCtx, async () => {
     _ensureFetchPatch();
+    // Bypass fetch cache when the incoming request sends Cache-Control: no-cache,
+    // matching Next.js dev behavior of serving fresh data on forced reloads.
+    if (request.headers.get('cache-control')?.includes('no-cache')) _setBypassFetchCache(true);
     const __reqCtx = requestContextFromRequest(request);
     // Per-request container for middleware state. Passed into
     // _handleRequest which fills in .headers and .status;
@@ -1527,6 +1531,10 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
 
   const isRscRequest = pathname.endsWith(".rsc") || request.headers.get("accept")?.includes("text/x-component");
   let cleanPathname = pathname.replace(/\\.rsc$/, "");
+  // Preserve the user-visible (canonical) pathname before any internal rewrites.
+  // usePathname() should always return the URL the user navigated to, not the
+  // internal destination after beforeFiles/afterFiles/fallback rewrites.
+  const canonicalPathname = cleanPathname;
 
   // Middleware response headers and custom rewrite status are stored in
   // _mwCtx (per-request container) so handler() can merge them into
@@ -1780,7 +1788,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   // Set navigation context for Server Components.
   // Note: Headers context is already set by runWithRequestContext in the handler wrapper.
   setNavigationContext({
-    pathname: cleanPathname,
+    pathname: canonicalPathname,
     searchParams: url.searchParams,
     params: {},
   });
@@ -1896,7 +1904,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       if (match) {
         const { route: actionRoute, params: actionParams } = match;
         setNavigationContext({
-          pathname: cleanPathname,
+          pathname: canonicalPathname,
           searchParams: url.searchParams,
           params: actionParams,
         });
@@ -2012,19 +2020,22 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
     `
         : ""
     }
-    // Render custom not-found page if available, otherwise plain 404
+    // Render custom not-found page if available, otherwise default 404 HTML
     const notFoundResponse = await renderNotFoundPage(null, isRscRequest, request);
     if (notFoundResponse) return notFoundResponse;
     setHeadersContext(null);
     setNavigationContext(null);
-    return new Response("Not Found", { status: 404 });
+    return new Response(__buildDefaultNotFoundHtml(404), {
+      status: 404,
+      headers: { "Content-Type": "text/html; charset=utf-8" },
+    });
   }
 
   const { route, params } = match;
 
   // Update navigation context with matched params
   setNavigationContext({
-    pathname: cleanPathname,
+    pathname: canonicalPathname,
     searchParams: url.searchParams,
     params,
   });
@@ -2161,18 +2172,17 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
     );
   }
 
-  // Build the component tree: layouts wrapping the page
-  const PageComponent = route.page?.default;
-  if (!PageComponent) {
-    setHeadersContext(null);
-    setNavigationContext(null);
-    return new Response("Page has no default export", { status: 500 });
-  }
-
   // Read route segment config from page module exports
   let revalidateSeconds = typeof route.page?.revalidate === "number" ? route.page.revalidate : null;
+  // Apply page-level fetchCache policy so patchedFetch() can override per-fetch
+  // cache directives (e.g. fetchCache='force-cache' overrides cache:'no-cache').
+  if (route.page?.fetchCache) _setPageFetchCachePolicy(route.page.fetchCache);
   const dynamicConfig = route.page?.dynamic; // 'auto' | 'force-dynamic' | 'force-static' | 'error'
-  const dynamicParamsConfig = route.page?.dynamicParams; // true (default) | false
+  // dynamicParams can be exported from the page or from layouts (which apply to
+  // their respective segment). For validation purposes, use the most specific
+  // (innermost) value: page first, then layouts from innermost to outermost.
+  const dynamicParamsConfig = route.page?.dynamicParams ??
+    [...(route.layouts || [])].reverse().find(l => l?.dynamicParams !== undefined)?.dynamicParams; // true (default) | false
   const isForceStatic = dynamicConfig === "force-static";
   const isDynamicError = dynamicConfig === "error";
 
@@ -2181,7 +2191,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   if (isForceStatic) {
     setHeadersContext({ headers: new Headers(), cookies: new Map() });
     setNavigationContext({
-      pathname: cleanPathname,
+      pathname: canonicalPathname,
       searchParams: new URLSearchParams(),
       params,
     });
@@ -2200,7 +2210,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       accessError: new Error(errorMsg),
     });
     setNavigationContext({
-      pathname: cleanPathname,
+      pathname: canonicalPathname,
       searchParams: new URLSearchParams(),
       params,
     });
@@ -2253,7 +2263,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
         });
         return _runWithUnifiedCtx(__revalUCtx, async () => {
           _ensureFetchPatch();
-          setNavigationContext({ pathname: cleanPathname, searchParams: new URLSearchParams(), params });
+          setNavigationContext({ pathname: canonicalPathname, searchParams: new URLSearchParams(), params });
           const __revalElement = await buildPageElement(route, params, undefined, new URLSearchParams());
           const __revalOnError = createRscOnErrorHandler(request, cleanPathname, route.pattern);
           const __revalRscStream = renderToReadableStream(__revalElement, { onError: __revalOnError });
@@ -2280,6 +2290,12 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
     }
   }
 
+  // Build the component tree: layouts wrapping the page
+  const PageComponent = route.page?.default;
+
+  // Validate generateStaticParams param types BEFORE checking for a default export.
+  // Next.js surfaces the "not provided as a string" error even when the page has no
+  // default export, so validation must run first.
   // dynamicParams = false: only params from generateStaticParams are allowed.
   // This runs AFTER the ISR cache read so that a cache hit skips this work entirely.
   const __dynamicParamsResponse = await __validateAppPageDynamicParams({
@@ -2288,7 +2304,11 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       setNavigationContext(null);
     },
     enforceStaticParamsOnly: dynamicParamsConfig === false,
-    generateStaticParams: route.page?.generateStaticParams,
+    // generateStaticParams may be on the page or on a layout (e.g. the blog
+    // layout exports it while the page exports dynamicParams = false). Fall
+    // back to the innermost layout that exports it.
+    generateStaticParams: route.page?.generateStaticParams ??
+      [...(route.layouts || [])].reverse().find(l => l?.generateStaticParams)?.generateStaticParams,
     isDynamicRoute: route.isDynamic,
     logGenerateStaticParamsError(err) {
       console.error("[vinext] generateStaticParams error:", err);
@@ -2297,6 +2317,13 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   });
   if (__dynamicParamsResponse) {
     return __dynamicParamsResponse;
+  }
+
+  // Now check for missing default export after validation has run.
+  if (!PageComponent) {
+    setHeadersContext(null);
+    setNavigationContext(null);
+    return new Response("Page has no default export", { status: 500 });
   }
 
   // Check for intercepting routes on RSC requests (client-side navigation).

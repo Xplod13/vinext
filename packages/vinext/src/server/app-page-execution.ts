@@ -46,6 +46,66 @@ function getAppPageStatusText(statusCode: number): string {
   return statusCode === 403 ? "Forbidden" : statusCode === 401 ? "Unauthorized" : "Not Found";
 }
 
+/**
+ * Build the default HTML fallback for HTTP access errors (404/403/401) when
+ * no custom not-found.tsx / forbidden.tsx / unauthorized.tsx is present.
+ *
+ * Matches the Next.js default 404 page text so upstream tests can assert on
+ * "This page could not be found".
+ */
+export function buildDefaultNotFoundHtml(statusCode: number): string {
+  const titles: Record<number, string> = {
+    404: "404: This page could not be found.",
+    403: "403: Forbidden",
+    401: "401: Unauthorized",
+  };
+  const bodies: Record<number, string> = {
+    404: "This page could not be found.",
+    403: "Forbidden",
+    401: "Unauthorized",
+  };
+  const title = titles[statusCode] ?? "Error";
+  const heading = String(statusCode);
+  const bodyText = bodies[statusCode] ?? "An error occurred";
+  const outerStyle =
+    "font-family:-apple-system,BlinkMacSystemFont,Roboto," +
+    '"Segoe UI",sans-serif;height:100vh;text-align:center;' +
+    "display:flex;flex-direction:column;align-items:center;justify-content:center";
+  const h1Style =
+    "display:inline-block;border-right:1px solid rgba(0,0,0,.3);" +
+    "margin:0;margin-right:20px;padding:10px 23px 10px 0;" +
+    "font-size:24px;font-weight:500;vertical-align:top";
+  const innerStyle =
+    "display:inline-block;text-align:left;line-height:49px;" + "height:49px;vertical-align:middle";
+  const h2Style = "font-size:14px;font-weight:normal;line-height:inherit;margin:0;padding:0";
+  return (
+    '<!DOCTYPE html><html><head><meta charSet="utf-8"/>' +
+    '<meta name="robots" content="noindex"/>' +
+    "<title>" +
+    title +
+    "</title></head>" +
+    "<body>" +
+    '<div style="' +
+    outerStyle +
+    '">' +
+    "<div><style>body{margin:0}</style>" +
+    '<h1 style="' +
+    h1Style +
+    '">' +
+    heading +
+    "</h1>" +
+    '<div style="' +
+    innerStyle +
+    '">' +
+    '<h2 style="' +
+    h2Style +
+    '">' +
+    bodyText +
+    "</h2>" +
+    "</div></div></div></body></html>"
+  );
+}
+
 export function resolveAppPageSpecialError(error: unknown): AppPageSpecialError | null {
   if (!(error && typeof error === "object" && "digest" in error)) {
     return null;
@@ -91,8 +151,10 @@ export async function buildAppPageSpecialErrorResponse(
   }
 
   options.clearRequestContext();
-  return new Response(getAppPageStatusText(options.specialError.statusCode), {
-    status: options.specialError.statusCode,
+  const statusCode = options.specialError.statusCode;
+  return new Response(buildDefaultNotFoundHtml(statusCode), {
+    status: statusCode,
+    headers: { "Content-Type": "text/html; charset=utf-8" },
   });
 }
 

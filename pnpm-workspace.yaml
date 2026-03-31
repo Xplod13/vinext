@@ -5,6 +5,7 @@ packages:
   - packages/*
   - examples/*
   - tests/fixtures/*
+  - tests/fixtures-repos/*
   - tests/fixtures/ecosystem/*
   - benchmarks/vinext
 

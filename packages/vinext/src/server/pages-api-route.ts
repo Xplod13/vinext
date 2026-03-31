@@ -10,7 +10,9 @@ import {
 } from "./pages-node-compat.js";
 
 type PagesApiRouteModule = {
-  default?: (req: PagesReqResRequest, res: PagesReqResResponse) => void | Promise<void>;
+  default?:
+    | ((req: PagesReqResRequest, res: PagesReqResResponse) => void | Promise<void>)
+    | ((req: Request) => Response | Promise<Response>);
 };
 
 export type PagesApiRouteMatch = {
@@ -54,6 +56,24 @@ export async function handlePagesApiRoute(options: HandlePagesApiRouteOptions): 
 
   try {
     const query = buildPagesApiQuery(options.url, params);
+
+    // Detect edge runtime handlers: they accept a Web API Request and return a
+    // Response directly, rather than using the Node.js-style (req, res) API.
+    // We identify them by checking the module's config export or by duck-typing
+    // the return value — if the handler returns a Response instance, use it.
+    const routeModule = route.module as PagesApiRouteModule & { config?: { runtime?: string } };
+    const isEdgeRuntime = routeModule.config?.runtime === "edge";
+
+    if (isEdgeRuntime) {
+      const result = await (handler as (req: Request) => Response | Promise<Response>)(
+        options.request,
+      );
+      if (result instanceof Response) {
+        return result;
+      }
+      return new Response("Edge API route did not return a Response", { status: 500 });
+    }
+
     const body = await parsePagesApiBody(options.request);
     const { req, res, responsePromise } = createPagesReqRes({
       body,
@@ -62,7 +82,15 @@ export async function handlePagesApiRoute(options: HandlePagesApiRouteOptions): 
       url: options.url,
     });
 
-    await handler(req, res);
+    // Call the handler. For edge-style handlers that slipped past the config
+    // check (e.g. no explicit config export), duck-type the return value: if
+    // it's a Response, return it directly instead of waiting on responsePromise.
+    const handlerResult = await (
+      handler as (req: PagesReqResRequest, res: PagesReqResResponse) => unknown
+    )(req as PagesReqResRequest, res as PagesReqResResponse);
+    if (handlerResult instanceof Response) {
+      return handlerResult;
+    }
     res.end();
     return await responsePromise;
   } catch (error) {
