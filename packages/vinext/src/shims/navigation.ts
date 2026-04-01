@@ -169,11 +169,24 @@ function _getGlobalAccessors(): _StateAccessors | undefined {
 let _serverContext: NavigationContext | null = null;
 let _serverInsertedHTMLCallbacks: Array<() => unknown> = [];
 
+// Browser-side cross-module-instance key (issue #688 client analogue).
+// Vite dev mode can create separate module instances for "use client"
+// components. The ALS-backed globalAccessors fix only works server-side
+// (navigation-state.ts uses node:async_hooks). On the browser we use a
+// separate globalThis slot so every module instance reads the same context
+// that app-browser-entry.ts wrote via setNavigationContext().
+const _BROWSER_CTX_KEY = Symbol.for("vinext.navigation.browserCtx");
+type _GlobalWithBrowserCtx = typeof globalThis & { [_BROWSER_CTX_KEY]?: NavigationContext | null };
+
 // These are overridden by navigation-state.ts on the server to use ALS.
 // The defaults check globalThis for cross-module-instance access (issue #688).
 let _getServerContext = (): NavigationContext | null => {
   const g = _getGlobalAccessors();
-  return g ? g.getServerContext() : _serverContext;
+  if (g) return g.getServerContext();
+  // Browser: read from shared globalThis slot so separate module instances
+  // (e.g. pre-bundled "use client" components) see the same context.
+  const slot = (globalThis as _GlobalWithBrowserCtx)[_BROWSER_CTX_KEY];
+  return slot !== undefined ? slot : _serverContext;
 };
 let _setServerContext = (ctx: NavigationContext | null): void => {
   const g = _getGlobalAccessors();
@@ -181,6 +194,8 @@ let _setServerContext = (ctx: NavigationContext | null): void => {
     g.setServerContext(ctx);
   } else {
     _serverContext = ctx;
+    // Also share via globalThis for browser cross-module-instance access.
+    (globalThis as _GlobalWithBrowserCtx)[_BROWSER_CTX_KEY] = ctx;
   }
 };
 let _getInsertedHTMLCallbacks = (): Array<() => unknown> => {
@@ -579,6 +594,17 @@ function syncCommittedUrlStateFromLocation(): boolean {
 }
 
 function getServerSearchParamsSnapshot(): ReadonlyURLSearchParams {
+  if (!isServer) {
+    // Browser: always use the same source as getSearchParamsSnapshot() so the
+    // server and client snapshots are identical during hydration. Using the
+    // navigation context here would risk a mismatch when the context is from
+    // a different module instance or hasn't been restored yet, which causes
+    // React to discard the SSR HTML and re-render from scratch.
+    // window.location.search is always correct: afterFiles rewrites change the
+    // internal path but not the browser URL or query string.
+    return getSearchParamsSnapshot();
+  }
+  // Server: read from the request-scoped navigation context.
   const ctx = _getServerContext() as NavigationContextWithReadonlyCache | null;
 
   if (!ctx) {
@@ -1333,6 +1359,16 @@ export function forbidden(): never {
  */
 export function unauthorized(): never {
   throw new VinextNavigationError("NEXT_UNAUTHORIZED", `${HTTP_ERROR_FALLBACK_ERROR_CODE};401`);
+}
+
+/**
+ * Rethrow errors thrown by notFound(), redirect(), forbidden(), unauthorized().
+ * Call this in catch blocks to ensure navigation errors propagate correctly.
+ */
+export function unstable_rethrow(error: unknown): void {
+  if (error instanceof VinextNavigationError) {
+    throw error;
+  }
 }
 
 // ---------------------------------------------------------------------------

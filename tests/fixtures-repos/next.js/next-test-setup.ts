@@ -81,22 +81,35 @@
  *   element.getValue()                     Promise<string>
  *   element.waitForElementByCss(sel, ms?)  Promise<ElementProxy>
  *
+ * ── Server mode ───────────────────────────────────────────────────────────────
+ *
+ *   Controlled by the NEXT_TEST_MODE environment variable:
+ *
+ *     NEXT_TEST_MODE=dev     (default) — Vite dev server, HMR enabled
+ *     NEXT_TEST_MODE=start   — production build + prod server (no HMR)
+ *     NEXT_TEST_MODE=deploy  — not yet implemented (throws at startup)
+ *
  * ── Flags ─────────────────────────────────────────────────────────────────────
  *
- *   isNextDev     true    (always — we run against a Vite dev server)
- *   isNextStart   false
- *   isNextDeploy  false
+ *   isNextDev     true when NEXT_TEST_MODE=dev (or unset)
+ *   isNextStart   true when NEXT_TEST_MODE=start
+ *   isNextDeploy  true when NEXT_TEST_MODE=deploy
  *   isTurbopack   false
  *   skipped       false
  */
 
 import { beforeAll, afterAll } from "vitest";
-import { createServer, type ViteDevServer, transformWithOxc } from "vite";
+import { createServer, createBuilder, type ViteDevServer, transformWithOxc } from "vite";
 import vinext from "vinext";
 import type { AddressInfo } from "node:net";
 import { Page } from "playwright";
 import * as fs from "node:fs";
 import * as path from "node:path";
+
+/** dev | start | deploy — controlled by NEXT_TEST_MODE env var */
+export type NextTestMode = "dev" | "start" | "deploy";
+export const nextTestMode: NextTestMode =
+  (process.env.NEXT_TEST_MODE as NextTestMode | undefined) ?? "dev";
 
 // ─── Lazy Playwright singleton ────────────────────────────────────────────────
 //
@@ -525,12 +538,12 @@ export type NextInstance = {
 
 export type NextTestSetupResult = {
   next: NextInstance;
-  /** Always true — vinext only runs in dev mode. */
-  isNextDev: true;
-  /** Always false. */
-  isNextStart: false;
-  /** Always false. */
-  isNextDeploy: false;
+  /** True when running in dev mode (NEXT_TEST_MODE=dev or unset). */
+  isNextDev: boolean;
+  /** True when running in start (production) mode (NEXT_TEST_MODE=start). */
+  isNextStart: boolean;
+  /** True when running in deploy mode (NEXT_TEST_MODE=deploy). */
+  isNextDeploy: boolean;
   /** Always false — vinext does not use Turbopack. */
   isTurbopack: false;
   /** Always false — vinext does not use Rspack. */
@@ -553,9 +566,12 @@ export type NextTestSetupResult = {
 export function nextTestSetup(opts: NextTestSetupOptions): NextTestSetupResult {
   let next!: NextInstance;
 
+  // Production builds can take 2–3 min; give them extra headroom.
+  const setupTimeout = nextTestMode === "start" ? 300_000 : 90_000;
+
   beforeAll(async () => {
     next = await createNext(opts);
-  }, 90_000);
+  }, setupTimeout);
 
   afterAll(async () => {
     await next?.destroy();
@@ -577,9 +593,9 @@ export function nextTestSetup(opts: NextTestSetupOptions): NextTestSetupResult {
 
   return {
     next: proxy,
-    isNextDev: true,
-    isNextStart: false,
-    isNextDeploy: false,
+    isNextDev: nextTestMode === "dev",
+    isNextStart: nextTestMode === "start",
+    isNextDeploy: nextTestMode === "deploy",
     isTurbopack: false,
     isRspack: false,
     skipped: false,
@@ -861,6 +877,171 @@ function makeNextInstance(
  *   afterAll(() => next.destroy())
  */
 export async function createNext(opts: NextTestSetupOptions): Promise<NextInstance> {
+  if (nextTestMode === "deploy") {
+    throw new Error(
+      "[vinext] NEXT_TEST_MODE=deploy is not yet implemented. " +
+        "Set NEXT_TEST_MODE to 'dev' (default) or 'start'.",
+    );
+  }
+  if (nextTestMode === "start") {
+    return createNextStartServer(opts);
+  }
+  return createNextDevServer(opts);
+}
+
+async function createNextStartServer(opts: NextTestSetupOptions): Promise<NextInstance> {
+  const os = await import("node:os");
+  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "vinext-test-start-"));
+  let _buildOutput = "";
+  let _httpServer: import("node:http").Server | null = null;
+
+  try {
+    // Capture build output
+    const origLog = console.log.bind(console);
+    const origWarn = console.warn.bind(console);
+    const origError = console.error.bind(console);
+    const capture = (...args: unknown[]) => {
+      _buildOutput += args.map(String).join(" ") + "\n";
+    };
+    console.log = (...a) => {
+      capture(...a);
+      origLog(...a);
+    };
+    console.warn = (...a) => {
+      capture(...a);
+      origWarn(...a);
+    };
+    console.error = (...a) => {
+      capture(...a);
+      origError(...a);
+    };
+
+    // Symlink node_modules into tmpDir so the production server can resolve
+    // externalized packages (react, react-dom, etc.) at runtime. Node.js ESM
+    // walks parent directories, so placing the symlink in tmpDir (the ancestor
+    // of server/ and server/ssr/) is sufficient.
+    // The fixture dir itself may not have node_modules — walk up to find it.
+    let nodeModulesSource: string | null = null;
+    for (let dir = opts.files; ; dir = path.dirname(dir)) {
+      const candidate = path.join(dir, "node_modules");
+      if (fs.existsSync(candidate)) {
+        nodeModulesSource = candidate;
+        break;
+      }
+      const parent = path.dirname(dir);
+      if (parent === dir) break; // reached root
+    }
+    if (nodeModulesSource) {
+      await fs.promises.symlink(nodeModulesSource, path.join(tmpDir, "node_modules"));
+    }
+
+    // Build:
+    //   rscOutDir / ssrOutDir / clientOutDir are all absolute → go into tmpDir subdirs
+    const builder = await createBuilder({
+      root: opts.files,
+      configFile: false,
+      plugins: [
+        {
+          name: "vinext-e2e:js-as-jsx",
+          enforce: "pre" as const,
+          async transform(code: string, id: string) {
+            if (!id.endsWith(".js") || id.includes("node_modules")) return;
+            // oxlint-disable-next-line typescript/no-explicit-any
+            return transformWithOxc(code, id, { lang: "jsx" } as any);
+          },
+        },
+        {
+          // @vitejs/plugin-rsc hardcodes "index.js" in inter-env import paths.
+          // Rolldown defaults to .mjs when the fixture has no package.json with
+          // "type": "module". Force .js extension on rsc/ssr entry files so
+          // the generated import("./ssr/index.js") resolves correctly at runtime.
+          name: "vinext-e2e:force-js-entry-names",
+          apply: "build" as const,
+          enforce: "post" as const,
+          config(config: Record<string, unknown>) {
+            const envs = (config as Record<string, unknown>).environments as
+              | Record<string, Record<string, unknown>>
+              | undefined;
+            if (!envs) return;
+            const patch: Record<string, Record<string, unknown>> = {};
+            for (const envName of ["rsc", "ssr"]) {
+              if (!envs[envName]) continue;
+              patch[envName] = {
+                build: {
+                  rolldownOptions: { output: { entryFileNames: "[name].js" } },
+                },
+              };
+            }
+            return { environments: patch };
+          },
+        },
+        vinext({
+          appDir: opts.files,
+          rscOutDir: path.join(tmpDir, "server"),
+          ssrOutDir: path.join(tmpDir, "server", "ssr"),
+          clientOutDir: path.join(tmpDir, "client"),
+        }),
+      ],
+      resolve: {
+        dedupe: ["react", "react-dom", "react/jsx-runtime", "react/jsx-dev-runtime"],
+      },
+      build: { outDir: tmpDir },
+      logLevel: "warn",
+    });
+    await builder.buildApp();
+
+    // Restore console
+    console.log = origLog;
+    console.warn = origWarn;
+    console.error = origError;
+
+    // Start prod server
+    const { startProdServer } = await import(
+      path.resolve(import.meta.dirname, "../../../packages/vinext/dist/server/prod-server.js")
+    );
+    const { server } = await startProdServer({
+      port: 0,
+      host: "127.0.0.1",
+      outDir: tmpDir,
+    });
+    _httpServer = server;
+
+    const addr = server.address();
+    const port = typeof addr === "object" && addr ? addr.port : 3000;
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    async function doStop() {
+      await new Promise<void>((resolve) => _httpServer?.close(() => resolve()) ?? resolve());
+      _httpServer = null;
+      await fs.promises.rm(tmpDir, { recursive: true, force: true });
+    }
+
+    const next = makeNextInstance(opts, async () => {}, doStop, () => baseUrl, () => _buildOutput);
+
+    // Provide stub Next.js manifest files so isNextStart-gated beforeAll blocks
+    // don't throw when reading files that only exist in a real `next build`.
+    const origReadFile = next.readFile.bind(next);
+    next.readFile = async (filePath: string) => {
+      if (filePath === ".next/prerender-manifest.json") {
+        return JSON.stringify({
+          version: 4,
+          routes: {},
+          dynamicRoutes: {},
+          notFoundRoutes: [],
+          preview: { previewModeId: "", previewModeSigningKey: "", previewModeEncryptionKey: "" },
+        });
+      }
+      return origReadFile(filePath);
+    };
+
+    return next;
+  } catch (err) {
+    await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+    throw err;
+  }
+}
+
+async function createNextDevServer(opts: NextTestSetupOptions): Promise<NextInstance> {
   let _server: ViteDevServer | null = null;
   let _baseUrl = "";
   let _cliOutput = "";
@@ -957,12 +1138,14 @@ export async function createNext(opts: NextTestSetupOptions): Promise<NextInstan
   return next;
 }
 
-export const isNextDev = true;
+export const isNextDev = nextTestMode === "dev";
+export const isNextStart = nextTestMode === "start";
+export const isNextDeploy = nextTestMode === "deploy";
 
 // ─── Global flags ────────────────────────────────────────────────────────────
 //
 // Some ported Next.js tests check `(global as any).isNextDev` to gate
 // production-only assertions. Set the global flags so those guards work.
-(globalThis as Record<string, unknown>).isNextDev = true;
-(globalThis as Record<string, unknown>).isNextStart = false;
-(globalThis as Record<string, unknown>).isNextDeploy = false;
+(globalThis as Record<string, unknown>).isNextDev = isNextDev;
+(globalThis as Record<string, unknown>).isNextStart = isNextStart;
+(globalThis as Record<string, unknown>).isNextDeploy = isNextDeploy;

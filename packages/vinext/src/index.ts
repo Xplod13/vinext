@@ -1734,6 +1734,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                 // on every page — defeating code-splitting for React.lazy() and
                 // next/dynamic boundaries.
                 ...(hasCloudflarePlugin ? { manifest: true } : {}),
+                ...(options.clientOutDir ? { outDir: options.clientOutDir } : {}),
                 ...withBuildBundlerOptions(viteMajorVersion, {
                   input: { index: VIRTUAL_APP_BROWSER_ENTRY },
                   output: getClientOutputConfigForVite(viteMajorVersion),

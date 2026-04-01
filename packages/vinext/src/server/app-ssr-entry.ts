@@ -215,7 +215,14 @@ export async function handleSsr(
 
       return htmlStream.pipeThrough(createTickBufferedTransform(rscEmbed, injectHTML));
     } finally {
-      setNavigationContext(null);
+      // Don't clear navigation context here: the `finally` runs when
+      // renderToReadableStream resolves (shell ready), but deferred Suspense
+      // content is still streaming. Clearing the context prematurely causes
+      // client components inside Suspense boundaries (e.g. useSearchParams)
+      // to render with null context and produce wrong output (e.g. "N/A").
+      // The ALS scope from runWithNavigationContext provides per-request
+      // isolation — the state object lives as long as its async chain does
+      // and is GC'd when the stream completes.
       clearServerInsertedHTML();
     }
   }) as Promise<ReadableStream<Uint8Array>>;

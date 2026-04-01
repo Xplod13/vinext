@@ -812,8 +812,11 @@ export async function startProdServer(options: ProdServerOptions = {}) {
   const resolvedOutDir = path.resolve(outDir);
   const clientDir = path.join(resolvedOutDir, "client");
 
-  // Detect build type
-  const rscEntryPath = path.join(resolvedOutDir, "server", "index.js");
+  // Detect build type — check both .js and .mjs (rolldown emits .mjs when the
+  // project root has no package.json with "type": "module")
+  const rscEntryPathJs = path.join(resolvedOutDir, "server", "index.js");
+  const rscEntryPathMjs = path.join(resolvedOutDir, "server", "index.mjs");
+  const rscEntryPath = fs.existsSync(rscEntryPathJs) ? rscEntryPathJs : rscEntryPathMjs;
   const serverEntryPath = path.join(resolvedOutDir, "server", "entry.js");
   const isAppRouter = fs.existsSync(rscEntryPath);
 
