@@ -17,7 +17,11 @@
  *   setCacheHandler(new MyCacheHandler());
  */
 
-import { markDynamicUsage as _markDynamic, getHeadersAccessPhase, _isDraftModeEnabled } from "./headers.js";
+import {
+  markDynamicUsage as _markDynamic,
+  getHeadersAccessPhase,
+  _isDraftModeEnabled,
+} from "./headers.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { fnv1a64 } from "../utils/hash.js";
 import {
@@ -220,7 +224,7 @@ export class MemoryCacheHandler implements CacheHandler {
     const staleAt =
       ctxStaleAt !== null && entry.revalidateAt !== null
         ? Math.min(ctxStaleAt, entry.revalidateAt)
-        : ctxStaleAt ?? entry.revalidateAt;
+        : (ctxStaleAt ?? entry.revalidateAt);
     if (staleAt !== null && Date.now() > staleAt) {
       return {
         lastModified: entry.lastModified,
@@ -360,6 +364,9 @@ export async function revalidateTag(
   tag: string,
   profile?: string | { expire?: number },
 ): Promise<void> {
+  if (profile === undefined) {
+    console.warn('"revalidateTag" without the second argument is now deprecated');
+  }
   // Resolve the profile to durations for the handler
   let durations: { expire?: number } | undefined;
   if (typeof profile === "string") {
