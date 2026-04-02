@@ -1011,11 +1011,13 @@ export async function prerenderApp({
           };
         }
 
-        // Detect dynamic usage for speculative routes via Cache-Control header.
-        // When headers(), cookies(), connection(), or noStore() are called during
-        // render, the server sets Cache-Control: no-store. We treat this as a
-        // signal that the route is dynamic and should be skipped.
-        if (isSpeculative) {
+        // Detect dynamic usage via Cache-Control: no-store in the render response.
+        // When headers(), cookies(), noStore(), or a no-store/revalidate:0 fetch
+        // is called during render, the server sets Cache-Control: no-store.
+        // We treat this as a signal that the route is dynamic and should not be
+        // seeded into the ISR cache — even for non-speculative routes (those with
+        // an explicit generateStaticParams) whose fetches indicate dynamic data.
+        {
           const cacheControl = htmlRes.headers.get("cache-control") ?? "";
           if (cacheControl.includes("no-store")) {
             await htmlRes.body?.cancel();

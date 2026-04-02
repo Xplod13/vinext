@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import type { CachedAppPageValue } from "../shims/cache.js";
+import { getMinFetchRevalidate } from "../shims/fetch-cache.js";
 import {
   finalizeAppPageHtmlCacheResponse,
   scheduleAppPageRscCacheWrite,
@@ -148,13 +149,13 @@ export async function renderAppPageLifecycle(
   });
 
   let revalidateSeconds = options.revalidateSeconds;
+  // Capture the RSC stream in all production non-force-dynamic renders so that
+  // if the post-render min-fetch-revalidate reveals a finite TTL (Category E),
+  // the RSC data is available to write alongside the HTML cache entry.
+  // Pages that turn out to be uncacheable simply discard the buffered data.
   const rscCapture = teeAppPageRscStreamForCapture(
     rscStream,
-    options.isProduction &&
-      revalidateSeconds !== null &&
-      revalidateSeconds > 0 &&
-      revalidateSeconds !== Infinity &&
-      !options.isForceDynamic,
+    options.isProduction && !options.isForceDynamic,
   );
   const rscForResponse = rscCapture.responseStream;
   const isrRscDataPromise = rscCapture.capturedRscDataPromise;
@@ -260,6 +261,16 @@ export async function renderAppPageLifecycle(
   const requestCacheLife = options.getRequestCacheLife();
   if (requestCacheLife?.revalidate !== undefined && revalidateSeconds === null) {
     revalidateSeconds = requestCacheLife.revalidate;
+  }
+  // Derive page ISR TTL from the minimum fetch-level revalidate seen during
+  // this render, when no explicit `export const revalidate` is present.
+  // This matches Next.js semantics: the page revalidates at the rate of its
+  // shortest-lived fetch (e.g. `next: { revalidate: 3 }` → page TTL = 3s).
+  if (revalidateSeconds === null) {
+    const minFetch = getMinFetchRevalidate();
+    if (minFetch !== null && minFetch > 0) {
+      revalidateSeconds = minFetch;
+    }
   }
 
   // Defer clearRequestContext() until the HTML stream is fully consumed by the

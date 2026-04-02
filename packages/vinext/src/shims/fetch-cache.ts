@@ -22,6 +22,7 @@
 import { getCacheHandler, type CachedFetchValue } from "./cache.js";
 import { getRequestExecutionContext } from "./request-context.js";
 import { getNavigationContext } from "./navigation.js";
+import { markDynamicUsage } from "./headers.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
   isInsideUnifiedScope,
@@ -505,6 +506,14 @@ export type FetchCacheState = {
   pageFetchCachePolicy?: string;
   /** When true, bypass the fetch cache for this request (incoming Cache-Control: no-cache). */
   bypassFetchCache?: boolean;
+  /**
+   * Minimum fetch-level revalidate seen during this render.
+   * Tracks the smallest `next.revalidate` value across all fetch() calls so
+   * the page-level ISR TTL can be derived from fetch revalidation times when
+   * no explicit `export const revalidate` is set on the page.
+   * `null` = no finite revalidate seen yet; `Infinity` = only force-cache seen.
+   */
+  minFetchRevalidate: number | null;
 };
 
 const _ALS_KEY = Symbol.for("vinext.fetchCache.als");
@@ -517,6 +526,7 @@ const _fallbackState = (_g[_FALLBACK_KEY] ??= {
   currentRequestTags: [],
   pageFetchCachePolicy: undefined,
   bypassFetchCache: false,
+  minFetchRevalidate: null,
 } satisfies FetchCacheState) as FetchCacheState;
 
 function _getState(): FetchCacheState {
@@ -534,6 +544,7 @@ function _resetFallbackState(): void {
   _fallbackState.currentRequestTags = [];
   _fallbackState.pageFetchCachePolicy = undefined;
   _fallbackState.bypassFetchCache = false;
+  _fallbackState.minFetchRevalidate = null;
 }
 
 /**
@@ -559,6 +570,25 @@ export function setBypassFetchCache(bypass: boolean): void {
  */
 export function getCollectedFetchTags(): string[] {
   return [..._getState().currentRequestTags];
+}
+
+/**
+ * Get the minimum fetch-level revalidate seen during this render.
+ * Used to derive the page ISR TTL when no explicit `export const revalidate`
+ * is set: if all fetches have `next: { revalidate: N }`, the page should
+ * revalidate at the same rate as the shortest-lived fetch.
+ * Returns null when no finite revalidate was observed.
+ */
+export function getMinFetchRevalidate(): number | null {
+  return _getState().minFetchRevalidate;
+}
+
+/** Update the running minimum fetch revalidate for this render. */
+function _trackFetchRevalidate(seconds: number): void {
+  const state = _getState();
+  if (state.minFetchRevalidate === null || seconds < state.minFetchRevalidate) {
+    state.minFetchRevalidate = seconds;
+  }
 }
 
 /**
@@ -596,24 +626,34 @@ function createPatchedFetch(): typeof globalThis.fetch {
     // cache directives. When active, ALL fetches on the page are cached,
     // regardless of per-fetch cache or next.revalidate options, matching
     // Next.js segment-config semantics.
-    const pageForceCacheAll = fetchState.pageFetchCachePolicy === "force-cache";
+    const pageFetchCachePolicy = fetchState.pageFetchCachePolicy;
+    const pageForceCacheAll = pageFetchCachePolicy === "force-cache";
     const cacheDirective: RequestInit["cache"] = pageForceCacheAll ? "force-cache" : rawCacheDirective;
 
     // Determine caching behavior:
-    // - cache: 'no-store' → skip cache entirely
+    // - cache: 'no-store' → skip cache entirely, mark page as dynamic
     // - cache: 'force-cache' → cache indefinitely (revalidate = Infinity)
     // - next.revalidate: false → same as 'no-store'
-    // - next.revalidate: 0 → same as 'no-store'
+    // - next.revalidate: 0 → same as 'no-store', mark page as dynamic
     // - next.revalidate: N → cache for N seconds
+    // - No cache/next options + default-cache policy → treat as force-cache
     // - No cache/next options → default behavior (no caching, pass-through)
 
-    // If no caching options at all, just pass through to original fetch
+    // If no caching options at all, handle based on page-level policy.
     if (!nextOpts && !cacheDirective) {
-      return _getEffectiveFetch()(input, init);
+      if (pageFetchCachePolicy === "default-cache") {
+        // `fetchCache = 'default-cache'`: unconfigured fetches use the Next.js
+        // production default, which is to cache them (same as force-cache).
+        // Fall through to the caching path below with implicit force-cache TTL.
+      } else {
+        return _getEffectiveFetch()(input, init);
+      }
     }
 
     // Explicit no-store or no-cache — bypass cache entirely.
     // Page-level force-cache overrides these individual-fetch bypass conditions.
+    // Mark dynamic usage so the page response gets Cache-Control: no-store,
+    // preventing the prerender phase from incorrectly ISR-seeding the page.
     if (
       !pageForceCacheAll &&
       (cacheDirective === "no-store" ||
@@ -621,6 +661,9 @@ function createPatchedFetch(): typeof globalThis.fetch {
         nextOpts?.revalidate === false ||
         nextOpts?.revalidate === 0)
     ) {
+      // no-store / revalidate:0 fetches make the page dynamic — mark it so
+      // the response policy emits Cache-Control: no-store.
+      markDynamicUsage();
       // Strip the `next` property before passing to real fetch
       const cleanInit = stripNextFromInit(init);
       return _getEffectiveFetch()(input, cleanInit);
@@ -641,8 +684,8 @@ function createPatchedFetch(): typeof globalThis.fetch {
 
     // Determine revalidation period
     let revalidateSeconds: number;
-    if (cacheDirective === "force-cache") {
-      // force-cache means cache indefinitely (we use a very large number)
+    if (cacheDirective === "force-cache" || (!nextOpts && !cacheDirective && pageFetchCachePolicy === "default-cache")) {
+      // force-cache / default-cache with no explicit options: cache indefinitely.
       revalidateSeconds =
         nextOpts?.revalidate && typeof nextOpts.revalidate === "number"
           ? nextOpts.revalidate
@@ -660,6 +703,12 @@ function createPatchedFetch(): typeof globalThis.fetch {
         const cleanInit = stripNextFromInit(init);
         return _getEffectiveFetch()(input, cleanInit);
       }
+    }
+
+    // Track the minimum finite revalidate for page ISR TTL derivation.
+    // Infinite (force-cache) fetches don't constrain the page TTL.
+    if (revalidateSeconds < 31536000) {
+      _trackFetchRevalidate(revalidateSeconds);
     }
 
     const tags = nextOpts?.tags ?? [];
@@ -705,11 +754,40 @@ function createPatchedFetch(): typeof globalThis.fetch {
       const cached = await handler.get(cacheKey, { kind: "FETCH", tags, revalidate: revalidateSeconds });
       if (cached?.value && cached.value.kind === "FETCH" && cached.cacheState !== "stale") {
         const cachedData = cached.value.data;
-        // Reconstruct a Response from the cached data
-        return new Response(cachedData.body, {
+        // Reconstruct a Response from the cached data, preserving the original URL.
+        // Response.url is read-only so we use Object.defineProperty.
+        const res = new Response(cachedData.body, {
           status: cachedData.status ?? 200,
           headers: cachedData.headers,
         });
+        if (cachedData.url) {
+          Object.defineProperty(res, "url", { value: cachedData.url, configurable: true });
+        }
+
+        // Tag maintenance: ensure the current page's implicit path tag is included
+        // in the cache entry's tags so that revalidatePath() for the current page
+        // will invalidate this entry on the next access, even if the entry was
+        // originally cached during a different page's render.
+        // Example: a layout fetch cached during /page-A render carries tag
+        // _N_T_/page-A. When /page-B (same layout) renders and gets a HIT,
+        // revalidatePath('/page-B') would not invalidate it — until we add
+        // _N_T_/page-B here. We update the stored entry (fire-and-forget) so
+        // the tag is persisted for the next revalidatePath() check.
+        const _hitNavPathname = getNavigationContext()?.pathname;
+        const _hitPathTag = _hitNavPathname ? `_N_T_${_hitNavPathname}` : null;
+        const _hitStoredTags: string[] = Array.isArray(cached.value.tags) ? cached.value.tags : [];
+        if (_hitPathTag && !_hitStoredTags.includes(_hitPathTag)) {
+          const _hitUpdatedTags = [..._hitStoredTags, _hitPathTag];
+          handler
+            .set(cacheKey, { ...cached.value, tags: _hitUpdatedTags }, {
+              fetchCache: true,
+              tags: _hitUpdatedTags,
+              revalidate: (cached.value as CachedFetchValue).revalidate ?? revalidateSeconds,
+            })
+            .catch(() => {});
+        }
+
+        return res;
       }
 
       // Stale entry — stale-while-revalidate: return the stale response
@@ -796,11 +874,15 @@ function createPatchedFetch(): typeof globalThis.fetch {
           getRequestExecutionContext()?.waitUntil(refetchPromise);
         }
 
-        // Return stale data immediately
-        return new Response(staleData.body, {
+        // Return stale data immediately, preserving the original URL.
+        const staleRes = new Response(staleData.body, {
           status: staleData.status ?? 200,
           headers: staleData.headers,
         });
+        if (staleData.url) {
+          Object.defineProperty(staleRes, "url", { value: staleData.url, configurable: true });
+        }
+        return staleRes;
       }
     } catch (cacheErr) {
       // Cache read failed — fall through to network
@@ -837,10 +919,14 @@ function createPatchedFetch(): typeof globalThis.fetch {
         response.headers.forEach((v, k) => {
           responseHeaders[k] = v;
         });
-        return new Response(body, {
+        const oversizeRes = new Response(body, {
           status: response.status,
           headers: responseHeaders,
         });
+        if (response.url) {
+          Object.defineProperty(oversizeRes, "url", { value: response.url, configurable: true });
+        }
+        return oversizeRes;
       }
 
       const headers: Record<string, string> = {};
