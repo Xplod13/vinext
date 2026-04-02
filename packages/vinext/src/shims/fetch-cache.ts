@@ -628,7 +628,9 @@ function createPatchedFetch(): typeof globalThis.fetch {
     // Next.js segment-config semantics.
     const pageFetchCachePolicy = fetchState.pageFetchCachePolicy;
     const pageForceCacheAll = pageFetchCachePolicy === "force-cache";
-    const cacheDirective: RequestInit["cache"] = pageForceCacheAll ? "force-cache" : rawCacheDirective;
+    const cacheDirective: RequestInit["cache"] = pageForceCacheAll
+      ? "force-cache"
+      : rawCacheDirective;
 
     // Determine caching behavior:
     // - cache: 'no-store' → skip cache entirely, mark page as dynamic
@@ -663,7 +665,7 @@ function createPatchedFetch(): typeof globalThis.fetch {
     ) {
       // no-store / revalidate:0 fetches make the page dynamic — mark it so
       // the response policy emits Cache-Control: no-store.
-      markDynamicUsage();
+      markDynamicUsage("no-store fetch");
       // Strip the `next` property before passing to real fetch
       const cleanInit = stripNextFromInit(init);
       return _getEffectiveFetch()(input, cleanInit);
@@ -684,7 +686,10 @@ function createPatchedFetch(): typeof globalThis.fetch {
 
     // Determine revalidation period
     let revalidateSeconds: number;
-    if (cacheDirective === "force-cache" || (!nextOpts && !cacheDirective && pageFetchCachePolicy === "default-cache")) {
+    if (
+      cacheDirective === "force-cache" ||
+      (!nextOpts && !cacheDirective && pageFetchCachePolicy === "default-cache")
+    ) {
       // force-cache / default-cache with no explicit options: cache indefinitely.
       revalidateSeconds =
         nextOpts?.revalidate && typeof nextOpts.revalidate === "number"
@@ -751,7 +756,11 @@ function createPatchedFetch(): typeof globalThis.fetch {
 
     // Try cache first
     try {
-      const cached = await handler.get(cacheKey, { kind: "FETCH", tags, revalidate: revalidateSeconds });
+      const cached = await handler.get(cacheKey, {
+        kind: "FETCH",
+        tags,
+        revalidate: revalidateSeconds,
+      });
       if (cached?.value && cached.value.kind === "FETCH" && cached.cacheState !== "stale") {
         const cachedData = cached.value.data;
         // Reconstruct a Response from the cached data, preserving the original URL.
@@ -779,11 +788,15 @@ function createPatchedFetch(): typeof globalThis.fetch {
         if (_hitPathTag && !_hitStoredTags.includes(_hitPathTag)) {
           const _hitUpdatedTags = [..._hitStoredTags, _hitPathTag];
           handler
-            .set(cacheKey, { ...cached.value, tags: _hitUpdatedTags }, {
-              fetchCache: true,
-              tags: _hitUpdatedTags,
-              revalidate: (cached.value as CachedFetchValue).revalidate ?? revalidateSeconds,
-            })
+            .set(
+              cacheKey,
+              { ...cached.value, tags: _hitUpdatedTags },
+              {
+                fetchCache: true,
+                tags: _hitUpdatedTags,
+                revalidate: (cached.value as CachedFetchValue).revalidate ?? revalidateSeconds,
+              },
+            )
             .catch(() => {});
         }
 
@@ -904,11 +917,7 @@ function createPatchedFetch(): typeof globalThis.fetch {
       const MAX_RESPONSE_CACHE_BYTES = 2 * 1024 * 1024;
       if (Buffer.byteLength(body, "utf8") > MAX_RESPONSE_CACHE_BYTES) {
         const fetchUrl =
-          typeof input === "string"
-            ? input
-            : input instanceof URL
-              ? input.toString()
-              : input.url;
+          typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
         console.warn(
           `Failed to set Next.js data cache for ${fetchUrl}, items over 2MB can not be cached`,
         );
@@ -1042,7 +1051,7 @@ export async function runWithFetchCache<T>(fn: () => Promise<T>): Promise<T> {
       uCtx.currentRequestTags = [];
     }, fn);
   }
-  return _als.run({ currentRequestTags: [] }, fn);
+  return _als.run({ currentRequestTags: [], minFetchRevalidate: null }, fn);
 }
 
 /**

@@ -28,6 +28,12 @@ export type HeadersContext = {
   mutableCookies?: RequestCookies;
   readonlyCookies?: RequestCookies;
   readonlyHeaders?: Headers;
+  /**
+   * The first dynamic-usage reason recorded during this request's render.
+   * Set by markDynamicUsage() when called with a reason. Used by the prerender
+   * phase to emit human-readable bailout diagnostics (e.g. "reason: headers").
+   */
+  dynamicUsageReason?: string;
 };
 
 export type HeadersAccessPhase = "render" | "action" | "route-handler";
@@ -79,9 +85,19 @@ function _getState(): VinextHeadersShimState {
 /**
  * Mark the current render as requiring dynamic (uncached) rendering.
  * Called by connection(), cookies(), headers(), and noStore().
+ *
+ * @param reason - Human-readable cause (e.g. "headers", "no-store fetch").
+ *   The first reason set during a render wins; subsequent calls do not
+ *   overwrite it.  Used by the prerender phase for bailout diagnostics.
  */
-export function markDynamicUsage(): void {
-  _getState().dynamicUsageDetected = true;
+export function markDynamicUsage(reason?: string): void {
+  const state = _getState();
+  state.dynamicUsageDetected = true;
+  // Record the first reason only; write through to headersContext so the
+  // prerender phase can read it from the shared reference after the render.
+  if (reason && state.headersContext && !state.headersContext.dynamicUsageReason) {
+    state.headersContext.dynamicUsageReason = reason;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -140,6 +156,15 @@ export function consumeDynamicUsage(): boolean {
   const used = state.dynamicUsageDetected;
   state.dynamicUsageDetected = false;
   return used;
+}
+
+/**
+ * Return the first dynamic-usage reason recorded during the current render,
+ * or null if none was set. Must be called while the request context is still
+ * active (before clearRequestContext / ALS scope exit).
+ */
+export function getDynamicUsageReason(): string | null {
+  return _getState().headersContext?.dynamicUsageReason ?? null;
 }
 
 function _setStatePhase(
@@ -523,7 +548,7 @@ export function headers(): Promise<Headers> & Headers {
     return _decorateRejectedRequestApiPromise<Headers>(state.headersContext.accessError);
   }
 
-  markDynamicUsage();
+  markDynamicUsage("headers");
   const readonlyHeaders = _getReadonlyHeaders(state.headersContext);
   return _decorateRequestApiPromise(Promise.resolve(readonlyHeaders), readonlyHeaders);
 }
@@ -552,7 +577,7 @@ export function cookies(): Promise<RequestCookies> & RequestCookies {
     return _decorateRejectedRequestApiPromise<RequestCookies>(state.headersContext.accessError);
   }
 
-  markDynamicUsage();
+  markDynamicUsage("headers");
   const cookieStore = _areCookiesMutableInCurrentPhase()
     ? _getMutableCookies(state.headersContext)
     : _getReadonlyCookies(state.headersContext);
@@ -648,7 +673,7 @@ export async function draftMode(): Promise<DraftModeResult> {
   if (state.headersContext?.accessError) {
     throw state.headersContext.accessError;
   }
-  markDynamicUsage();
+  markDynamicUsage("headers");
   const secret = getDraftSecret();
   const isEnabled = state.headersContext
     ? state.headersContext.cookies.get(DRAFT_MODE_COOKIE) === secret

@@ -1020,7 +1020,13 @@ export async function prerenderApp({
         {
           const cacheControl = htmlRes.headers.get("cache-control") ?? "";
           if (cacheControl.includes("no-store")) {
+            const dynamicReason = htmlRes.headers.get("x-vinext-dynamic-reason");
             await htmlRes.body?.cancel();
+            if (dynamicReason) {
+              console.log(
+                `Static generation failed due to dynamic usage on ${urlPath}, reason: ${dynamicReason}`,
+              );
+            }
             return { route: routePattern, status: "skipped", reason: "dynamic" };
           }
         }

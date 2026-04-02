@@ -44,6 +44,7 @@ export type BuildAppPageRscResponseOptions = {
 
 export type BuildAppPageHtmlResponseOptions = {
   draftCookie?: string | null;
+  dynamicUsageReason?: string | null;
   fontLinkHeader?: string;
   middlewareContext: AppPageMiddlewareContext;
   policy: AppPageResponsePolicy;
@@ -223,6 +224,9 @@ export function buildAppPageHtmlResponse(
   }
   if (options.fontLinkHeader) {
     headers.set("Link", options.fontLinkHeader);
+  }
+  if (options.dynamicUsageReason) {
+    headers.set("X-Vinext-Dynamic-Reason", options.dynamicUsageReason);
   }
 
   if (options.middlewareContext.headers) {

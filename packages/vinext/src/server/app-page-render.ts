@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import type { CachedAppPageValue } from "../shims/cache.js";
 import { getMinFetchRevalidate } from "../shims/fetch-cache.js";
+import { getDynamicUsageReason } from "../shims/headers.js";
 import {
   finalizeAppPageHtmlCacheResponse,
   scheduleAppPageRscCacheWrite,
@@ -193,7 +194,7 @@ export async function renderAppPageLifecycle(
       isrDebug: options.isrDebug,
       isrRscKey: options.isrRscKey,
       isrSet: options.isrSet,
-      revalidateSeconds,
+      revalidateSeconds: revalidateSeconds ?? 0,
       waitUntil(promise) {
         options.waitUntil?.(promise);
       },
@@ -258,6 +259,8 @@ export async function renderAppPageLifecycle(
   // Eagerly read values that must be captured before the stream is consumed.
   const draftCookie = options.getDraftModeCookieHeader();
   const dynamicUsedDuringRender = options.consumeDynamicUsage();
+  // Capture reason AFTER consumeDynamicUsage so the headersContext is still live.
+  const dynamicUsageReason = dynamicUsedDuringRender ? getDynamicUsageReason() : null;
   const requestCacheLife = options.getRequestCacheLife();
   if (requestCacheLife?.revalidate !== undefined && revalidateSeconds === null) {
     revalidateSeconds = requestCacheLife.revalidate;
@@ -302,6 +305,7 @@ export async function renderAppPageLifecycle(
   if (htmlResponsePolicy.shouldWriteToCache) {
     const isrResponse = buildAppPageHtmlResponse(safeHtmlStream, {
       draftCookie,
+      dynamicUsageReason,
       fontLinkHeader,
       middlewareContext: options.middlewareContext,
       policy: htmlResponsePolicy,
@@ -326,6 +330,7 @@ export async function renderAppPageLifecycle(
 
   return buildAppPageHtmlResponse(safeHtmlStream, {
     draftCookie,
+    dynamicUsageReason,
     fontLinkHeader,
     middlewareContext: options.middlewareContext,
     policy: htmlResponsePolicy,
