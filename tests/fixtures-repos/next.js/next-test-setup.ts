@@ -327,9 +327,12 @@ async function makeBrowserInstance(
   // (onClick, etc.) are attached before tests start interacting with the page.
   // app-browser-entry.ts sets window.__VINEXT_HYDRATED_AT after hydration.
   await page
-    .waitForFunction(() => typeof (window as any).__VINEXT_HYDRATED_AT === "number", {
-      timeout: 15_000,
-    })
+    .waitForFunction(
+      () => typeof (window as Record<string, unknown>).__VINEXT_HYDRATED_AT === "number",
+      {
+        timeout: 15_000,
+      },
+    )
     .catch(() => {
       // If not an RSC page (e.g. Pages Router or static), hydration marker
       // won't be set — fall through silently and let the test proceed.
@@ -509,8 +512,16 @@ export type NextInstance = {
    */
   testDir: string;
   fetch(urlPath: string, init?: RequestInit): Promise<Response>;
-  render(urlPath: string, query?: Record<string, string> | RequestInit, init?: RequestInit): Promise<string>;
-  render$(urlPath: string, query?: Record<string, string> | RequestInit, init?: RequestInit): Promise<CheerioStatic>;
+  render(
+    urlPath: string,
+    query?: Record<string, string> | RequestInit,
+    init?: RequestInit,
+  ): Promise<string>;
+  render$(
+    urlPath: string,
+    query?: Record<string, string> | RequestInit,
+    init?: RequestInit,
+  ): Promise<CheerioStatic>;
   // oxlint-disable-next-line typescript/no-explicit-any
   browser(urlPath: string, opts?: BrowserNavigateOptions): Promise<BrowserInstance>;
 
@@ -719,11 +730,12 @@ function patchResponseBodyForNodeCompat(res: Response): Response {
         headers: res.headers,
       });
       // Keep a reference so fetch() returns the patched version.
+      // oxlint-disable-next-line typescript/no-explicit-any
       (res as any)._consumerResponse = consumerResponse;
 
       // Start draining the event fork asynchronously.
       const reader = eventFork.getReader();
-      (async () => {
+      void (async () => {
         try {
           while (true) {
             const { done, value } = await reader.read();
@@ -758,7 +770,9 @@ function patchResponseBodyForNodeCompat(res: Response): Response {
       // Always serve .body from the original response so .on() is available.
       if (prop === "body") return target.body;
       // For everything else that reads the body, use the consumer fork once teed.
+      // oxlint-disable-next-line typescript/no-explicit-any
       const src = (target as any)._consumerResponse ?? target;
+      // oxlint-disable-next-line typescript/no-explicit-any
       const val = (src as any)[prop];
       return typeof val === "function" ? val.bind(src) : val;
     },
@@ -848,13 +862,24 @@ function makeNextInstance(
       return fetch(normalised, init).then(patchResponseBodyForNodeCompat);
     },
 
-    async render(urlPath: string, queryOrInit?: Record<string, string> | RequestInit, init?: RequestInit) {
+    async render(
+      urlPath: string,
+      queryOrInit?: Record<string, string> | RequestInit,
+      init?: RequestInit,
+    ) {
       // Support both (path, init?) and (path, query, init?) signatures.
       let resolvedInit: RequestInit | undefined;
       if (init !== undefined) {
         // 3-arg form: (path, query, init) — query is currently ignored (no query support needed)
         resolvedInit = init;
-      } else if (queryOrInit && ("headers" in queryOrInit || "method" in queryOrInit || "body" in queryOrInit || "signal" in queryOrInit || "redirect" in queryOrInit)) {
+      } else if (
+        queryOrInit &&
+        ("headers" in queryOrInit ||
+          "method" in queryOrInit ||
+          "body" in queryOrInit ||
+          "signal" in queryOrInit ||
+          "redirect" in queryOrInit)
+      ) {
         // 2-arg form: (path, init) — second arg looks like RequestInit
         resolvedInit = queryOrInit as RequestInit;
       }
@@ -862,8 +887,13 @@ function makeNextInstance(
       return (await next.fetch(urlPath, resolvedInit)).text();
     },
 
-    async render$(urlPath: string, queryOrInit?: Record<string, string> | RequestInit, init?: RequestInit) {
+    async render$(
+      urlPath: string,
+      queryOrInit?: Record<string, string> | RequestInit,
+      init?: RequestInit,
+    ) {
       const html = await next.render(urlPath, queryOrInit, init);
+      // oxlint-disable-next-line typescript/unbound-method
       const { load } = await import("cheerio");
       return load(html);
     },
@@ -960,6 +990,7 @@ async function createNextStartServer(opts: NextTestSetupOptions): Promise<NextIn
             return transformWithOxc(code, id, { lang: "jsx" } as any);
           },
         },
+        // oxlint-disable-next-line typescript/no-explicit-any -- PluginOption type variance
         {
           // @vitejs/plugin-rsc hardcodes "index.js" in inter-env import paths.
           // Rolldown defaults to .mjs when the fixture has no package.json with
@@ -982,9 +1013,9 @@ async function createNextStartServer(opts: NextTestSetupOptions): Promise<NextIn
                 },
               };
             }
-            return { environments: patch };
+            return { environments: patch } as Record<string, unknown>;
           },
-        },
+        } as unknown as import("vite").PluginOption,
         vinext({
           appDir: opts.files,
           rscOutDir: path.join(tmpDir, "server"),
@@ -1010,13 +1041,22 @@ async function createNextStartServer(opts: NextTestSetupOptions): Promise<NextIn
     if (fs.existsSync(serverManifestPath)) {
       const serverManifest = JSON.parse(fs.readFileSync(serverManifestPath, "utf-8"));
       const { buildId } = serverManifest;
-      origLog("[vinext-e2e] vinext-server.json:", JSON.stringify({ ...serverManifest, prerenderSecret: "<redacted>" }));
+      origLog(
+        "[vinext-e2e] vinext-server.json:",
+        JSON.stringify({ ...serverManifest, prerenderSecret: "<redacted>" }),
+      );
       // Check if the RSC bundle contains the buildId
       const rscBundlePath = path.join(tmpDir, "server", "index.js");
       if (fs.existsSync(rscBundlePath) && buildId) {
         const bundleHead = fs.readFileSync(rscBundlePath, "utf-8").slice(0, 50000);
         const hasBuildId = bundleHead.includes(buildId);
-        origLog("[vinext-e2e] RSC bundle contains buildId:", hasBuildId, "(looked for:", buildId, ")");
+        origLog(
+          "[vinext-e2e] RSC bundle contains buildId:",
+          hasBuildId,
+          "(looked for:",
+          buildId,
+          ")",
+        );
       }
     } else {
       origWarn("[vinext-e2e] vinext-server.json NOT FOUND at", serverManifestPath);
@@ -1027,7 +1067,10 @@ async function createNextStartServer(opts: NextTestSetupOptions): Promise<NextIn
     // The prod server and prerender run in the same process, so the mock is
     // shared via globalThis[Symbol.for(...)].
     const _OVERRIDE_KEY = Symbol.for("vinext.fetchCache.override");
-    const _rawFetch = ((globalThis as Record<PropertyKey, unknown>)[Symbol.for("vinext.fetchCache.originalFetch")] as typeof fetch | undefined) ?? fetch;
+    const _rawFetch =
+      ((globalThis as Record<PropertyKey, unknown>)[
+        Symbol.for("vinext.fetchCache.originalFetch")
+      ] as typeof fetch | undefined) ?? fetch;
     (globalThis as Record<PropertyKey, unknown>)[_OVERRIDE_KEY] = async (
       input: string | URL | Request,
       init?: RequestInit,
@@ -1128,10 +1171,19 @@ async function createNextStartServer(opts: NextTestSetupOptions): Promise<NextIn
       await fs.promises.rm(tmpDir, { recursive: true, force: true });
     }
 
-    const next = makeNextInstance(opts, async () => {}, doStop, () => baseUrl, () => _buildOutput, tmpDir);
+    const next = makeNextInstance(
+      opts,
+      async () => {},
+      doStop,
+      () => baseUrl,
+      () => _buildOutput,
+      tmpDir,
+    );
 
     // Provide stub Next.js manifest files so isNextStart-gated beforeAll blocks
     // don't throw when reading files that only exist in a real `next build`.
+    // In start mode, try tmpDir first (the production build output) before
+    // falling back to the source files in opts.files.
     const origReadFile = next.readFile.bind(next);
     next.readFile = async (filePath: string) => {
       if (filePath === ".next/prerender-manifest.json") {
@@ -1143,7 +1195,21 @@ async function createNextStartServer(opts: NextTestSetupOptions): Promise<NextIn
           preview: { previewModeId: "", previewModeSigningKey: "", previewModeEncryptionKey: "" },
         });
       }
-      return origReadFile(filePath);
+      const tmpPath = path.join(tmpDir, filePath);
+      try {
+        return fs.readFileSync(tmpPath, "utf-8");
+      } catch {
+        return origReadFile(filePath);
+      }
+    };
+    const origReadJSON = next.readJSON.bind(next);
+    next.readJSON = async (filePath: string) => {
+      const tmpPath = path.join(tmpDir, filePath);
+      try {
+        return JSON.parse(fs.readFileSync(tmpPath, "utf-8"));
+      } catch {
+        return origReadJSON(filePath);
+      }
     };
 
     return next;
@@ -1202,7 +1268,10 @@ async function createNextDevServer(opts: NextTestSetupOptions): Promise<NextInst
     // The vinext server runs in the same process, so globalThis[Symbol.for(...)]
     // is shared between test code and the RSC environment.
     const _OVERRIDE_KEY = Symbol.for("vinext.fetchCache.override");
-    const _rawFetch = ((globalThis as Record<PropertyKey, unknown>)[Symbol.for("vinext.fetchCache.originalFetch")] as typeof fetch | undefined) ?? fetch;
+    const _rawFetch =
+      ((globalThis as Record<PropertyKey, unknown>)[
+        Symbol.for("vinext.fetchCache.originalFetch")
+      ] as typeof fetch | undefined) ?? fetch;
     (globalThis as Record<PropertyKey, unknown>)[_OVERRIDE_KEY] = async (
       input: string | URL | Request,
       init?: RequestInit,

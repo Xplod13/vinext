@@ -1321,18 +1321,22 @@ async function __readFormDataWithLimit(request, maxBytes) {
 // Map from route pattern to generateStaticParams function.
 // Used by the prerender phase to enumerate dynamic route URLs without
 // loading route modules via the dev server.
+// Falls back from the page module to layouts (innermost first) so that
+// layout-level generateStaticParams (e.g. a blog/[author]/layout.tsx) is
+// correctly used when the page itself does not export generateStaticParams.
 export const generateStaticParamsMap = {
-// TODO: layout-level generateStaticParams — this map only includes routes that
-// have a pagePath (leaf pages). Layout segments can also export generateStaticParams
-// to provide parent params for nested dynamic routes, but they don't have a pagePath
-// so they are excluded here. Supporting layout-level generateStaticParams requires
-// scanning layout.tsx files separately and including them in this map.
 ${routes
-  .filter((r) => r.isDynamic && r.pagePath)
-  .map(
-    (r) =>
-      `  ${JSON.stringify(r.pattern)}: ${getImportVar(r.pagePath!)}?.generateStaticParams ?? null,`,
-  )
+  .filter((r) => r.isDynamic && (r.pagePath || r.layouts.filter(Boolean).length > 0))
+  .map((r) => {
+    const parts: string[] = [];
+    if (r.pagePath) parts.push(`${getImportVar(r.pagePath)}?.generateStaticParams`);
+    // Check layouts from innermost to outermost as fallback
+    for (const layout of [...r.layouts].reverse()) {
+      if (layout) parts.push(`${getImportVar(layout)}?.generateStaticParams`);
+    }
+    parts.push("null");
+    return `  ${JSON.stringify(r.pattern)}: ${parts.join(" ?? ")},`;
+  })
   .join("\n")}
 };
 
