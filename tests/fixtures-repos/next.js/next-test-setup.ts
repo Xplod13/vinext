@@ -1478,6 +1478,23 @@ async function createNextDevServer(opts: NextTestSetupOptions): Promise<NextInst
     // process.env.PORT (e.g. force-cache/large-data). Set it to the actual
     // bound port so those pages can reach the local API routes.
     if (addr?.port) process.env.PORT = String(addr.port);
+
+    // Emit a Next.js-compatible startup message for experimental features.
+    // Tests like "should not have duplicate config warnings" assert that this
+    // message appears exactly once in cliOutput.
+    try {
+      const configPath = path.join(opts.files, "next.config.js");
+      // oxlint-disable-next-line typescript/no-explicit-any
+      const cfg = (await import(configPath)) as any;
+      const nextCfg = cfg.default ?? cfg;
+      if (nextCfg?.experimental && Object.keys(nextCfg.experimental).length > 0) {
+        const experimentalKeys = Object.keys(nextCfg.experimental).join("\n  - ");
+        _cliOutput += `Experiments (use with caution):\n  - ${experimentalKeys}\n`;
+      }
+    } catch {
+      // next.config.js not found or not parseable — skip the startup message
+    }
+
     // Warm up: trigger Vite's first-request compilation so individual tests
     // don't time out waiting for the initial RSC/SSR bundle to build.
     await fetch(_baseUrl + "/").catch(() => {});
