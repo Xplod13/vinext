@@ -85,6 +85,18 @@ export type AppRoute = {
    * ancestor error boundaries catch errors from descendant segments.
    */
   layoutErrorPaths: (string | null)[];
+  /**
+   * Per-layout Suspense loading paths for "gap" levels.
+   * For layout[i] at depth D[i], this is the loading.js at the outermost
+   * directory in the gap between D[i-1] and D[i] (i.e., directories with a
+   * loading.js but no layout.js). When non-null, a Suspense boundary with
+   * this loading as fallback is placed around layout[i]'s subtree.
+   *
+   * Example: app/slow/loading.js (depth 1) + app/slow/inner/layout.js (depth 2)
+   * → layoutLoadingPaths[innerLayoutIndex] = "app/slow/loading.js"
+   * → Suspense(fallback=Loading, children=inner/layout.js(...))
+   */
+  layoutLoadingPaths: (string | null)[];
   /** Not-found component path (nearest, walking up from page dir) */
   notFoundPath: string | null;
   /**
@@ -322,6 +334,7 @@ function discoverSlotSubRoutes(
         loadingPath: parentRoute.loadingPath,
         errorPath: parentRoute.errorPath,
         layoutErrorPaths: parentRoute.layoutErrorPaths,
+        layoutLoadingPaths: parentRoute.layoutLoadingPaths,
         notFoundPath: parentRoute.notFoundPath,
         notFoundPaths: parentRoute.notFoundPaths,
         forbiddenPath: parentRoute.forbiddenPath,
@@ -414,6 +427,16 @@ function fileToAppRoute(
   // This array enables interleaving error boundaries with layouts in the rendering.
   const layoutErrorPaths = discoverLayoutAlignedErrors(segments, appDir, matcher);
 
+  // Discover per-layout loading boundaries for "gap" directory levels.
+  // loading.js at a level that has no layout.js creates a Suspense boundary
+  // that wraps the first child layout/segment at a deeper level.
+  const layoutLoadingPaths = discoverLayoutGapLoadings(
+    segments,
+    appDir,
+    layoutTreePositions,
+    matcher,
+  );
+
   // Discover loading, error in the route's directory
   const routeDir = dir === "." ? appDir : path.join(appDir, dir);
   const loadingPath = findFile(routeDir, "loading", matcher);
@@ -444,6 +467,7 @@ function fileToAppRoute(
     loadingPath,
     errorPath,
     layoutErrorPaths,
+    layoutLoadingPaths,
     notFoundPath,
     notFoundPaths,
     forbiddenPath,
@@ -467,6 +491,46 @@ function computeLayoutTreePositions(appDir: string, layouts: string[]): number[]
     if (layoutDir === appDir) return 0;
     const relative = path.relative(appDir, layoutDir);
     return relative.split(path.sep).length;
+  });
+}
+
+/**
+ * Discover loading.js files that should act as Suspense boundaries around
+ * "gap" directory levels — directories that have a loading.js but no layout.js.
+ *
+ * Returns an array aligned with the layouts array. For each layout[i]:
+ *   - Computes the gap = directory depths between layout[i-1] and layout[i]
+ *   - Walks those depths looking for loading.js
+ *   - Returns the outermost loading found (closest to the parent layout), or null
+ *
+ * This implements Next.js's rule that loading.js at level D wraps the subtree
+ * at level D+1 and beyond with a Suspense fallback.
+ */
+function discoverLayoutGapLoadings(
+  segments: string[],
+  appDir: string,
+  layoutTreePositions: number[],
+  matcher: ValidFileMatcher,
+): (string | null)[] {
+  // Build a map from directory depth → loading path
+  const loadingAtDepth: (string | null)[] = [];
+  let currentDir = appDir;
+  // Depth 0 = appDir
+  loadingAtDepth[0] = findFile(appDir, "loading", matcher);
+  for (let d = 0; d < segments.length; d++) {
+    currentDir = path.join(currentDir, segments[d]);
+    loadingAtDepth[d + 1] = findFile(currentDir, "loading", matcher);
+  }
+
+  // For each layout slot, find the outermost loading in the gap above it
+  return layoutTreePositions.map((depth, i) => {
+    const prevDepth = i === 0 ? -1 : layoutTreePositions[i - 1];
+    // Look from prevDepth+1 up to depth-1 (the gap dirs without a layout)
+    for (let d = prevDepth + 1; d < depth; d++) {
+      const lp = loadingAtDepth[d];
+      if (lp) return lp;
+    }
+    return null;
   });
 }
 

@@ -148,6 +148,10 @@ export function generateRscEntry(
       for (const ep of route.layoutErrorPaths) {
         if (ep) getImportVar(ep);
       }
+    if (route.layoutLoadingPaths)
+      for (const lp of route.layoutLoadingPaths) {
+        if (lp) getImportVar(lp);
+      }
     if (route.notFoundPath) getImportVar(route.notFoundPath);
     for (const nfp of route.notFoundPaths || []) {
       if (nfp) getImportVar(nfp);
@@ -197,6 +201,9 @@ ${interceptEntries.join(",\n")}
     const layoutErrorVars = (route.layoutErrorPaths || []).map((ep) =>
       ep ? getImportVar(ep) : "null",
     );
+    const layoutLoadingVars = (route.layoutLoadingPaths || []).map((lp) =>
+      lp ? getImportVar(lp) : "null",
+    );
     return `  {
     pattern: ${JSON.stringify(route.pattern)},
     patternParts: ${JSON.stringify(route.patternParts)},
@@ -209,6 +216,7 @@ ${interceptEntries.join(",\n")}
     layoutTreePositions: ${JSON.stringify(route.layoutTreePositions)},
     templates: [${templateVars.join(", ")}],
     errors: [${layoutErrorVars.join(", ")}],
+    layoutLoadings: [${layoutLoadingVars.join(", ")}],
     slots: {
 ${slotEntries.join(",\n")}
     },
@@ -1215,6 +1223,18 @@ async function buildPageElement(route, params, opts, searchParams) {
       const treePos = route.layoutTreePositions ? route.layoutTreePositions[i] : 0;
       const childSegs = __resolveChildSegments(route.routeSegments || [], treePos, params);
       element = createElement(LayoutSegmentProvider, { segmentMap: { children: childSegs } }, element);
+
+      // If there is a loading.js at a "gap" directory level between this layout
+      // and the parent layout, wrap with Suspense so the fallback appears in
+      // initial HTML for slow layouts. (e.g. app/foo/loading.js wrapping app/foo/bar/layout.js)
+      const _gapLoading = route.layoutLoadings && route.layoutLoadings[i];
+      if (_gapLoading && _gapLoading.default) {
+        element = createElement(
+          Suspense,
+          { fallback: createElement(_gapLoading.default) },
+          element,
+        );
+      }
     }
   }
 
@@ -2021,7 +2041,11 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
         setNavigationContext(null);
         return proxyExternalRequest(request, __afterRewritten);
       }
-      cleanPathname = __afterRewritten;
+      // Parse the rewritten URL so that query params from the destination are
+      // forwarded to searchParams — mirrors how middleware rewrites are applied.
+      const __afterParsed = new URL(__afterRewritten, request.url);
+      cleanPathname = __afterParsed.pathname;
+      if (__afterParsed.search) url.search = __afterParsed.search;
     }
   }
 
@@ -2036,7 +2060,9 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
         setNavigationContext(null);
         return proxyExternalRequest(request, __fallbackRewritten);
       }
-      cleanPathname = __fallbackRewritten;
+      const __fallbackParsed = new URL(__fallbackRewritten, request.url);
+      cleanPathname = __fallbackParsed.pathname;
+      if (__fallbackParsed.search) url.search = __fallbackParsed.search;
       match = matchRoute(cleanPathname);
     }
   }
