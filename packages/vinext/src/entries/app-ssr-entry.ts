@@ -20,7 +20,7 @@ export { default } from ${JSON.stringify(entryPath)};
 ${
   hasPagesDir
     ? `
-export { pageRoutes, renderPage } from "virtual:vinext-server-entry";
+export { pageRoutes, renderPage, handleApiRoute } from "virtual:vinext-server-entry";
 `
     : ""
 }`;

@@ -3,12 +3,9 @@ import type { ISRCacheEntry } from "./isr-cache.js";
 import type { RouteHandlerMiddlewareContext } from "./app-route-handler-response.js";
 import {
   applyRouteHandlerMiddlewareContext,
-  buildAppRouteCacheValue,
   buildRouteHandlerCachedResponse,
 } from "./app-route-handler-response.js";
-import { markKnownDynamicAppRoute } from "./app-route-handler-runtime.js";
 import {
-  runAppRouteHandler,
   type AppRouteDebugLogger,
   type AppRouteDynamicUsageFn,
   type AppRouteHandlerFunction,
@@ -80,55 +77,13 @@ export async function readAppRouteHandlerCacheResponse(
     }
 
     if (cached?.isStale && cachedValue) {
-      const staleValue = cachedValue;
-      const revalidateSearchParams = new URLSearchParams(options.revalidateSearchParams);
-
-      options.scheduleBackgroundRegeneration(routeKey, async () => {
-        await options.runInRevalidationContext(async () => {
-          options.setNavigationContext({
-            pathname: options.cleanPathname,
-            searchParams: revalidateSearchParams,
-            params: options.params,
-          });
-
-          const { dynamicUsedInHandler, response } = await runAppRouteHandler({
-            basePath: options.basePath,
-            consumeDynamicUsage: options.consumeDynamicUsage,
-            handlerFn: options.handlerFn,
-            i18n: options.i18n,
-            markDynamicUsage: options.markDynamicUsage,
-            params: options.params,
-            request: new Request(options.requestUrl, { method: "GET" }),
-          });
-
-          options.setNavigationContext(null);
-
-          if (dynamicUsedInHandler) {
-            markKnownDynamicAppRoute(options.routePattern);
-            options.isrDebug?.("route regen skipped (dynamic usage)", options.cleanPathname);
-            return;
-          }
-
-          const routeTags = options.buildPageCacheTags(
-            options.cleanPathname,
-            options.getCollectedFetchTags(),
-          );
-          const routeCacheValue = await buildAppRouteCacheValue(response);
-          await options.isrSet(routeKey, routeCacheValue, options.revalidateSeconds, routeTags);
-          options.isrDebug?.("route regen complete", routeKey);
-        });
-      });
-
-      options.isrDebug?.("STALE (route)", options.cleanPathname);
-      options.clearRequestContext();
-      return applyRouteHandlerMiddlewareContext(
-        buildRouteHandlerCachedResponse(staleValue, {
-          cacheState: "STALE",
-          isHead: options.isAutoHead,
-          revalidateSeconds: options.revalidateSeconds,
-        }),
-        options.middlewareContext,
-      );
+      // Route handlers re-render synchronously on expiry (unlike pages which use
+      // stale-while-revalidate). Returning null here causes the caller to fall
+      // through to __executeAppRouteHandler which runs the handler and updates
+      // the cache, then returns fresh data. This matches Next.js behavior where
+      // `fetch /route-handler` after the TTL returns fresh data on the same request.
+      options.isrDebug?.("STALE (route) — re-rendering synchronously", options.cleanPathname);
+      return null;
     }
   } catch (routeCacheError) {
     console.error("[vinext] ISR route cache read error:", routeCacheError);

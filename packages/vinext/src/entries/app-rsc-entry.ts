@@ -2005,6 +2005,18 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
     // handled by the Pages Router, so skip the delegation for those.
     if (!isRscRequest) {
       const __pagesEntry = await import.meta.viteRsc.loadModule("ssr", "index");
+      // Check Pages Router API routes first (paths under /api/…)
+      if (
+        typeof __pagesEntry.handleApiRoute === "function" &&
+        (cleanPathname.startsWith("/api/") || cleanPathname === "/api")
+      ) {
+        const __apiRes = await __pagesEntry.handleApiRoute(request, __decodePathParams(url.pathname) + (url.search || ""));
+        if (__apiRes.status !== 404) {
+          setHeadersContext(null);
+          setNavigationContext(null);
+          return __apiRes;
+        }
+      }
       if (typeof __pagesEntry.renderPage === "function") {
         // Use segment-wise decoding to preserve encoded path delimiters (%2F).
         // decodeURIComponent would turn /admin%2Fpanel into /admin/panel,
@@ -2054,6 +2066,12 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
     // per-fetch cache directives (e.g. fetchCache='force-cache' caches all fetches).
     if (handler.fetchCache) {
       _setPageFetchCachePolicy(handler.fetchCache);
+    }
+    // dynamic = 'force-static' overrides all internal fetches to force-cache so
+    // that no-store fetches inside the handler do not mark dynamic usage and
+    // prevent the route response from being ISR-cached.
+    if (handler.dynamic === 'force-static' && !handler.fetchCache) {
+      _setPageFetchCachePolicy('force-cache');
     }
     if (__hasAppRouteHandlerDefaultExport(handler) && process.env.NODE_ENV === "development") {
       console.error(
@@ -2128,6 +2146,13 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
           });
           await _runWithUnifiedCtx(__revalUCtx, async () => {
             _ensureFetchPatch();
+            // Re-apply the same fetch cache policy override so the background
+            // regeneration run sees the same policy as the original request.
+            if (handler.fetchCache) {
+              _setPageFetchCachePolicy(handler.fetchCache);
+            } else if (handler.dynamic === 'force-static') {
+              _setPageFetchCachePolicy('force-cache');
+            }
             await renderFn();
           });
         },
@@ -2189,10 +2214,13 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   if (route.page?.fetchCache) _setPageFetchCachePolicy(route.page.fetchCache);
   const dynamicConfig = route.page?.dynamic; // 'auto' | 'force-dynamic' | 'force-static' | 'error'
   // dynamicParams can be exported from the page or from layouts (which apply to
-  // their respective segment). For validation purposes, use the most specific
-  // (innermost) value: page first, then layouts from innermost to outermost.
-  const dynamicParamsConfig = route.page?.dynamicParams ??
-    [...(route.layouts || [])].reverse().find(l => l?.dynamicParams !== undefined)?.dynamicParams; // true (default) | false
+  // their respective segment). When ANY component in the route chain exports
+  // dynamicParams = false, the FULL combination of params must be in the
+  // cross-product of all generateStaticParams results. We track whether any
+  // level has dynamicParams = false so we can enforce this below.
+  const anyDynamicParamsFalse =
+    route.page?.dynamicParams === false ||
+    (route.layouts || []).some(l => l?.dynamicParams === false);
   const isForceStatic = dynamicConfig === "force-static";
   const isDynamicError = dynamicConfig === "error";
 
@@ -2331,25 +2359,45 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   // default export, so validation must run first.
   // dynamicParams = false: only params from generateStaticParams are allowed.
   // This runs AFTER the ISR cache read so that a cache hit skips this work entirely.
-  const __dynamicParamsResponse = await __validateAppPageDynamicParams({
-    clearRequestContext() {
-      setHeadersContext(null);
-      setNavigationContext(null);
-    },
-    enforceStaticParamsOnly: dynamicParamsConfig === false,
-    // generateStaticParams may be on the page or on a layout (e.g. the blog
-    // layout exports it while the page exports dynamicParams = false). Fall
-    // back to the innermost layout that exports it.
-    generateStaticParams: route.page?.generateStaticParams ??
-      [...(route.layouts || [])].reverse().find(l => l?.generateStaticParams)?.generateStaticParams,
-    isDynamicRoute: route.isDynamic,
-    logGenerateStaticParamsError(err) {
-      console.error("[vinext] generateStaticParams error:", err);
-    },
-    params,
-  });
-  if (__dynamicParamsResponse) {
-    return __dynamicParamsResponse;
+  //
+  // When ANY layout or page has dynamicParams = false, check ALL gSPs in the
+  // route hierarchy. A path is only valid if every gSP in the chain covers
+  // its respective segment params. This correctly handles the partial-gen-params
+  // pattern where the layout controls one segment (e.g. lang) and the page
+  // controls another (e.g. slug) — even if the page has dynamicParams = true,
+  // slugs outside the page's generated set return 404 because the full
+  // combination was never prerendered.
+  {
+    const __gspList = anyDynamicParamsFalse
+      ? [
+          ...(route.layouts || [])
+            .filter(l => l?.generateStaticParams)
+            .map(l => l.generateStaticParams),
+          ...(route.page?.generateStaticParams ? [route.page.generateStaticParams] : []),
+        ]
+      : [
+          route.page?.generateStaticParams ??
+            [...(route.layouts || [])].reverse().find(l => l?.generateStaticParams)?.generateStaticParams,
+        ].filter(Boolean);
+
+    for (const __gsp of __gspList) {
+      const __dynamicParamsResponse = await __validateAppPageDynamicParams({
+        clearRequestContext() {
+          setHeadersContext(null);
+          setNavigationContext(null);
+        },
+        enforceStaticParamsOnly: anyDynamicParamsFalse,
+        generateStaticParams: __gsp,
+        isDynamicRoute: route.isDynamic,
+        logGenerateStaticParamsError(err) {
+          console.error("[vinext] generateStaticParams error:", err);
+        },
+        params,
+      });
+      if (__dynamicParamsResponse) {
+        return __dynamicParamsResponse;
+      }
+    }
   }
 
   // Now check for missing default export after validation has run.
