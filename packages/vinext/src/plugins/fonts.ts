@@ -441,7 +441,19 @@ async function fetchAndCacheFont(
         fs.writeFileSync(filePath, buffer);
       }
     }
-    // Rewrite CSS to use absolute path (Vite will resolve /@fs/ for dev, or asset for build)
+    // Rewrite every remote Google Fonts CDN URL in the cached CSS to the
+    // absolute filesystem path of the locally-downloaded font file. This
+    // cache file is read back by the plugin and then run through
+    // `_rewriteCachedFontCssToServedUrls()` at embed time, which replaces
+    // the absolute `cacheDir` prefix with the served URL namespace under
+    // `/<assetsDir>/_vinext_fonts/`. The filesystem path is only the
+    // on-disk intermediate form — it must never reach the bundle, the
+    // injected `<style data-vinext-fonts>` block, the HTML `<link
+    // rel="preload">` tags, or the HTTP `Link:` response header. An
+    // earlier version of this code claimed "Vite will resolve /@fs/ for
+    // dev, or asset for build", which was never true: the CSS is
+    // embedded as a JavaScript string literal and Vite's asset pipeline
+    // does not scan string literals. Do not resurrect that assumption.
     css = css.split(fontUrl).join(filePath);
   }
 

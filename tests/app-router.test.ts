@@ -2363,7 +2363,14 @@ describe("App Router Production server self-hosted next/font/google headers", ()
       if (typeof Request !== "undefined" && input instanceof Request) return input.url;
       return String(input);
     };
-    globalThis.fetch = async (input: unknown) => {
+    // Preserve `globalThis.fetch`'s full `(input, init)` signature so the
+    // fallback path forwards request options verbatim to the real fetch.
+    // The build plugin only issues plain GETs for Google Fonts today, so
+    // the `init` argument is never populated for the mock branches — but
+    // dropping it from the fallback signature would silently strip
+    // headers/method/body from any unrelated request that happens to run
+    // during the test and fall through.
+    globalThis.fetch = async (input: unknown, init?: RequestInit) => {
       const url = resolveFetchUrl(input);
       if (url.includes("fonts.googleapis.com")) {
         const isMono = url.includes("Geist+Mono") || url.includes("Geist%20Mono");
@@ -2394,7 +2401,7 @@ describe("App Router Production server self-hosted next/font/google headers", ()
           { status: 200, headers: { "content-type": "font/woff2" } },
         );
       }
-      return originalFetch(input as RequestInfo);
+      return originalFetch(input as RequestInfo, init);
     };
 
     try {
