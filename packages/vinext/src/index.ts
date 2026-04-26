@@ -112,6 +112,7 @@ import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import fs from "node:fs";
 import { randomBytes } from "node:crypto";
+import { EventEmitter } from "node:events";
 import commonjs from "vite-plugin-commonjs";
 
 type ASTNode = ReturnType<typeof parseAst>["body"][number]["parent"];
@@ -492,7 +493,90 @@ type NitroSetupContext = {
   };
 };
 
+/**
+ * Dev-only backstop for peer-disconnect errors emitted on EventEmitters
+ * with no `'error'` listener.
+ *
+ * Earlier attempts (PR #911 socket guard, PR #913 process-level handler)
+ * left a hole: errors that escape through Node's `pipe()` re-emission or
+ * are routed via the `node:domain` wrapper bypass `uncaughtException`
+ * entirely. The remaining trace looks like this even with both prior
+ * fixes installed:
+ *
+ *   node:events:487
+ *         throw er; // Unhandled 'error' event
+ *   Error: read ECONNRESET
+ *       at TCP.onStreamRead
+ *   Emitted 'error' event on Socket instance at:
+ *       at Socket.onerror (node:internal/streams/readable:1035:14)  // pipe()
+ *       at Socket.emit (node:domain:489:12)                          // domain wrap
+ *       at emitErrorNT (node:internal/streams/destroy:170:8)
+ *
+ * Real call sites in vinext dev that hit this:
+ *   - `fromWeb(fetch().body).pipe(res)` in proxyExternalRewriteNode.
+ *   - Streaming surfaces inside @vitejs/plugin-rsc with their own pipe
+ *     topology (destinations aren't inbound connection sockets).
+ *   - Outbound sockets created by middleware `fetch()`.
+ *
+ * The only place to catch every variant is at the synchronous source:
+ * `EventEmitter.prototype.emit('error', ...)`. We wrap it once, filter
+ * strictly by peer-disconnect codes (ECONNRESET / EPIPE / ECONNABORTED),
+ * and only short-circuit when the emitter has no `'error'` listeners —
+ * the exact condition under which Node would throw. All other errors,
+ * and any error on an emitter that has a listener, pass through
+ * untouched. Genuine bugs still surface.
+ *
+ * Installed once per process at plugin construction; subsequent calls
+ * are no-ops via a Symbol.for guard, so dep re-optimization or server
+ * restarts can't tear it down.
+ *
+ * Dev-only by virtue of running inside the Vite plugin factory, which
+ * is not invoked in production (Cloudflare Worker) where socket
+ * lifecycle is owned by the runtime.
+ */
+const DEV_SOCKET_BACKSTOP_FLAG = Symbol.for("vinext.devSocketErrorBackstop");
+function installDevSocketErrorBackstop(): void {
+  const proc = process as typeof process & { [DEV_SOCKET_BACKSTOP_FLAG]?: true };
+  if (proc[DEV_SOCKET_BACKSTOP_FLAG]) return;
+  proc[DEV_SOCKET_BACKSTOP_FLAG] = true;
+
+  const isPeerDisconnect = (err: unknown): boolean => {
+    const code = (err as { code?: string } | null)?.code;
+    return code === "ECONNRESET" || code === "EPIPE" || code === "ECONNABORTED";
+  };
+
+  // oxlint-disable-next-line typescript-eslint/unbound-method -- invoked with explicit .apply(this, ...)
+  const originalEmit = EventEmitter.prototype.emit;
+  EventEmitter.prototype.emit = function patchedEmit(
+    this: EventEmitter,
+    type: string | symbol,
+    // oxlint-disable-next-line typescript/no-explicit-any
+    ...args: any[]
+    // oxlint-disable-next-line typescript/no-explicit-any
+  ): any {
+    if (type === "error" && isPeerDisconnect(args[0]) && this.listenerCount("error") === 0) {
+      return false;
+    }
+    return originalEmit.apply(this, [type, ...args]);
+  };
+
+  // Belt-and-braces: also catch via uncaughtException / unhandledRejection
+  // for surfaces that bypass EventEmitter.emit entirely (raw promise
+  // rejections, native callbacks). Synchronous throw inside the listener
+  // for non-peer-disconnect errors restores Node's default crash.
+  process.on("uncaughtException", (err: Error) => {
+    if (isPeerDisconnect(err)) return;
+    throw err;
+  });
+  process.on("unhandledRejection", (reason: unknown) => {
+    if (isPeerDisconnect(reason)) return;
+    throw reason;
+  });
+}
+
 export default function vinext(options: VinextOptions = {}): PluginOption[] {
+  installDevSocketErrorBackstop();
+
   const viteMajorVersion = getViteMajorVersion();
   let root: string;
   let pagesDir: string;
@@ -2004,44 +2088,6 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
         server.httpServer?.on("connection", (socket) => {
           socket.on("error", () => {});
         });
-
-        // Backstop for stream-pipe paths the connection-level guard misses.
-        // When a Readable is piped to a Writable that has no 'error' listener,
-        // Node's pipe() machinery re-emits the source's error onto the
-        // destination, which then throws (e.g. fromWeb(fetch().body).pipe(res)
-        // in proxyExternalRewriteNode, or any streaming surface inside
-        // @vitejs/plugin-rsc). Outbound sockets created by fetch() also never
-        // fire 'connection' on server.httpServer. Filtering by error code
-        // keeps real bugs surfacing — only peer-disconnect codes are dropped.
-        //
-        // Skipped in middleware mode (httpServer is null): the embedding host
-        // owns process-level handlers, and we have no reliable teardown hook
-        // to remove ours, so installation would leak.
-        if (server.httpServer) {
-          const isPeerDisconnect = (err: unknown): boolean => {
-            const code = (err as { code?: string } | null)?.code;
-            return code === "ECONNRESET" || code === "EPIPE" || code === "ECONNABORTED";
-          };
-          // Synchronous throw inside an uncaughtException listener aborts
-          // the process the same way no listener would (stack to stderr,
-          // non-zero exit). Re-throwing on nextTick instead would re-enter
-          // this same listener and loop indefinitely, silently swallowing
-          // genuine errors.
-          const onUncaught = (err: Error) => {
-            if (isPeerDisconnect(err)) return;
-            throw err;
-          };
-          const onUnhandledRejection = (reason: unknown) => {
-            if (isPeerDisconnect(reason)) return;
-            throw reason;
-          };
-          process.on("uncaughtException", onUncaught);
-          process.on("unhandledRejection", onUnhandledRejection);
-          server.httpServer.once("close", () => {
-            process.removeListener("uncaughtException", onUncaught);
-            process.removeListener("unhandledRejection", onUnhandledRejection);
-          });
-        }
 
         server.watcher.on("add", (filePath: string) => {
           if (hasPagesDir && filePath.startsWith(pagesDir) && pageExtensions.test(filePath)) {
