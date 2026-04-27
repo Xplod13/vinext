@@ -285,7 +285,12 @@ export function escapeInlineContent(content: string, tag: string): string {
 }
 
 function syncClientHead(): void {
-  document.querySelectorAll("[data-vinext-head]").forEach((el) => el.remove());
+  document.querySelectorAll("[data-vinext-head], [data-next-head]").forEach((el) => {
+    // Preserve the document defaults from next/document; page-level head tags
+    // are re-projected from the currently mounted <Head> instances below.
+    if (el.matches("meta[charset], meta[name='viewport']")) return;
+    el.remove();
+  });
 
   for (const child of reduceHeadChildren([..._clientHeadChildren.values()])) {
     if (typeof child.type !== "string") continue;
