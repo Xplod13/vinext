@@ -588,14 +588,16 @@ export async function renderAppPageLifecycle(
       policy: htmlResponsePolicy,
       timing: htmlResponseTiming,
     });
-    // The capture is mandatory: force-dynamic and revalidate=0 routes are
-    // skipped by the driver before invocation, and shouldCaptureRscForPrerender
-    // covers all remaining cases. A null value is an invariant violation —
-    // surface it loudly rather than silently double-rendering.
-    if (!capturedRscDataRef.value) {
-      throw new Error("[vinext] Invariant: prerender HTML render produced no captured RSC bytes");
+    // For normal route renders, the RSC stream tee populates capturedRscDataRef
+    // and we attach the bytes via the side-channel header. Cases where the
+    // render bypasses the App Router pipeline (e.g. middleware short-circuits
+    // with a custom 200 response before the RSC stream is constructed) leave
+    // the ref null — the driver detects the missing header and falls back to
+    // a second invocation with `RSC: 1` so the .rsc still gets written.
+    if (capturedRscDataRef.value) {
+      return await appendCapturedRscToHtmlResponse(prerenderResponse, capturedRscDataRef.value);
     }
-    return await appendCapturedRscToHtmlResponse(prerenderResponse, capturedRscDataRef.value);
+    return prerenderResponse;
   }
 
   if (htmlResponsePolicy.shouldWriteToCache || shouldSpeculativelyWriteCache) {

@@ -10,6 +10,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "vite-plus/test";
 import fs from "node:fs";
+import { createServer, type Server } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { buildPagesFixture, buildAppFixture, buildCloudflareAppFixture } from "./helpers.js";
@@ -35,6 +36,29 @@ function findRoute(
   route: string,
 ): PrerenderRouteResult | undefined {
   return results.find((r) => r.route === route || ("path" in r && r.path === route));
+}
+
+function listen(server: Server): Promise<number> {
+  return new Promise((resolve, reject) => {
+    server.on("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (typeof address === "object" && address !== null) {
+        resolve(address.port);
+      } else {
+        reject(new Error("test server did not expose a TCP port"));
+      }
+    });
+  });
+}
+
+function closeServer(server: Server): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
 }
 
 // ─── Pages Router ─────────────────────────────────────────────────────────────
@@ -929,5 +953,156 @@ describe("resolveParentParams", () => {
       staticParamsMap,
     );
     expect(result).toEqual([{ category: "electronics" }]);
+  });
+});
+
+describe("prerenderApp — RSC side-channel fallback", () => {
+  it("falls back to a second RSC: 1 invocation when the HTML response lacks the side-channel header", async () => {
+    // Simulates middleware that short-circuits the App Router pipeline with a
+    // custom 200 HTML body. The side-channel header is absent; the driver must
+    // recover by issuing a second invocation with `RSC: 1` headers and write
+    // whatever that returns as the .rsc file.
+    const root = tmpDir("vinext-prerender-fallback-");
+    const outDir = path.join(root, "out");
+    const appDir = path.join(root, "app");
+    const pagePath = path.join(appDir, "page.tsx");
+    fs.mkdirSync(appDir, { recursive: true });
+    fs.writeFileSync(
+      pagePath,
+      "export const dynamic = 'force-static';\nexport default function Page() { return null; }\n",
+    );
+
+    const middlewareHtml = "<html><body>middleware short-circuit</body></html>";
+    const fallbackRscPayload = '0:["$","div",null,{"children":"from fallback"}]\n';
+    let rscRequestCount = 0;
+    let pageRequestCount = 0;
+    const server = createServer((req, res) => {
+      const isRsc = req.headers.rsc === "1" || req.headers.accept === "text/x-component";
+
+      if (req.url === "/__vinext_nonexistent_for_404__") {
+        res.statusCode = 404;
+        res.end("<html><body>not found</body></html>");
+        return;
+      }
+
+      if (isRsc) {
+        rscRequestCount++;
+        res.setHeader("content-type", "text/x-component");
+        res.end(fallbackRscPayload);
+        return;
+      }
+
+      // Page request: middleware short-circuits with 200 HTML and no
+      // x-vinext-rsc-byte-length header — exercising the fallback path.
+      pageRequestCount++;
+      res.setHeader("content-type", "text/html");
+      res.end(middlewareHtml);
+    });
+
+    const port = await listen(server);
+    try {
+      const { prerenderApp } = await import("../packages/vinext/src/build/prerender.js");
+      const { appRouter } = await import("../packages/vinext/src/routing/app-router.js");
+      const { resolveNextConfig } = await import("../packages/vinext/src/config/next-config.js");
+      const routes = await appRouter(appDir);
+      const config = await resolveNextConfig({});
+
+      const prerenderResult = await prerenderApp({
+        mode: "default",
+        rscBundlePath: path.join(root, "dist", "server", "index.js"),
+        routes,
+        outDir,
+        config,
+        _prodServer: { server, port },
+      });
+
+      expect(findRoute(prerenderResult.routes, "/")).toMatchObject({
+        route: "/",
+        status: "rendered",
+      });
+
+      // The HTML written to disk is the middleware's response.
+      expect(fs.readFileSync(path.join(outDir, "index.html"), "utf-8")).toBe(middlewareHtml);
+
+      // The .rsc file is the fallback RSC: 1 response — the driver recovered
+      // by issuing a second invocation when the side-channel header was absent.
+      expect(fs.readFileSync(path.join(outDir, "index.rsc"), "utf-8")).toBe(fallbackRscPayload);
+
+      // Exactly one page request and one RSC fallback request per route.
+      expect(pageRequestCount).toBe(1);
+      expect(rscRequestCount).toBe(1);
+    } finally {
+      await closeServer(server);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not invoke a second handler call when the side-channel header is present", async () => {
+    // Normal render path: server emits HTML body with raw RSC bytes appended
+    // and `x-vinext-rsc-byte-length` set. Driver splits in-place — no second
+    // invocation. Asserts the perf goal of the side-channel.
+    const root = tmpDir("vinext-prerender-sidechannel-");
+    const outDir = path.join(root, "out");
+    const appDir = path.join(root, "app");
+    const pagePath = path.join(appDir, "page.tsx");
+    fs.mkdirSync(appDir, { recursive: true });
+    fs.writeFileSync(
+      pagePath,
+      "export const dynamic = 'force-static';\nexport default function Page() { return null; }\n",
+    );
+
+    const html = "<html><body>page</body></html>";
+    const rscPayload = '0:["$","div",null,{"children":"from html"}]\n';
+    const combined = Buffer.concat([Buffer.from(html, "utf-8"), Buffer.from(rscPayload, "utf-8")]);
+
+    let rscRequestCount = 0;
+    const server = createServer((req, res) => {
+      if (req.headers.rsc === "1" || req.headers.accept === "text/x-component") {
+        rscRequestCount++;
+        res.statusCode = 500;
+        res.end("unexpected RSC fallback request");
+        return;
+      }
+
+      if (req.url === "/__vinext_nonexistent_for_404__") {
+        res.statusCode = 404;
+        res.end("<html><body>not found</body></html>");
+        return;
+      }
+
+      res.setHeader("content-type", "text/html");
+      res.setHeader("x-vinext-rsc-byte-length", String(Buffer.byteLength(rscPayload, "utf-8")));
+      res.setHeader("content-length", String(combined.byteLength));
+      res.end(combined);
+    });
+
+    const port = await listen(server);
+    try {
+      const { prerenderApp } = await import("../packages/vinext/src/build/prerender.js");
+      const { appRouter } = await import("../packages/vinext/src/routing/app-router.js");
+      const { resolveNextConfig } = await import("../packages/vinext/src/config/next-config.js");
+      const routes = await appRouter(appDir);
+      const config = await resolveNextConfig({});
+
+      const prerenderResult = await prerenderApp({
+        mode: "default",
+        rscBundlePath: path.join(root, "dist", "server", "index.js"),
+        routes,
+        outDir,
+        config,
+        _prodServer: { server, port },
+      });
+
+      expect(findRoute(prerenderResult.routes, "/")).toMatchObject({
+        route: "/",
+        status: "rendered",
+      });
+      expect(fs.readFileSync(path.join(outDir, "index.html"), "utf-8")).toBe(html);
+      expect(fs.readFileSync(path.join(outDir, "index.rsc"), "utf-8")).toBe(rscPayload);
+      expect(rscRequestCount).toBe(0);
+    } finally {
+      await closeServer(server);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });

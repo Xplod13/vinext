@@ -1042,11 +1042,23 @@ export async function prerenderApp({
             }
 
             const rscByteLengthHeader = response.headers.get("x-vinext-rsc-byte-length");
+
+            // Side-channel absent: the response did not flow through the
+            // App Router render pipeline (e.g. middleware short-circuited
+            // with a custom 200 HTML body). Return the body as HTML and
+            // signal `rsc: null` so the caller falls back to a second
+            // invocation with `RSC: 1`.
             if (!rscByteLengthHeader) {
-              throw new Error(
-                "[vinext] Prerender HTML response missing x-vinext-rsc-byte-length header",
-              );
+              return {
+                cacheControl,
+                html: await response.text(),
+                rsc: null,
+                ok: true,
+                requestCacheLife: _consumeRequestScopedCacheLife(),
+                status: response.status,
+              };
             }
+
             const rscByteLength = Number(rscByteLengthHeader);
             if (!Number.isFinite(rscByteLength) || rscByteLength < 0) {
               throw new Error(
@@ -1102,7 +1114,23 @@ export async function prerenderApp({
           };
         }
         const html = htmlRender.html;
-        const rscData = htmlRender.rsc;
+
+        // Prefer the side-channel RSC bytes captured during the HTML render
+        // (single render, mirrors Next.js's `metadata.flightData`). If absent
+        // — e.g. middleware short-circuited with a custom 200 HTML response
+        // before the App Router pipeline ran — fall back to a second
+        // invocation with RSC headers. The fallback covers any case where
+        // the route's HTML response wasn't produced by the normal render.
+        let rscData: string | null = htmlRender.rsc;
+        if (rscData === null) {
+          const rscRequest = new Request(`http://localhost${urlPath}`, {
+            headers: { Accept: "text/x-component", RSC: "1" },
+          });
+          const rscRes = await runWithHeadersContext(headersContextFromRequest(rscRequest), () =>
+            rscHandler(rscRequest),
+          );
+          rscData = rscRes.ok ? await rscRes.text() : null;
+        }
 
         const outputFiles: string[] = [];
 
