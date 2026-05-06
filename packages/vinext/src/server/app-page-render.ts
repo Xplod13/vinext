@@ -250,6 +250,49 @@ function wrapRscResponseForDevErrorReporting(
   });
 }
 
+/**
+ * Concatenate the captured raw RSC bytes onto the end of the HTML response
+ * body and advertise their byte length via `x-vinext-rsc-byte-length`. The
+ * prerender driver reads the body as one buffer and splits at
+ * `total - x-vinext-rsc-byte-length`. This avoids a second handler invocation
+ * per route — the same render produces both halves.
+ *
+ * Only invoked when the prod-server is in prerender mode (VINEXT_PRERENDER=1)
+ * and the request is for HTML (not an RSC request). Production runtime is
+ * unaffected because `isPrerender` is false there.
+ */
+async function appendCapturedRscToHtmlResponse(
+  response: Response,
+  capturedRscDataPromise: Promise<ArrayBuffer>,
+): Promise<Response> {
+  if (!response.body) return response;
+
+  // Buffer the HTML body into memory to keep the protocol simple: a single
+  // body buffer of [HTML][RSC] with the RSC length declared as a header.
+  // Prerender HTML is already buffered downstream by the driver (it calls
+  // `response.text()`), so we don't lose any streaming benefit here.
+  const [htmlBuffer, rscBuffer] = await Promise.all([
+    response.arrayBuffer(),
+    capturedRscDataPromise,
+  ]);
+
+  const combined = new Uint8Array(htmlBuffer.byteLength + rscBuffer.byteLength);
+  combined.set(new Uint8Array(htmlBuffer), 0);
+  combined.set(new Uint8Array(rscBuffer), htmlBuffer.byteLength);
+
+  const headers = new Headers(response.headers);
+  headers.set("x-vinext-rsc-byte-length", String(rscBuffer.byteLength));
+  // The combined body's content-length must reflect the real buffer size or
+  // any downstream `Content-Length` validation will reject the response.
+  headers.set("content-length", String(combined.byteLength));
+
+  return new Response(combined, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
 export async function renderAppPageLifecycle(
   options: RenderAppPageLifecycleOptions,
 ): Promise<Response> {
@@ -306,7 +349,16 @@ export async function renderAppPageLifecycle(
     (options.isProduction || options.isPrerender === true) &&
     (revalidateSeconds === null || (revalidateSeconds > 0 && revalidateSeconds !== Infinity)) &&
     !options.isForceDynamic;
-  const rscCapture = teeAppPageRscStreamForCapture(rscStream, shouldCaptureRscForCacheMetadata);
+  // In prerender mode the side-channel always carries the captured RSC bytes
+  // back to the prerender driver, so the tee must run unconditionally for any
+  // route that could plausibly emit a `.rsc` (force-dynamic and revalidate=0
+  // routes are filtered out by the driver before this handler runs, but we
+  // re-check defensively). This covers `revalidate: Infinity` static-forever
+  // routes which the cache-metadata predicate excludes.
+  const shouldCaptureRscForPrerender =
+    options.isPrerender === true && !options.isForceDynamic && revalidateSeconds !== 0;
+  const shouldCaptureRsc = shouldCaptureRscForCacheMetadata || shouldCaptureRscForPrerender;
+  const rscCapture = teeAppPageRscStreamForCapture(rscStream, shouldCaptureRsc);
   const rscForResponse = rscCapture.ssrStream;
 
   // When the fused tee (#981) is active, the sideStream carries both the embed
@@ -522,6 +574,30 @@ export async function renderAppPageLifecycle(
     !options.scriptNonce &&
     !dynamicUsedDuringRender;
 
+  // Prerender mode handles HTML responses uniformly, regardless of whether
+  // the route would write to the runtime ISR cache (force-static / null
+  // revalidate / positive revalidate / Infinity all land here). We append the
+  // captured raw RSC bytes so the driver recovers both halves from a single
+  // render. Runtime cache writeback (finalizeAppPageHtmlCacheResponse) does
+  // not apply during prerender — the prerender driver writes its own files.
+  if (options.isPrerender === true) {
+    const prerenderResponse = buildAppPageHtmlResponse(safeHtmlStream, {
+      draftCookie,
+      fontLinkHeader,
+      middlewareContext: options.middlewareContext,
+      policy: htmlResponsePolicy,
+      timing: htmlResponseTiming,
+    });
+    // The capture is mandatory: force-dynamic and revalidate=0 routes are
+    // skipped by the driver before invocation, and shouldCaptureRscForPrerender
+    // covers all remaining cases. A null value is an invariant violation —
+    // surface it loudly rather than silently double-rendering.
+    if (!capturedRscDataRef.value) {
+      throw new Error("[vinext] Invariant: prerender HTML render produced no captured RSC bytes");
+    }
+    return await appendCapturedRscToHtmlResponse(prerenderResponse, capturedRscDataRef.value);
+  }
+
   if (htmlResponsePolicy.shouldWriteToCache || shouldSpeculativelyWriteCache) {
     const isrResponse = buildAppPageHtmlResponse(safeHtmlStream, {
       draftCookie,
@@ -530,10 +606,6 @@ export async function renderAppPageLifecycle(
       policy: htmlResponsePolicy,
       timing: htmlResponseTiming,
     });
-
-    if (options.isPrerender === true) {
-      return isrResponse;
-    }
 
     return finalizeAppPageHtmlCacheResponse(isrResponse, {
       capturedRscDataPromise: capturedRscDataRef.value,

@@ -1019,6 +1019,10 @@ export async function prerenderApp({
         // (devWorker.fetch) so the ALS context set up here on the Node side never
         // reaches the worker isolate. The wrapping is a no-op for the CF path but
         // harmless — and it keeps renderUrl() shape-compatible across both modes.
+        // The prod-server is in prerender mode (VINEXT_PRERENDER=1) so HTML
+        // responses for App Router carry the raw RSC bytes appended to the
+        // body, advertised via `x-vinext-rsc-byte-length`. Mirrors Next.js's
+        // `metadata.flightData` side-channel: one render emits both halves.
         const htmlRequest = new Request(`http://localhost${urlPath}`);
         const htmlRender = await runWithHeadersContext(
           headersContextFromRequest(htmlRequest),
@@ -1030,16 +1034,38 @@ export async function prerenderApp({
               return {
                 cacheControl,
                 html: null,
+                rsc: null,
                 ok: response.ok,
                 requestCacheLife: null,
                 status: response.status,
               };
             }
 
-            const html = await response.text();
+            const rscByteLengthHeader = response.headers.get("x-vinext-rsc-byte-length");
+            if (!rscByteLengthHeader) {
+              throw new Error(
+                "[vinext] Prerender HTML response missing x-vinext-rsc-byte-length header",
+              );
+            }
+            const rscByteLength = Number(rscByteLengthHeader);
+            if (!Number.isFinite(rscByteLength) || rscByteLength < 0) {
+              throw new Error(
+                `[vinext] Invalid x-vinext-rsc-byte-length header value: ${rscByteLengthHeader}`,
+              );
+            }
+
+            const buffer = new Uint8Array(await response.arrayBuffer());
+            if (rscByteLength > buffer.byteLength) {
+              throw new Error(
+                `[vinext] x-vinext-rsc-byte-length (${rscByteLength}) exceeds response body length (${buffer.byteLength})`,
+              );
+            }
+            const splitAt = buffer.byteLength - rscByteLength;
+            const decoder = new TextDecoder();
             return {
               cacheControl,
-              html,
+              html: decoder.decode(buffer.subarray(0, splitAt)),
+              rsc: decoder.decode(buffer.subarray(splitAt)),
               ok: true,
               requestCacheLife: _consumeRequestScopedCacheLife(),
               status: response.status,
@@ -1076,16 +1102,7 @@ export async function prerenderApp({
           };
         }
         const html = htmlRender.html;
-
-        // Fetch RSC payload via a second invocation with RSC headers
-        // TODO: Extract RSC payload from the first response instead of invoking the handler twice.
-        const rscRequest = new Request(`http://localhost${urlPath}`, {
-          headers: { Accept: "text/x-component", RSC: "1" },
-        });
-        const rscRes = await runWithHeadersContext(headersContextFromRequest(rscRequest), () =>
-          rscHandler(rscRequest),
-        );
-        const rscData = rscRes.ok ? await rscRes.text() : null;
+        const rscData = htmlRender.rsc;
 
         const outputFiles: string[] = [];
 

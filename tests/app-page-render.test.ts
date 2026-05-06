@@ -45,6 +45,29 @@ function createDeferred<T = void>() {
   return { promise, reject, resolve };
 }
 
+/**
+ * Read a prerender HTML response and split the body into its HTML and RSC
+ * halves using the `x-vinext-rsc-byte-length` header. The prerender driver
+ * does the same — every render emits a single buffer of [HTML][raw RSC bytes].
+ */
+async function readPrerenderBundle(response: Response): Promise<{
+  html: string;
+  rsc: string;
+}> {
+  const rscByteLengthHeader = response.headers.get("x-vinext-rsc-byte-length");
+  if (rscByteLengthHeader === null) {
+    throw new Error("Expected x-vinext-rsc-byte-length header on prerender response");
+  }
+  const rscByteLength = Number(rscByteLengthHeader);
+  const buffer = new Uint8Array(await response.arrayBuffer());
+  const splitAt = buffer.byteLength - rscByteLength;
+  const decoder = new TextDecoder();
+  return {
+    html: decoder.decode(buffer.subarray(0, splitAt)),
+    rsc: decoder.decode(buffer.subarray(splitAt)),
+  };
+}
+
 function createCommonOptions() {
   const waitUntilPromises: Promise<void>[] = [];
   const renderToReadableStream = vi.fn(() => createStream(["flight-data"]));
@@ -530,7 +553,9 @@ describe("app page render lifecycle", () => {
 
     expect(response.headers.get("cache-control")).toBe("s-maxage=1, stale-while-revalidate=2");
     expect(response.headers.get("x-vinext-cache")).toBeNull();
-    await expect(response.text()).resolves.toBe("<html>page</html>");
+    const { html, rsc } = await readPrerenderBundle(response);
+    expect(html).toBe("<html>page</html>");
+    expect(rsc).toBe("flight-data");
     expect(common.waitUntilPromises).toHaveLength(0);
     expect(common.isrSet).not.toHaveBeenCalled();
   });
@@ -566,7 +591,9 @@ describe("app page render lifecycle", () => {
     });
 
     expect(response.headers.get("cache-control")).toBe("s-maxage=1, stale-while-revalidate=2");
-    await expect(response.text()).resolves.toBe("<html>page</html>");
+    const { html, rsc } = await readPrerenderBundle(response);
+    expect(html).toBe("<html>page</html>");
+    expect(rsc).toBe("flight-data");
     expect(common.isrSet).not.toHaveBeenCalled();
   });
 
@@ -605,7 +632,9 @@ describe("app page render lifecycle", () => {
     });
 
     expect(response.headers.get("cache-control")).toBe("s-maxage=1");
-    await expect(response.text()).resolves.toBe("<html>page</html>");
+    const { html, rsc } = await readPrerenderBundle(response);
+    expect(html).toBe("<html>page</html>");
+    expect(rsc).toBe("flight-data");
     expect(consumeRequestCacheLife()).toEqual({ revalidate: 1, expire: 1 });
   });
 
@@ -641,7 +670,9 @@ describe("app page render lifecycle", () => {
 
     expect(response.headers.get("cache-control")).toBe("s-maxage=1, stale-while-revalidate=2");
     expect(response.headers.get("x-vinext-cache")).toBe("MISS");
-    await expect(response.text()).resolves.toBe("<html>page</html>");
+    const { html, rsc } = await readPrerenderBundle(response);
+    expect(html).toBe("<html>page</html>");
+    expect(rsc).toBe("flight-data");
     expect(common.waitUntilPromises).toHaveLength(0);
     expect(common.isrSet).not.toHaveBeenCalled();
   });
