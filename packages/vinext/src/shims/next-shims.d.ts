@@ -167,6 +167,25 @@ declare module "next/navigation" {
   export const HTTP_ERROR_FALLBACK_ERROR_CODE: string;
   export function isHTTPAccessFallbackError(error: unknown): boolean;
   export function getAccessFallbackHTTPStatus(error: unknown): number;
+  export function isRedirectError(error: unknown): error is Error & { digest: string };
+  export function isNextRouterError(error: unknown): boolean;
+  export class BailoutToCSRError extends Error {
+    readonly digest: "BAILOUT_TO_CLIENT_SIDE_RENDERING";
+    readonly reason: string;
+    constructor(reason: string);
+  }
+  export function isBailoutToCSRError(error: unknown): error is BailoutToCSRError;
+  export class DynamicServerError extends Error {
+    readonly digest: "DYNAMIC_SERVER_USAGE";
+    readonly description: string;
+    constructor(description: string);
+  }
+  export function isDynamicServerError(error: unknown): error is DynamicServerError;
+  export function unstable_rethrow(error: unknown): void;
+  export class UnrecognizedActionError extends Error {}
+  export function unstable_isUnrecognizedActionError(
+    error: unknown,
+  ): error is UnrecognizedActionError;
   // Context management (internal)
   export function setNavigationContext(ctx: any): void;
   export function setClientParams(params: Record<string, string | string[]>): void;
@@ -299,7 +318,7 @@ declare module "next/legacy/image" {
 }
 
 declare module "next/error" {
-  import { ComponentType } from "react";
+  import { ComponentType, ReactNode } from "react";
 
   type ErrorProps = {
     statusCode: number;
@@ -309,6 +328,16 @@ declare module "next/error" {
 
   const ErrorComponent: ComponentType<ErrorProps>;
   export default ErrorComponent;
+
+  export type ErrorInfo = {
+    error: unknown;
+    reset: () => void;
+    unstable_retry: () => void;
+  };
+
+  export function unstable_catchError<P extends Record<string, unknown>>(
+    fallback: (props: P, errorInfo: ErrorInfo) => ReactNode,
+  ): ComponentType<P & { children?: ReactNode }>;
 }
 
 declare module "next/constants" {

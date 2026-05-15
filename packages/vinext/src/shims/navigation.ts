@@ -1605,6 +1605,298 @@ export function unauthorized(): never {
 }
 
 // ---------------------------------------------------------------------------
+// Internal-error predicates and rethrow
+//
+// `unstable_rethrow` is part of Next.js's public API. User code in try/catch
+// wrappers calls it to let Next.js's control-flow signals (redirect, notFound,
+// forbidden, unauthorized, dynamic-server-usage, bailout-to-CSR, …)
+// propagate up to the framework instead of being swallowed. The canonical
+// use case is a `fetch()` retry helper that needs to bail out the moment
+// fetch throws a framework signal — see Next.js's
+// test/e2e/app-dir/app-static/lib/fetch-retry.js.
+//
+// Ported from Next.js:
+//   - packages/next/src/client/components/unstable-rethrow.ts (dispatcher)
+//   - packages/next/src/client/components/unstable-rethrow.browser.ts
+//   - packages/next/src/client/components/unstable-rethrow.server.ts
+//   - packages/next/src/client/components/is-next-router-error.ts
+//   - packages/next/src/client/components/redirect-error.ts
+//   - packages/next/src/shared/lib/lazy-dynamic/bailout-to-csr.ts
+//   - packages/next/src/client/components/hooks-server-context.ts
+//
+// Coverage of Next.js's 7 server-side categories (server build):
+//   ✓ isNextRouterError (#1) — redirect + HTTP access fallback
+//   ✓ isBailoutToCSRError (#2) — digest === "BAILOUT_TO_CLIENT_SIDE_RENDERING"
+//   ✓ isDynamicServerError (#3) — digest === "DYNAMIC_SERVER_USAGE"
+//   ✗ isDynamicPostpone (#4) — PPR-internal message check; vinext has no PPR
+//   ✗ isPostpone (#5) — React.unstable_postpone signal; vinext has no PPR
+//   ✗ isHangingPromiseRejectionError (#6) — prerender abort signal
+//   ✗ isPrerenderInterruptedError (#7) — prerender controller interrupt
+//
+// The four uncovered categories are server-only Next.js internals tied to
+// prerender-machinery vinext does not implement; user code cannot construct
+// them in normal use. They will be added if/when vinext grows PPR support.
+// ---------------------------------------------------------------------------
+
+type _RedirectErrorShape = Error & { digest: string };
+
+/**
+ * Check whether an error was produced by `redirect()` or `permanentRedirect()`.
+ *
+ * **Note on vinext public surface:** Next.js does NOT expose `isRedirectError`
+ * from `next/navigation` — it's an internal predicate. vinext exposes it for
+ * symmetry with the already-public `isHTTPAccessFallbackError` and because
+ * `unstable_rethrow` consumers benefit from being able to narrow types.
+ * Treat it as a vinext-only extension.
+ *
+ * **Divergence from Next.js:** Next.js's internal `isRedirectError` performs
+ * full 4-segment validation — it splits the digest on `;`, checks `type` ∈
+ * {push, replace}, requires a non-empty destination, and validates the
+ * status code (303, 307, 308). See:
+ *   https://github.com/vercel/next.js/blob/canary/packages/next/src/client/components/redirect-error.ts
+ *
+ * vinext instead uses a simple prefix check (`startsWith("NEXT_REDIRECT;")`).
+ * Reasons:
+ *   1. vinext emits two digest shapes — 3-part for `redirect()`
+ *      (`NEXT_REDIRECT;{type};{encoded-url}`) and 4-part for
+ *      `permanentRedirect()` (`NEXT_REDIRECT;{type};{encoded-url};308`).
+ *      Strict validation would have to special-case both, and Next.js's
+ *      validator (tuned to its 5-part canary digests) rejects them.
+ *   2. The `type` field is sometimes empty in vinext's redirect digests
+ *      (context-dependent resolution; see `redirect()` above), which the
+ *      strict check disallows.
+ *
+ * **Consequence:** A malformed digest such as `"NEXT_REDIRECT;garbage"`
+ * returns `true` here, whereas Next.js would return `false`. In practice,
+ * the only callers of this predicate are vinext-internal code paths
+ * (`unstable_rethrow`, `unstable_catchError`, the redirect error boundary)
+ * that see digests vinext itself emits — so the divergence does not surface
+ * in normal use. Maintainers extending the prefix logic should keep this
+ * predicate in lockstep with the corresponding `decode*` helpers in
+ * `shims/error-boundary.tsx`.
+ */
+export function isRedirectError(error: unknown): error is _RedirectErrorShape {
+  if (
+    !error ||
+    typeof error !== "object" ||
+    !("digest" in error) ||
+    typeof (error as { digest: unknown }).digest !== "string"
+  ) {
+    return false;
+  }
+  return (error as { digest: string }).digest.startsWith("NEXT_REDIRECT;");
+}
+
+/**
+ * Returns true if the error is a Next.js navigation signal — either a redirect
+ * or an HTTP access fallback (notFound / forbidden / unauthorized).
+ *
+ * **Note on vinext public surface:** Like `isRedirectError`, Next.js does NOT
+ * expose this from `next/navigation`. vinext exposes it for symmetry — treat
+ * it as a vinext-only extension.
+ *
+ * Ported from Next.js:
+ *   https://github.com/vercel/next.js/blob/canary/packages/next/src/client/components/is-next-router-error.ts
+ */
+export function isNextRouterError(error: unknown): boolean {
+  return isRedirectError(error) || isHTTPAccessFallbackError(error);
+}
+
+// ---------------------------------------------------------------------------
+// BailoutToCSRError — `next/dynamic` with `ssr: false` throws this during
+// server render to signal that the dynamic component must be rendered on
+// the client. Lives in shared (non-server) code so it can flow through both
+// the SSR pipeline and userland; third-party libraries that emulate
+// `next/dynamic` also construct it.
+//
+// Ported from Next.js:
+//   https://github.com/vercel/next.js/blob/canary/packages/next/src/shared/lib/lazy-dynamic/bailout-to-csr.ts
+// ---------------------------------------------------------------------------
+
+const _BAILOUT_TO_CSR_DIGEST = "BAILOUT_TO_CLIENT_SIDE_RENDERING";
+
+/**
+ * Error thrown to bail out of server rendering and fall back to client-side
+ * rendering. Used by `next/dynamic` with `ssr: false`.
+ *
+ * vinext does not yet emit this error itself — it's exposed so user code and
+ * third-party libraries that mimic `next/dynamic`'s bailout semantics can
+ * construct an error with the canonical digest that `unstable_rethrow`
+ * recognises.
+ *
+ * Ported 1:1 from Next.js:
+ *   https://github.com/vercel/next.js/blob/canary/packages/next/src/shared/lib/lazy-dynamic/bailout-to-csr.ts
+ */
+export class BailoutToCSRError extends Error {
+  public readonly digest: typeof _BAILOUT_TO_CSR_DIGEST = _BAILOUT_TO_CSR_DIGEST;
+  public readonly reason: string;
+
+  constructor(reason: string) {
+    super(`Bail out to client-side rendering: ${reason}`);
+    this.reason = reason;
+  }
+}
+
+/**
+ * Returns true if the error is a `BailoutToCSRError`. Matches Next.js's
+ * digest-based predicate, so any error from a foreign module instance of
+ * the class (or constructed manually with the canonical digest) is also
+ * detected.
+ *
+ * **Note on vinext public surface:** Next.js does NOT expose this from
+ * `next/navigation`. vinext exposes it for symmetry with `isRedirectError`
+ * — treat it as a vinext-only extension. The matching producer
+ * (`BailoutToCSRError`) is the public detection contract; Next.js exposes
+ * neither.
+ *
+ * Ported from Next.js:
+ *   https://github.com/vercel/next.js/blob/canary/packages/next/src/shared/lib/lazy-dynamic/bailout-to-csr.ts
+ */
+export function isBailoutToCSRError(error: unknown): error is BailoutToCSRError {
+  if (!error || typeof error !== "object" || !("digest" in error)) {
+    return false;
+  }
+  return (error as { digest: unknown }).digest === _BAILOUT_TO_CSR_DIGEST;
+}
+
+// ---------------------------------------------------------------------------
+// DynamicServerError — thrown by Next.js's internal `cookies()`/`headers()`
+// shims when called inside a static render context that cannot resolve
+// request-scoped data. vinext's own `next/headers` shim has its own throw
+// semantics, so vinext never constructs this error itself, but third-party
+// code or accidentally-bundled Next.js internals can.
+//
+// Ported from Next.js:
+//   https://github.com/vercel/next.js/blob/canary/packages/next/src/client/components/hooks-server-context.ts
+// ---------------------------------------------------------------------------
+
+const _DYNAMIC_SERVER_USAGE_DIGEST = "DYNAMIC_SERVER_USAGE";
+
+/**
+ * Error thrown when dynamic server APIs (`cookies()`, `headers()`, etc.) are
+ * used inside a static/prerender context. Carries the `DYNAMIC_SERVER_USAGE`
+ * digest so `unstable_rethrow` can recognise and propagate it.
+ *
+ * vinext does not construct this error itself — exposed for the same
+ * "stable detection contract" reason as `BailoutToCSRError` above.
+ *
+ * Ported 1:1 from Next.js:
+ *   https://github.com/vercel/next.js/blob/canary/packages/next/src/client/components/hooks-server-context.ts
+ */
+export class DynamicServerError extends Error {
+  public readonly digest: typeof _DYNAMIC_SERVER_USAGE_DIGEST = _DYNAMIC_SERVER_USAGE_DIGEST;
+  public readonly description: string;
+
+  constructor(description: string) {
+    super(`Dynamic server usage: ${description}`);
+    this.description = description;
+  }
+}
+
+/**
+ * Returns true if the error is a `DynamicServerError` (or any error with the
+ * canonical `DYNAMIC_SERVER_USAGE` digest).
+ *
+ * **Note on vinext public surface:** Next.js does NOT expose this from
+ * `next/navigation`. vinext exposes it for symmetry — treat it as a
+ * vinext-only extension.
+ *
+ * Ported from Next.js:
+ *   https://github.com/vercel/next.js/blob/canary/packages/next/src/client/components/hooks-server-context.ts
+ */
+export function isDynamicServerError(error: unknown): error is DynamicServerError {
+  if (!error || typeof error !== "object" || !("digest" in error)) {
+    return false;
+  }
+  // `===` against a string literal already requires the operand to be a
+  // string, so no separate `typeof digest === "string"` check is needed.
+  // Matches `isBailoutToCSRError` above for stylistic consistency.
+  return (error as { digest: unknown }).digest === _DYNAMIC_SERVER_USAGE_DIGEST;
+}
+
+/**
+ * Rethrow internal Next.js errors so they're handled by the framework.
+ *
+ * When wrapping an API that uses errors for control flow (redirect, notFound,
+ * cookies in static render, `next/dynamic` SSR bailout, etc.), call this
+ * inside `catch` blocks before doing your own error handling. If the error
+ * is a Next.js internal error, it's rethrown; otherwise this is a no-op
+ * (apart from recursing through `error.cause`).
+ *
+ * Recognises (matches Next.js's browser build + the subset of the server
+ * build that vinext can realistically encounter):
+ *   - `isNextRouterError`: redirect / notFound / forbidden / unauthorized
+ *   - `isBailoutToCSRError`: `next/dynamic` `ssr: false` bailout
+ *   - `isDynamicServerError`: dynamic API used in static render
+ *
+ * vinext does not yet recognise four additional server-only Next.js
+ * categories — `isDynamicPostpone`, `isPostpone`,
+ * `isHangingPromiseRejectionError`, `isPrerenderInterruptedError` — because
+ * they signal PPR / prerender-controller events that vinext's render
+ * pipeline does not generate. User code cannot construct these in normal
+ * use; they will be added if/when vinext grows PPR support.
+ *
+ * Ported from Next.js:
+ *   https://github.com/vercel/next.js/blob/canary/packages/next/src/client/components/unstable-rethrow.ts
+ *   https://github.com/vercel/next.js/blob/canary/packages/next/src/client/components/unstable-rethrow.server.ts
+ *   https://github.com/vercel/next.js/blob/canary/packages/next/src/client/components/unstable-rethrow.browser.ts
+ */
+export function unstable_rethrow(error: unknown): void {
+  if (isNextRouterError(error) || isBailoutToCSRError(error) || isDynamicServerError(error)) {
+    throw error;
+  }
+
+  if (error instanceof Error && "cause" in error) {
+    unstable_rethrow((error as Error & { cause: unknown }).cause);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Unrecognized server-action errors
+//
+// `unstable_isUnrecognizedActionError` lets client code detect when a server
+// action call failed because the server didn't recognize the action id — this
+// typically means the client bundle and the server are from different
+// deployments and a hard reload is required.
+//
+// Ported from Next.js:
+//   https://github.com/vercel/next.js/blob/canary/packages/next/src/client/components/unrecognized-action-error.ts
+// ---------------------------------------------------------------------------
+
+/**
+ * Error class for unrecognized server-action calls. Thrown by the App Router
+ * server-action handler when the requested action id is not present in the
+ * current build's action manifest.
+ *
+ * vinext does not yet construct this error from its server-action dispatcher
+ * — it's exposed primarily so user code can use the predicate below
+ * (`unstable_isUnrecognizedActionError`) as a stable `instanceof` check.
+ * Ported as a 1:1 alias of Next.js's class so deployments that throw it
+ * directly (or third-party action wrappers) interoperate.
+ */
+export class UnrecognizedActionError extends Error {
+  constructor(...args: ConstructorParameters<typeof Error>) {
+    super(...args);
+    this.name = "UnrecognizedActionError";
+  }
+}
+
+/**
+ * Returns true if the error came from a server action whose id was not
+ * recognized by the server. Useful inside `catch` blocks that surround
+ * `await myAction(...)` calls; reloading the page generally fixes the
+ * underlying client/server deployment mismatch.
+ *
+ * Ported from Next.js:
+ *   https://github.com/vercel/next.js/blob/canary/packages/next/src/client/components/unrecognized-action-error.ts
+ */
+export function unstable_isUnrecognizedActionError(
+  error: unknown,
+): error is UnrecognizedActionError {
+  return !!(error && typeof error === "object" && error instanceof UnrecognizedActionError);
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 

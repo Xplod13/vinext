@@ -4,8 +4,13 @@
  * Provides the default Next.js error page component.
  * Used by apps that import `import Error from 'next/error'` for
  * custom error handling in getServerSideProps or API routes.
+ *
+ * Also re-exports the unstable App Router error-boundary HOC
+ * (`unstable_catchError`) and its `ErrorInfo` type, mirroring
+ * `next/error`'s public surface.
  */
 import React from "react";
+import { appRouterInstance, isNextRouterError } from "./navigation.js";
 
 type ErrorProps = {
   statusCode: number;
@@ -73,3 +78,149 @@ function ErrorComponent({ statusCode, title }: ErrorProps): React.ReactElement {
 }
 
 export default ErrorComponent;
+
+// ---------------------------------------------------------------------------
+// unstable_catchError — App Router error-boundary HOC
+//
+// `unstable_catchError(fallback)` returns a Component that renders `children`
+// and, if the children throw, renders the user-supplied fallback with an
+// `ErrorInfo` object. Internal Next.js navigation signals (redirect /
+// notFound / forbidden / unauthorized) are rethrown so they reach the outer
+// framework boundaries.
+//
+// Ported from Next.js:
+//   https://github.com/vercel/next.js/blob/canary/packages/next/src/client/components/catch-error.tsx
+//   https://github.com/vercel/next.js/blob/canary/packages/next/src/api/error.ts
+//   https://github.com/vercel/next.js/blob/canary/packages/next/src/api/error.react-server.ts
+//
+// Differences from Next.js:
+//   - `unstable_retry()` matches Next.js's App Router behavior on the
+//     client — it calls `appRouterInstance.refresh()` inside a
+//     React.startTransition and then resets the boundary. On the server it
+//     throws (consistent with React class components only running on the
+//     server during SSR setup, where retry isn't meaningful). The
+//     Pages-Router-only error message Next.js throws
+//     (`unstable_retry()` can only be used in the App Router. Use
+//     `reset()` in the Pages Router.) is not currently dispatched because
+//     vinext's boundary doesn't read `PagesRouterContext`. Calling retry
+//     under Pages Router will trigger an App Router refresh, which is a
+//     no-op in that environment — the error remains visible until
+//     `reset()` is called. Tracked as a parity follow-up.
+//   - Bot-user-agent graceful-degradation, `handleHardNavError`, and
+//     `handleISRError` are not yet supported. Errors always render the
+//     fallback in non-bot contexts.
+//   - The single implementation runs in both react-server and client
+//     conditions. In Next.js, the react-server build exports a throwing stub
+//     because the API is documented as client-only. Here we let module
+//     evaluation succeed everywhere so `import { unstable_catchError } from
+//     'next/error'` does not break SSR-only bundles; misuse in a Server
+//     Component still fails at render time because React class components
+//     are unavailable in the react-server condition for this code path.
+// ---------------------------------------------------------------------------
+
+export type ErrorInfo = {
+  error: unknown;
+  reset: () => void;
+  unstable_retry: () => void;
+};
+
+type _UserProps = Record<string, unknown>;
+
+type _CatchErrorState = { thrownValue: unknown } | null;
+
+class _CatchError<P extends _UserProps> extends React.Component<
+  {
+    fallback: (props: P, errorInfo: ErrorInfo) => React.ReactNode;
+    forwardedProps: P;
+    children?: React.ReactNode;
+  },
+  { error: _CatchErrorState }
+> {
+  // Match Next.js's DevTools label so userland tooling/snapshots align.
+  // https://github.com/vercel/next.js/blob/canary/packages/next/src/client/components/catch-error.tsx
+  static displayName = "unstable_catchError(Next.CatchError)";
+
+  state = { error: null as _CatchErrorState };
+
+  static getDerivedStateFromError(thrownValue: unknown): { error: _CatchErrorState } {
+    if (isNextRouterError(thrownValue)) {
+      // Re-throw redirect/notFound/etc. so an outer framework boundary handles
+      // them. Matches Next.js's CatchError.getDerivedStateFromError().
+      throw thrownValue;
+    }
+    return { error: { thrownValue } };
+  }
+
+  reset = (): void => {
+    this.setState({ error: null });
+  };
+
+  unstable_retry = (): void => {
+    // Matches Next.js's App Router branch in
+    // packages/next/src/client/components/catch-error.tsx — refresh the
+    // current route, then clear the error so children re-render. Wrapped in
+    // startTransition so the in-flight refresh and the reset commit
+    // together (no flash of the children rendering with stale data).
+    //
+    // On the server, refresh is meaningless and `appRouterInstance.refresh`
+    // is a no-op; throw a clear error so callers don't silently swallow a
+    // retry attempt during SSR setup. Matches the spirit of Next.js's
+    // server-side throw (which lives in error-boundary.tsx, not here).
+    if (typeof window === "undefined") {
+      throw new Error(
+        "`unstable_retry()` can only be used on the client. Call it from a user " +
+          "interaction handler inside the error fallback.",
+      );
+    }
+    React.startTransition(() => {
+      appRouterInstance.refresh();
+      this.reset();
+    });
+  };
+
+  render(): React.ReactNode {
+    if (this.state.error) {
+      const errorInfo: ErrorInfo = {
+        error: this.state.error.thrownValue,
+        reset: this.reset,
+        unstable_retry: this.unstable_retry,
+      };
+      return this.props.fallback(this.props.forwardedProps, errorInfo);
+    }
+    return this.props.children;
+  }
+}
+
+/**
+ * Wrap a fallback render function in a Component-level error boundary.
+ * Returns a Component that renders `children` and, on error, renders the
+ * supplied fallback with an `ErrorInfo` value.
+ *
+ * Ported from Next.js:
+ *   https://github.com/vercel/next.js/blob/canary/packages/next/src/client/components/catch-error.tsx
+ */
+export function unstable_catchError<P extends _UserProps>(
+  fallback: (props: P, errorInfo: ErrorInfo) => React.ReactNode,
+): React.ComponentType<P & { children?: React.ReactNode }> {
+  // The inner class is generic in P, but createElement loses that generic at
+  // the call site. Cast it to a non-generic constructor for the specific P
+  // we close over here so TypeScript can pick the JSX-style createElement
+  // overload without complaining about missing generic instantiation.
+  const TypedCatchError = _CatchError as unknown as React.ComponentType<{
+    fallback: (props: P, errorInfo: ErrorInfo) => React.ReactNode;
+    forwardedProps: P;
+    children?: React.ReactNode;
+  }>;
+
+  function CatchErrorBoundary(allProps: P & { children?: React.ReactNode }): React.ReactElement {
+    const { children, ...rest } = allProps;
+    const forwardedProps = rest as unknown as P;
+    return React.createElement(
+      TypedCatchError,
+      { fallback, forwardedProps },
+      children as React.ReactNode,
+    );
+  }
+  CatchErrorBoundary.displayName = `unstable_catchError(${fallback.name || "CatchErrorFallback"})`;
+  return CatchErrorBoundary;
+}
