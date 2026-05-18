@@ -5,6 +5,7 @@ import {
   type ArtifactCompatibilityEnvelope,
 } from "./artifact-compatibility.js";
 import type { RenderObservation } from "./cache-proof.js";
+import { isInterceptionMatchedUrlPath } from "./normalize-path.js";
 
 const APP_INTERCEPTION_SEPARATOR = "\0";
 
@@ -462,13 +463,7 @@ function readRequiredInterceptionString(
 }
 
 function parseInterceptionMatchedUrl(value: string): string {
-  if (
-    !value.startsWith("/") ||
-    value.startsWith("//") ||
-    value.includes("?") ||
-    value.includes("#") ||
-    value.includes("\0")
-  ) {
+  if (!isInterceptionMatchedUrlPath(value)) {
     throw new Error("[vinext] Invalid __interception in App Router payload: expected path URLs");
   }
   return value;
