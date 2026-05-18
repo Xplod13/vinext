@@ -1,4 +1,6 @@
-import type { RouteManifest } from "../routing/app-route-graph.js";
+import { matchRoutePattern } from "../routing/route-pattern.js";
+import { normalizePathnameForRouteMatch } from "../routing/utils.js";
+import type { RouteManifest, RouteManifestRoute } from "../routing/app-route-graph.js";
 import { compareAppElementsSlotIds, type AppElementsSlotBinding } from "./app-elements.js";
 import {
   NavigationTraceReasonCodes,
@@ -137,13 +139,24 @@ export type FlightResultV0 = {
 };
 
 export type NavigationPlannerInput = {
-  // Reserved for #726-CORE-09 route-graph-aware planning. CORE-07/08 only
-  // routes the existing root-boundary decision through the planner, so browser
-  // callers pass null until route topology becomes part of the decision input.
+  // Graph-owned route topology is the semantic authority for root/layout/slot
+  // decisions whenever the caller can supply it. Null keeps the legacy
+  // snapshot-only path for low-level tests and unknown route shapes.
   routeManifest: RouteManifest | null;
   state: NavigationPlannerStateV0;
   event: NavigationEvent;
 };
+
+type RouteTopologySnapshot = {
+  layoutIds: readonly string[];
+  rootBoundaryId: string | null;
+  rootLayoutTreePath: string | null;
+  slotBindings: readonly ParallelSlotBindingSnapshotV0[];
+};
+
+type RouteTopologySlotBindingSource = "snapshot" | "manifestTarget";
+
+const ROUTE_INTERCEPTION_CONTEXT_SEPARATOR = "\0";
 
 function createRequestWorkDecision(options: {
   eventKind: NavigationEvent["kind"];
@@ -178,22 +191,168 @@ function getRequestedWorkTargetHref(work: RequestedWork): string | null {
   }
 }
 
+function createSnapshotRouteTopology(snapshot: RouteSnapshotV0): RouteTopologySnapshot {
+  return {
+    layoutIds: snapshot.layoutIds,
+    rootBoundaryId: snapshot.rootBoundaryId,
+    rootLayoutTreePath: snapshot.rootBoundaryId,
+    slotBindings: snapshot.slotBindings,
+  };
+}
+
+function stripInterceptionContextFromRouteId(routeId: string): string {
+  const separatorIndex = routeId.indexOf(ROUTE_INTERCEPTION_CONTEXT_SEPARATOR);
+  return separatorIndex === -1 ? routeId : routeId.slice(0, separatorIndex);
+}
+
+function getMatchedUrlPathname(matchedUrl: string): string {
+  try {
+    return new URL(matchedUrl, "https://vinext.local").pathname;
+  } catch {
+    const [withoutHash = ""] = matchedUrl.split("#");
+    const [pathname = ""] = withoutHash.split("?");
+    return pathname === "" ? "/" : pathname;
+  }
+}
+
+function splitMatchedUrlIntoRouteParts(matchedUrl: string): string[] {
+  return normalizePathnameForRouteMatch(getMatchedUrlPathname(matchedUrl))
+    .split("/")
+    .filter((part) => part.length > 0);
+}
+
+function findRouteManifestRouteByMatchedUrl(
+  routeManifest: RouteManifest,
+  matchedUrl: string,
+): RouteManifestRoute | null {
+  const urlParts = splitMatchedUrlIntoRouteParts(matchedUrl);
+
+  // RouteManifest preserves buildAppRouteGraph's compareRoutes() order, so the
+  // first pattern match follows the same static/dynamic/catch-all precedence as
+  // request-time route matching instead of raw filesystem scan order.
+  for (const route of routeManifest.segmentGraph.routes.values()) {
+    if (matchRoutePattern(urlParts, route.patternParts) !== null) {
+      return route;
+    }
+  }
+
+  return null;
+}
+
+function routeManifestRouteMatchesUrl(route: RouteManifestRoute, matchedUrl: string): boolean {
+  return matchRoutePattern(splitMatchedUrlIntoRouteParts(matchedUrl), route.patternParts) !== null;
+}
+
+function findRouteManifestRouteByIdOrMatchedUrl(options: {
+  matchedUrl: string;
+  routeId: string;
+  routeManifest: RouteManifest;
+}): RouteManifestRoute | null {
+  const routeId = stripInterceptionContextFromRouteId(options.routeId);
+  const route = options.routeManifest.segmentGraph.routes.get(routeId);
+  if (route && routeManifestRouteMatchesUrl(route, options.matchedUrl)) {
+    return route;
+  }
+
+  return findRouteManifestRouteByMatchedUrl(options.routeManifest, options.matchedUrl);
+}
+
+function findRouteManifestRouteForSnapshot(
+  routeManifest: RouteManifest,
+  snapshot: RouteSnapshotV0,
+): RouteManifestRoute | null {
+  if (snapshot.interception !== null) {
+    return findRouteManifestRouteByIdOrMatchedUrl({
+      matchedUrl: snapshot.interception.sourceMatchedUrl,
+      routeId: snapshot.interception.sourceRouteId,
+      routeManifest,
+    });
+  }
+
+  return findRouteManifestRouteByIdOrMatchedUrl({
+    matchedUrl: snapshot.matchedUrl,
+    routeId: snapshot.routeId,
+    routeManifest,
+  });
+}
+
+function resolveRouteManifestSlotBindings(
+  routeManifest: RouteManifest,
+  route: RouteManifestRoute,
+): readonly ParallelSlotBindingSnapshotV0[] {
+  const bindings: ParallelSlotBindingSnapshotV0[] = [];
+  for (const slotId of route.slotIds) {
+    const binding = routeManifest.segmentGraph.slotBindings.get(`${route.id}::${slotId}`);
+    if (!binding) continue;
+    bindings.push({
+      ownerLayoutId: binding.ownerLayoutId,
+      slotId: binding.slotId,
+      state: binding.state,
+    });
+  }
+
+  return bindings.sort((left, right) => compareAppElementsSlotIds(left.slotId, right.slotId));
+}
+
+function resolveRouteManifestRootLayoutTreePath(
+  routeManifest: RouteManifest,
+  route: RouteManifestRoute,
+): string | null {
+  if (route.rootBoundaryId === null) return null;
+  return routeManifest.segmentGraph.rootBoundaries.get(route.rootBoundaryId)?.treePath ?? null;
+}
+
+function resolveRouteTopologySnapshot(options: {
+  routeManifest: RouteManifest | null;
+  slotBindingSource: RouteTopologySlotBindingSource;
+  snapshot: RouteSnapshotV0;
+}): RouteTopologySnapshot {
+  const route =
+    options.routeManifest === null
+      ? null
+      : findRouteManifestRouteForSnapshot(options.routeManifest, options.snapshot);
+  if (route === null || options.routeManifest === null) {
+    return createSnapshotRouteTopology(options.snapshot);
+  }
+
+  // Intercepted targets carry the source route's tree topology, not the direct
+  // target route's, so direct-target manifest slot bindings do not apply.
+  const shouldUseManifestSlotBindings =
+    options.slotBindingSource === "manifestTarget" && options.snapshot.interception === null;
+
+  return {
+    layoutIds: route.layoutIds,
+    rootBoundaryId: route.rootBoundaryId,
+    rootLayoutTreePath: resolveRouteManifestRootLayoutTreePath(options.routeManifest, route),
+    slotBindings: shouldUseManifestSlotBindings
+      ? resolveRouteManifestSlotBindings(options.routeManifest, route)
+      : options.snapshot.slotBindings,
+  };
+}
+
 function createRootBoundaryTraceFields(options: {
+  currentRootLayoutTreePath: string | null;
   event: Extract<NavigationEvent, { kind: "flightResponseArrived" }>;
+  nextRootLayoutTreePath: string | null;
   state: NavigationPlannerStateV0;
 }): NavigationTraceFields {
   // Browser commit approval supplies lifecycle trace context before calling
   // the planner. This fallback exists for pure planner callers and tests; it
   // intentionally cannot invent lifecycle-only fields such as active nav id.
-  return (
-    options.state.traceFields ??
-    createNavigationLifecycleTraceFields({
-      currentRootLayoutTreePath: options.state.visibleSnapshot.rootBoundaryId,
-      currentVisibleCommitVersion: options.state.visibleCommitVersion,
-      nextRootLayoutTreePath: options.event.result.targetSnapshot.rootBoundaryId,
-      startedVisibleCommitVersion: options.event.token.baseVisibleCommitVersion,
-    })
-  );
+  if (options.state.traceFields) {
+    return {
+      ...options.state.traceFields,
+      currentRootLayoutTreePath: options.currentRootLayoutTreePath,
+      nextRootLayoutTreePath: options.nextRootLayoutTreePath,
+    };
+  }
+
+  return createNavigationLifecycleTraceFields({
+    currentRootLayoutTreePath: options.currentRootLayoutTreePath,
+    currentVisibleCommitVersion: options.state.visibleCommitVersion,
+    nextRootLayoutTreePath: options.nextRootLayoutTreePath,
+    startedVisibleCommitVersion: options.event.token.baseVisibleCommitVersion,
+  });
 }
 
 function classifyRootBoundaryTransition(
@@ -201,10 +360,9 @@ function classifyRootBoundaryTransition(
   nextRootBoundaryId: string | null,
 ): RootBoundaryTransition {
   if (currentRootBoundaryId === null || nextRootBoundaryId === null) {
-    // Both null directions intentionally share the v0 fallback because this
-    // slice only knows boundary identity from the current flight payload.
-    // #726-CORE-09 can split "unknown current" from "unknown target" once the
-    // planner consumes graph-owned root boundary facts for both sides.
+    // Both null directions intentionally share the fallback because unresolved
+    // routes or legacy callers cannot prove either same-root reuse or root
+    // changes from semantic topology.
     return "rootBoundaryUnknownFallback";
   }
 
@@ -217,20 +375,30 @@ function resolveSameLayoutAncestorPersistence(
   currentSnapshot: RouteSnapshotV0,
   targetSnapshot: RouteSnapshotV0,
 ): readonly string[] {
+  return resolveSameLayoutAncestorPersistenceForTopologies(
+    createSnapshotRouteTopology(currentSnapshot),
+    createSnapshotRouteTopology(targetSnapshot),
+  );
+}
+
+function resolveSameLayoutAncestorPersistenceForTopologies(
+  currentTopology: RouteTopologySnapshot,
+  targetTopology: RouteTopologySnapshot,
+): readonly string[] {
   if (
     classifyRootBoundaryTransition(
-      currentSnapshot.rootBoundaryId,
-      targetSnapshot.rootBoundaryId,
+      currentTopology.rootBoundaryId,
+      targetTopology.rootBoundaryId,
     ) !== "currentRootBoundary"
   ) {
     return [];
   }
 
   const commonLayoutIds: string[] = [];
-  const maxLength = Math.min(currentSnapshot.layoutIds.length, targetSnapshot.layoutIds.length);
+  const maxLength = Math.min(currentTopology.layoutIds.length, targetTopology.layoutIds.length);
   for (let index = 0; index < maxLength; index++) {
-    const layoutId = currentSnapshot.layoutIds[index];
-    if (layoutId !== targetSnapshot.layoutIds[index]) break;
+    const layoutId = currentTopology.layoutIds[index];
+    if (layoutId !== targetTopology.layoutIds[index]) break;
     commonLayoutIds.push(layoutId);
   }
   return commonLayoutIds;
@@ -279,9 +447,9 @@ function resolveCurrentRootBoundaryElementPersistence(
 }
 
 function resolveCurrentRootBoundaryCommitElementPersistence(options: {
-  currentSnapshot: RouteSnapshotV0;
+  currentTopology: RouteTopologySnapshot;
   lane: OperationLane;
-  targetSnapshot: RouteSnapshotV0;
+  targetTopology: RouteTopologySnapshot;
 }): readonly string[] {
   // Commit element persistence only keeps layout IDs. Default/unmatched slot
   // reuse is handled separately by preservePreviousSlotIds, using slot-binding
@@ -289,26 +457,29 @@ function resolveCurrentRootBoundaryCommitElementPersistence(options: {
   // resolveCurrentRootBoundaryCommitSlotPersistence recomputes this same
   // ancestor set; planner correctness relies on both calls agreeing so any
   // preserved slot's owner layout is also present in preserveElementIds.
-  return resolveSameLayoutAncestorPersistence(options.currentSnapshot, options.targetSnapshot);
+  return resolveSameLayoutAncestorPersistenceForTopologies(
+    options.currentTopology,
+    options.targetTopology,
+  );
 }
 
 function resolveCurrentRootBoundaryCommitSlotPersistence(options: {
-  currentSnapshot: RouteSnapshotV0;
+  currentTopology: RouteTopologySnapshot;
   lane: OperationLane;
-  targetSnapshot: RouteSnapshotV0;
+  targetTopology: RouteTopologySnapshot;
 }): readonly string[] {
   if (options.lane === "traverse") return [];
 
-  const preservedLayoutIds = resolveSameLayoutAncestorPersistence(
-    options.currentSnapshot,
-    options.targetSnapshot,
+  const preservedLayoutIds = resolveSameLayoutAncestorPersistenceForTopologies(
+    options.currentTopology,
+    options.targetTopology,
   );
   if (preservedLayoutIds.length === 0) return [];
 
   return resolveDefaultOrUnmatchedSlotPersistenceForLayouts({
-    currentSnapshot: options.currentSnapshot,
+    currentSlotBindings: options.currentTopology.slotBindings,
     preservedLayoutIds,
-    targetSnapshot: options.targetSnapshot,
+    targetSlotBindings: options.targetTopology.slotBindings,
   });
 }
 
@@ -323,20 +494,20 @@ function resolveCurrentRootBoundaryCommitSlotPersistence(options: {
  * Wire absence and UNMATCHED_SLOT markers are not semantic proof.
  */
 function resolveDefaultOrUnmatchedSlotPersistenceForLayouts(options: {
-  currentSnapshot: RouteSnapshotV0;
+  currentSlotBindings: readonly ParallelSlotBindingSnapshotV0[];
   preservedLayoutIds: readonly string[];
-  targetSnapshot: RouteSnapshotV0;
+  targetSlotBindings: readonly ParallelSlotBindingSnapshotV0[];
 }): readonly string[] {
   const preservedLayoutIdSet = new Set(options.preservedLayoutIds);
   const slotIdsWithContent = new Set<string>();
-  for (const binding of options.currentSnapshot.slotBindings) {
+  for (const binding of options.currentSlotBindings) {
     if (binding.state === "unmatched") continue;
     slotIdsWithContent.add(binding.slotId);
   }
 
   const preservedSlotIds: string[] = [];
   const seenSlotIds = new Set<string>();
-  for (const binding of options.targetSnapshot.slotBindings) {
+  for (const binding of options.targetSlotBindings) {
     if (binding.ownerLayoutId === null) continue;
     if (!preservedLayoutIdSet.has(binding.ownerLayoutId)) continue;
     if (binding.state === "active") continue;
@@ -396,7 +567,9 @@ function createInterceptionProofRejectedDecision(options: {
 
 function validateInterceptedPreservation(options: {
   currentSnapshot: RouteSnapshotV0;
+  currentTopology: RouteTopologySnapshot;
   targetSnapshot: RouteSnapshotV0;
+  targetTopology: RouteTopologySnapshot;
 }): InterceptedPreservationValidation {
   const proof = options.targetSnapshot.interception;
   if (!proof) {
@@ -424,9 +597,9 @@ function validateInterceptedPreservation(options: {
     };
   }
 
-  const preservedLayoutIds = resolveSameLayoutAncestorPersistence(
-    options.currentSnapshot,
-    options.targetSnapshot,
+  const preservedLayoutIds = resolveSameLayoutAncestorPersistenceForTopologies(
+    options.currentTopology,
+    options.targetTopology,
   );
   if (preservedLayoutIds.length === 0) {
     return {
@@ -436,7 +609,7 @@ function validateInterceptedPreservation(options: {
   }
 
   const preservedLayoutIdSet = new Set(preservedLayoutIds);
-  const targetSlotBinding = options.targetSnapshot.slotBindings.find(
+  const targetSlotBinding = options.targetTopology.slotBindings.find(
     (binding) => binding.slotId === proof.slotId,
   );
   if (
@@ -452,9 +625,9 @@ function validateInterceptedPreservation(options: {
   }
 
   const preservePreviousSlotIds = resolveDefaultOrUnmatchedSlotPersistenceForLayouts({
-    currentSnapshot: options.currentSnapshot,
+    currentSlotBindings: options.currentTopology.slotBindings,
     preservedLayoutIds,
-    targetSnapshot: options.targetSnapshot,
+    targetSlotBindings: options.targetTopology.slotBindings,
   }).filter((slotId) => slotId !== proof.slotId);
 
   return {
@@ -466,9 +639,26 @@ function validateInterceptedPreservation(options: {
 
 function planFlightResponseArrived(options: {
   event: Extract<NavigationEvent, { kind: "flightResponseArrived" }>;
+  routeManifest: RouteManifest | null;
   state: NavigationPlannerStateV0;
 }): NavigationDecisionV0 {
-  const traceFields = createRootBoundaryTraceFields(options);
+  const targetSnapshot = options.event.result.targetSnapshot;
+  const currentTopology = resolveRouteTopologySnapshot({
+    routeManifest: options.routeManifest,
+    slotBindingSource: "snapshot",
+    snapshot: options.state.visibleSnapshot,
+  });
+  const targetTopology = resolveRouteTopologySnapshot({
+    routeManifest: options.routeManifest,
+    slotBindingSource: "manifestTarget",
+    snapshot: targetSnapshot,
+  });
+  const traceFields = createRootBoundaryTraceFields({
+    currentRootLayoutTreePath: currentTopology.rootLayoutTreePath,
+    event: options.event,
+    nextRootLayoutTreePath: targetTopology.rootLayoutTreePath,
+    state: options.state,
+  });
 
   if (options.event.token.lane === "prefetch") {
     return {
@@ -479,7 +669,6 @@ function planFlightResponseArrived(options: {
     };
   }
 
-  const targetSnapshot = options.event.result.targetSnapshot;
   // interceptionContext is transport evidence, not authority. Normal payloads
   // can carry it when a request was sent from an intercepted visible world, so
   // only explicit __interception proof enters the preservation branch.
@@ -487,7 +676,9 @@ function planFlightResponseArrived(options: {
   if (hasInterceptedPayload) {
     const validation = validateInterceptedPreservation({
       currentSnapshot: options.state.visibleSnapshot,
+      currentTopology,
       targetSnapshot,
+      targetTopology,
     });
     if (validation.kind === "rejected") {
       return createInterceptionProofRejectedDecision({
@@ -515,8 +706,8 @@ function planFlightResponseArrived(options: {
   }
 
   const transition = classifyRootBoundaryTransition(
-    options.state.visibleSnapshot.rootBoundaryId,
-    targetSnapshot.rootBoundaryId,
+    currentTopology.rootBoundaryId,
+    targetTopology.rootBoundaryId,
   );
 
   if (transition === "rootBoundaryChanged") {
@@ -531,9 +722,8 @@ function planFlightResponseArrived(options: {
 
   if (transition === "rootBoundaryUnknownFallback") {
     // Unknown root identity is an uncertainty fallback, not evidence that
-    // reuse is safe. #726-CORE-09 can delete the legacy soft-commit writer
-    // once every promoted caller supplies graph-owned root boundary IDs from
-    // the route graph read model documented in routing/app-router.ts.
+    // reuse is safe. It remains only for callers without a manifest or routes
+    // that cannot be matched back to RouteManifest topology.
     return {
       kind: "proposeCommit",
       proposal: {
@@ -553,14 +743,14 @@ function planFlightResponseArrived(options: {
     proposal: {
       preserveAbsentSlots: false,
       preserveElementIds: resolveCurrentRootBoundaryCommitElementPersistence({
-        currentSnapshot: options.state.visibleSnapshot,
+        currentTopology,
         lane: options.event.token.lane,
-        targetSnapshot,
+        targetTopology,
       }),
       preservePreviousSlotIds: resolveCurrentRootBoundaryCommitSlotPersistence({
-        currentSnapshot: options.state.visibleSnapshot,
+        currentTopology,
         lane: options.event.token.lane,
-        targetSnapshot,
+        targetTopology,
       }),
       reason: "currentRootBoundary",
       targetSnapshot,
@@ -614,6 +804,7 @@ function planNavigation(input: NavigationPlannerInput): NavigationDecisionV0 {
     case "flightResponseArrived":
       return planFlightResponseArrived({
         event: input.event,
+        routeManifest: input.routeManifest,
         state: input.state,
       });
     default: {

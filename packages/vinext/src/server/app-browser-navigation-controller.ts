@@ -5,6 +5,7 @@ import {
   commitClientNavigationState,
 } from "vinext/shims/navigation";
 import type { ClientNavigationRenderSnapshot } from "vinext/shims/navigation";
+import type { RouteManifest } from "../routing/app-route-graph.js";
 import {
   createPendingNavigationCommit,
   type AppRouterState,
@@ -56,6 +57,7 @@ type SameUrlServerActionLifecycleOptions = {
 type BrowserNavigationControllerDeps = {
   commitClientNavigationState?: typeof commitClientNavigationState;
   performHardNavigation?: (href: string, mode?: HardNavigationMode) => boolean;
+  getRouteManifest?: () => RouteManifest | null;
   syncHistoryStatePreviousNextUrl?: (previousNextUrl: string | null) => void;
 };
 
@@ -193,6 +195,7 @@ export function createAppBrowserNavigationController(
   const commitClientNavigationStateImpl =
     deps.commitClientNavigationState ?? commitClientNavigationState;
   const performHardNavigation = deps.performHardNavigation ?? performHardNavigationWithLoopGuard;
+  const getRouteManifest = deps.getRouteManifest ?? (() => null);
   const syncHistoryStatePreviousNextUrl = deps.syncHistoryStatePreviousNextUrl ?? (() => {});
 
   // These are plain module-level variables (inside the controller closure),
@@ -520,6 +523,7 @@ export function createAppBrowserNavigationController(
         activeNavigationId,
         currentState: getBrowserRouterState(),
         pending,
+        routeManifest: getRouteManifest(),
         startedNavigationId: options.navId,
         targetHref: options.targetHref,
       });
@@ -598,6 +602,7 @@ export function createAppBrowserNavigationController(
       renderId: allocateRenderId(),
       operationLane: "server-action",
       startedNavigationId,
+      routeManifest: getRouteManifest(),
       targetHref,
       type: "navigate",
     });
@@ -617,6 +622,7 @@ export function createAppBrowserNavigationController(
         activeNavigationId,
         currentState: getBrowserRouterState(),
         pending,
+        routeManifest: getRouteManifest(),
         startedNavigationId,
         targetHref,
       });

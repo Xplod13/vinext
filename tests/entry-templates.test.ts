@@ -170,10 +170,37 @@ describe("App Router generated manifest construction", () => {
     ]);
 
     expect(code).toContain("window.__VINEXT_LINK_PREFETCH_ROUTES__ = ");
+    expect(code).toContain("window.__VINEXT_ROUTE_MANIFEST__ = null;");
     expect(code).toContain('{"patternParts":["about"],"isDynamic":false}');
     expect(code).toContain('{"patternParts":["blog",":slug"],"isDynamic":true}');
     expect(code).toContain('{"patternParts":["modal-host"],"isDynamic":false}');
     expect(code).not.toContain('{"patternParts":["api"],"isDynamic":false}');
+  });
+
+  it("embeds the RouteManifest read model in the browser entry", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "vinext-browser-route-manifest-"));
+    const appDir = path.join(tmpDir, "app");
+    try {
+      fs.mkdirSync(path.join(appDir, "dashboard"), { recursive: true });
+      fs.writeFileSync(path.join(appDir, "layout.tsx"), "export default function Layout() {}\n");
+      fs.writeFileSync(path.join(appDir, "page.tsx"), "export default function Page() {}\n");
+      fs.writeFileSync(
+        path.join(appDir, "dashboard", "page.tsx"),
+        "export default function Page() {}\n",
+      );
+
+      const graph = await buildAppRouteGraph(appDir, createValidFileMatcher());
+      const code = generateBrowserEntry(graph.routes, graph.routeManifest);
+
+      expect(code).toContain("window.__VINEXT_ROUTE_MANIFEST__ = {");
+      expect(code).toContain("graphVersion:");
+      expect(code).toContain("routes: new Map(");
+      expect(code).toContain("rootBoundaries: new Map(");
+      expect(code).toContain('"route:/dashboard"');
+      expect(code).toContain('"root-boundary:/"');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 
   it("constructs route module imports and route entries from the scanned app shape", () => {

@@ -84,6 +84,7 @@ import { createPopstateRestoreHandler } from "./app-browser-popstate.js";
 import { DevRecoveryBoundary, RedirectBoundary } from "vinext/shims/error-boundary";
 import { AppRouterContext } from "vinext/shims/internal/app-router-context";
 import { ElementsContext, Slot } from "vinext/shims/slot";
+import type { RouteManifest } from "../routing/app-route-graph.js";
 import { stripBasePath } from "../utils/base-path.js";
 import { createOnUncaughtError } from "./app-browser-error.js";
 import {
@@ -150,7 +151,12 @@ const MAX_VISITED_RESPONSE_CACHE_SIZE = 50;
 const VISITED_RESPONSE_CACHE_TTL = 5 * 60_000;
 const MAX_TRAVERSAL_CACHE_TTL = 30 * 60_000;
 const CLIENT_RSC_COMPATIBILITY_ID = getVinextRscCompatibilityId();
+function getBrowserRouteManifest(): RouteManifest | null {
+  return window.__VINEXT_ROUTE_MANIFEST__ ?? null;
+}
+
 const browserNavigationController = createAppBrowserNavigationController({
+  getRouteManifest: getBrowserRouteManifest,
   syncHistoryStatePreviousNextUrl: syncCurrentHistoryStatePreviousNextUrl,
 });
 const discardedServerActionRefreshScheduler = createDiscardedServerActionRefreshScheduler({

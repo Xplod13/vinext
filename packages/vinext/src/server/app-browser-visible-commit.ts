@@ -1,4 +1,5 @@
 import type { ClientNavigationRenderSnapshot } from "vinext/shims/navigation";
+import type { RouteManifest } from "../routing/app-route-graph.js";
 import { mergeElements } from "vinext/shims/slot";
 import {
   normalizeAppElementsSlotBindings,
@@ -208,6 +209,7 @@ function resolvePendingNavigationCommitDecision(options: {
   activeNavigationId: number;
   currentState: AppRouterState;
   pending: PendingNavigationCommit;
+  routeManifest?: RouteManifest | null;
   startedNavigationId: number;
   targetHref: string;
 }): CommitDecision {
@@ -355,6 +357,7 @@ export function approvePendingNavigationCommit(options: {
   activeNavigationId: number;
   currentState: AppRouterState;
   pending: PendingNavigationCommit;
+  routeManifest?: RouteManifest | null;
   startedNavigationId: number;
   targetHref: string;
 }): CommitApproval {
@@ -363,6 +366,7 @@ export function approvePendingNavigationCommit(options: {
       activeNavigationId: options.activeNavigationId,
       currentState: options.currentState,
       pending: options.pending,
+      routeManifest: options.routeManifest ?? null,
       startedNavigationId: options.startedNavigationId,
       targetHref: options.targetHref,
     }),
@@ -403,6 +407,7 @@ export async function resolveAndClassifyNavigationCommit(options: {
   operationLane: OperationLane;
   previousNextUrl?: string | null;
   renderId: number;
+  routeManifest?: RouteManifest | null;
   startedNavigationId: number;
   targetHref: string;
   type: "navigate" | "replace" | "traverse";
@@ -422,6 +427,7 @@ export async function resolveAndClassifyNavigationCommit(options: {
     activeNavigationId: options.getActiveNavigationId?.() ?? options.activeNavigationId,
     currentState: approvalState,
     pending,
+    routeManifest: options.routeManifest ?? null,
     startedNavigationId: options.startedNavigationId,
     targetHref: options.targetHref,
   });

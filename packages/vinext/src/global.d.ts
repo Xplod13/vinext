@@ -18,6 +18,7 @@
 
 import type { Root } from "react-dom/client";
 import type { OnRequestErrorHandler } from "./server/instrumentation";
+import type { RouteManifest } from "./routing/app-route-graph";
 import type { CachedRscResponse, PrefetchCacheEntry } from "vinext/shims/navigation";
 
 // `window.next` is declared inline in `./client/window-next.ts` (mirroring
@@ -119,6 +120,13 @@ declare global {
      * Next.js refresh-reducer.ts).
      */
     __VINEXT_CLEAR_NAV_CACHES__: (() => void) | undefined;
+
+    /**
+     * Static App Router route graph read model embedded by the generated
+     * browser entry. Navigation planning uses it as the semantic authority
+     * for root-boundary, layout, and target parallel-slot facts.
+     */
+    __VINEXT_ROUTE_MANIFEST__: RouteManifest | null | undefined;
 
     /**
      * Commits an App Router hash-only navigation without fetching RSC data.

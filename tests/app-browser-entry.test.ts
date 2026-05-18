@@ -70,6 +70,20 @@ import {
   VINEXT_MOUNTED_SLOTS_HEADER,
   VINEXT_PARAMS_HEADER,
 } from "../packages/vinext/src/server/headers.js";
+import type {
+  GraphVersion,
+  RootBoundaryId,
+  RouteManifest,
+  RouteManifestRootBoundary,
+  RouteManifestRoute,
+  StaticSegmentGraph,
+} from "../packages/vinext/src/routing/app-route-graph.js";
+
+type TestRouteManifestRoute = {
+  layoutIds: readonly string[];
+  pattern: string;
+  rootBoundaryId: string | null;
+};
 
 function createResolvedElements(
   routeId: string,
@@ -125,6 +139,61 @@ function createInterceptionProof(
     slotId,
     targetMatchedUrl,
     targetRouteId: AppElementsWire.encodeRouteId(targetMatchedUrl, null),
+  };
+}
+
+function createTestRouteManifest(routes: readonly TestRouteManifestRoute[]): RouteManifest {
+  const manifestRoutes = new Map<string, RouteManifestRoute>();
+  const rootBoundaries = new Map<RootBoundaryId, RouteManifestRootBoundary>();
+
+  for (const route of routes) {
+    const routeId = `route:${route.pattern}`;
+    const rootBoundaryId =
+      route.rootBoundaryId === null ? null : (route.rootBoundaryId as RootBoundaryId);
+    const patternParts = route.pattern.split("/").filter((segment) => segment.length > 0);
+    manifestRoutes.set(routeId, {
+      id: routeId,
+      isDynamic: patternParts.some((part) => part.startsWith(":")),
+      layoutIds: route.layoutIds,
+      pageId: null,
+      paramNames: patternParts
+        .filter((part) => part.startsWith(":"))
+        .map((part) => part.replace(/^:/, "").replace(/[+*]$/, "")),
+      pattern: route.pattern,
+      patternParts,
+      rootBoundaryId,
+      rootParamNames: [],
+      routeHandlerId: null,
+      slotIds: [],
+      templateIds: [],
+    });
+
+    const rootLayoutId = route.layoutIds[0];
+    if (rootBoundaryId !== null && rootLayoutId !== undefined) {
+      rootBoundaries.set(rootBoundaryId, {
+        id: rootBoundaryId,
+        layoutId: rootLayoutId,
+        treePath: route.rootBoundaryId?.replace(/^root-boundary:/, "") ?? "/",
+      });
+    }
+  }
+
+  const segmentGraph: StaticSegmentGraph = {
+    boundaries: new Map(),
+    defaults: new Map(),
+    layouts: new Map(),
+    pages: new Map(),
+    rootBoundaries,
+    routeHandlers: new Map(),
+    routes: manifestRoutes,
+    slotBindings: new Map(),
+    slots: new Map(),
+    templates: new Map(),
+  };
+
+  return {
+    graphVersion: "graph:test" as GraphVersion,
+    segmentGraph,
   };
 }
 
@@ -1638,6 +1707,70 @@ describe("app browser navigation controller", () => {
       expect(stateRef.current.routeId).toBe("route:/dashboard");
     } finally {
       clearSpy.mockRestore();
+      detach();
+    }
+  });
+
+  it("reads RouteManifest lazily after generated browser globals are assigned", async () => {
+    let routeManifest: RouteManifest | null = null;
+    const performHardNavigation = vi.fn(() => true);
+    const { controller, detach, stateRef } = createControllerHarness(
+      createState({
+        layoutIds: ["layout:/stale"],
+        navigationSnapshot: createClientNavigationRenderSnapshot("https://example.com/app", {}),
+        rootLayoutTreePath: "/",
+        routeId: "route:/app",
+      }),
+      {
+        getRouteManifest: () => routeManifest,
+        performHardNavigation,
+      },
+    );
+
+    try {
+      const pendingRouterState = controller.beginPendingBrowserRouterState();
+      const navId = controller.beginNavigation();
+      let resolvePayload!: (elements: AppElements) => void;
+      const nextElements = new Promise<AppElements>((resolve) => {
+        resolvePayload = resolve;
+      });
+
+      const result = controller.renderNavigationPayload({
+        actionType: "navigate",
+        createNavigationCommitEffect: () => vi.fn(),
+        historyUpdateMode: "push",
+        navigationSnapshot: createClientNavigationRenderSnapshot(
+          "https://example.com/marketing",
+          {},
+        ),
+        nextElements,
+        operationLane: "navigation",
+        params: {},
+        pendingRouterState,
+        previousNextUrl: null,
+        targetHref: "https://example.com/marketing",
+        navId,
+      });
+
+      routeManifest = createTestRouteManifest([
+        {
+          layoutIds: ["layout:/app"],
+          pattern: "/app",
+          rootBoundaryId: "root-boundary:/app",
+        },
+        {
+          layoutIds: ["layout:/marketing"],
+          pattern: "/marketing",
+          rootBoundaryId: "root-boundary:/marketing",
+        },
+      ]);
+      resolvePayload(createResolvedElements("route:/marketing", "/", null, {}, ["layout:/stale"]));
+
+      await expect(result).resolves.toBe("hard-navigate");
+      await expect(pendingRouterState.promise).resolves.toBe(stateRef.current);
+      expect(performHardNavigation).toHaveBeenCalledWith("https://example.com/marketing");
+      expect(stateRef.current.routeId).toBe("route:/app");
+    } finally {
       detach();
     }
   });

@@ -1,4 +1,5 @@
 import { stripBasePath } from "../utils/base-path.js";
+import type { RouteManifest } from "../routing/app-route-graph.js";
 import {
   AppElementsWire,
   getMountedSlotIds,
@@ -210,6 +211,7 @@ export function resolvePendingNavigationCommitDispositionDecision(options: {
   activeNavigationId: number;
   currentState: AppRouterState;
   pending: PendingNavigationCommit;
+  routeManifest?: RouteManifest | null;
   startedNavigationId: number;
   targetHref?: string;
 }): PendingNavigationCommitDispositionDecision {
@@ -231,6 +233,7 @@ export function resolvePendingNavigationCommitDispositionDecision(options: {
     planPendingRootBoundaryFlightResponse({
       currentState: options.currentState,
       pending: options.pending,
+      routeManifest: options.routeManifest ?? null,
       targetHref: options.targetHref,
       traceFields,
     }),
@@ -325,12 +328,13 @@ function createPendingRouteSnapshot(pending: PendingNavigationCommit): RouteSnap
 
 function createPendingNavigationOperationToken(options: {
   pending: PendingNavigationCommit;
+  routeManifest: RouteManifest | null;
   targetSnapshot: RouteSnapshotV0;
 }): OperationToken {
   return {
     baseVisibleCommitVersion: options.pending.action.operation.startedVisibleCommitVersion,
     deploymentVersion: null,
-    graphVersion: null,
+    graphVersion: options.routeManifest?.graphVersion ?? null,
     lane: options.pending.action.operation.lane,
     operationId: options.pending.action.operation.id,
     targetSnapshotFingerprint: createRootBoundarySnapshotFingerprint(options.targetSnapshot),
@@ -344,22 +348,23 @@ function createRootBoundarySnapshotFingerprint(snapshot: RouteSnapshotV0): strin
 function planPendingRootBoundaryFlightResponse(options: {
   currentState: AppRouterState;
   pending: PendingNavigationCommit;
+  routeManifest: RouteManifest | null;
   targetHref?: string;
   traceFields: NavigationTraceFields;
 }): NavigationDecisionV0 {
   const targetSnapshot = createPendingRouteSnapshot(options.pending);
   const token = createPendingNavigationOperationToken({
     pending: options.pending,
+    routeManifest: options.routeManifest,
     targetSnapshot,
   });
 
   // #726-CORE-07/08 keeps the browser state layer as the lifecycle gate and
   // only translates committed AppElements metadata into planner snapshots.
-  // The planner owns the root-boundary decision; later #726 route-graph work
-  // should replace these client-visible snapshots with the read model called
-  // out in routing/app-router.ts instead of adding more local topology checks.
+  // RouteManifest now supplies graph-owned route topology while snapshots
+  // continue to carry runtime state such as visible slot content.
   return navigationPlanner.plan({
-    routeManifest: null,
+    routeManifest: options.routeManifest,
     state: {
       nextOperationToken: token,
       traceFields: options.traceFields,
