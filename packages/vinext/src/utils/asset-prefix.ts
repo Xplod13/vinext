@@ -97,3 +97,37 @@ export function assetPrefixPathname(assetPrefix: string): string {
     return "";
   }
 }
+
+/**
+ * Whether the incoming request pathname targets the canonical `_next/static/`
+ * tree, after stripping any configured `basePath` and `assetPrefix` path
+ * component.
+ *
+ * Used to short-circuit invalid `_next/static/*` requests with a plain-text
+ * 404 instead of letting them fall through to the page renderer (which would
+ * produce a full HTML not-found document). Mirrors Next.js's behaviour in
+ * `packages/next/src/server/lib/router-server.ts` where `realRequestPathname`
+ * is stripped of basePath/assetPrefix/i18n locale before the
+ * `startsWith('/_next/static/')` check.
+ *
+ *  - `pathname`: incoming request pathname (with leading slash, no query).
+ *  - `basePath`: configured `basePath` (e.g. `"/docs"`) or `""`.
+ *  - `assetPathPrefix`: path component of `assetPrefix` (e.g. `"/cdn"`) or
+ *    `""`. Use `assetPrefixPathname()` to derive this from a raw assetPrefix.
+ *
+ * @see https://github.com/vercel/next.js/blob/canary/packages/next/src/server/lib/router-server.ts
+ */
+export function isNextStaticPath(
+  pathname: string,
+  basePath: string,
+  assetPathPrefix: string,
+): boolean {
+  let p = pathname;
+  if (basePath && (p === basePath || p.startsWith(basePath + "/"))) {
+    p = p.slice(basePath.length) || "/";
+  }
+  if (assetPathPrefix && (p === assetPathPrefix || p.startsWith(assetPathPrefix + "/"))) {
+    p = p.slice(assetPathPrefix.length) || "/";
+  }
+  return p.startsWith("/_next/static/");
+}

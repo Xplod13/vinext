@@ -30,6 +30,7 @@ import {
   resolveAssetUrlPrefix,
   resolveAssetsDir,
   assetPrefixPathname,
+  isNextStaticPath,
   ASSET_PREFIX_URL_DIR,
 } from "../packages/vinext/src/utils/asset-prefix.js";
 import { resolveAppRouterAssetPath } from "../packages/vinext/src/server/prod-server.js";
@@ -137,6 +138,42 @@ describe("assetPrefixPathname", () => {
   it("returns the path component for path-prefix and pathful URL prefixes", () => {
     expect(assetPrefixPathname("/custom-asset-prefix")).toBe("/custom-asset-prefix");
     expect(assetPrefixPathname("https://cdn.example.com/sub")).toBe("/sub");
+  });
+});
+
+describe("isNextStaticPath", () => {
+  it("matches `/_next/static/*` at the root", () => {
+    expect(isNextStaticPath("/_next/static/foo-abc.js", "", "")).toBe(true);
+    expect(isNextStaticPath("/_next/static/chunks/main.js", "", "")).toBe(true);
+  });
+
+  it("does not match unrelated paths", () => {
+    expect(isNextStaticPath("/", "", "")).toBe(false);
+    expect(isNextStaticPath("/about", "", "")).toBe(false);
+    expect(isNextStaticPath("/_next/data/foo.json", "", "")).toBe(false);
+    // `/_next/static` alone (no trailing slash) is not a static-asset path.
+    expect(isNextStaticPath("/_next/static", "", "")).toBe(false);
+  });
+
+  it("strips basePath before matching", () => {
+    expect(isNextStaticPath("/docs/_next/static/foo.js", "/docs", "")).toBe(true);
+    expect(isNextStaticPath("/docs/about", "/docs", "")).toBe(false);
+    // basePath set but request without basePath — still matches the root form.
+    expect(isNextStaticPath("/_next/static/foo.js", "/docs", "")).toBe(true);
+  });
+
+  it("strips assetPathPrefix before matching", () => {
+    expect(isNextStaticPath("/cdn/_next/static/foo.js", "", "/cdn")).toBe(true);
+    expect(isNextStaticPath("/cdn/other", "", "/cdn")).toBe(false);
+  });
+
+  it("strips basePath then assetPathPrefix (independent prefixes)", () => {
+    expect(isNextStaticPath("/docs/cdn/_next/static/foo.js", "/docs", "/cdn")).toBe(true);
+  });
+
+  it("does not partial-match prefixes", () => {
+    // `/baseball` should NOT be stripped by `basePath: "/base"`.
+    expect(isNextStaticPath("/baseball/_next/static/foo.js", "/base", "")).toBe(false);
   });
 });
 

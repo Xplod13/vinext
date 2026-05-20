@@ -367,7 +367,10 @@ ${metaRouteEntries.join(",\n")}
 
 // Hoisted ahead of __fallbackRenderer / buildPageElements so both can thread
 // the configured basePath through file-based metadata href emission.
-const __basePath = ${JSON.stringify(bp)};
+// Re-exported so the App Router prod-server can strip basePath before
+// recognising /_next/static/* paths (parity with the Pages Router server's
+// vinextConfig.basePath export).
+export const __basePath = ${JSON.stringify(bp)};
 
 const rootNotFoundModule = ${rootNotFoundVar ? rootNotFoundVar : "null"};
 const rootForbiddenModule = ${rootForbiddenVar ? rootForbiddenVar : "null"};

@@ -57,6 +57,7 @@ import {
   ASSET_PREFIX_URL_DIR,
   assetPrefixPathname,
   isAbsoluteAssetPrefix,
+  isNextStaticPath,
 } from "../utils/asset-prefix.js";
 import { computeLazyChunks } from "../utils/lazy-chunks.js";
 import { manifestFileWithBase } from "../utils/manifest-paths.js";
@@ -1056,6 +1057,12 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
   // no prefix is configured). The URL prefix the prod-server needs to strip
   // before locating files on disk includes this path plus `_next/static/`.
   const appAssetPathPrefix = assetPrefixPathname(appRouterAssetPrefix);
+  // basePath is embedded as a compile-time constant in the generated RSC entry
+  // alongside __assetPrefix. Used to recognise `<basePath>/_next/static/...`
+  // requests so we can short-circuit invalid ones with a plain-text 404
+  // instead of letting them reach the RSC handler (which would render the
+  // full HTML 404 page).
+  const appBasePath: string = typeof rscModule.__basePath === "string" ? rscModule.__basePath : "";
 
   // Seed the memory cache with pre-rendered routes so the first request to
   // any pre-rendered page is a cache HIT instead of a full re-render.
@@ -1141,6 +1148,16 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
         assetLookupPath &&
         (await tryServeStatic(req, res, clientDir, assetLookupPath, compress, staticCache))
       ) {
+        return;
+      }
+
+      // Invalid `_next/static/*` paths short-circuit with a plain-text 404
+      // instead of falling through to the RSC handler (which would render
+      // the full HTML 404 page with bootstrap scripts, CSS, etc.). Matches
+      // Next.js: packages/next/src/server/lib/router-server.ts:661-668.
+      if (isNextStaticPath(pathname, appBasePath, appAssetPathPrefix)) {
+        res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+        res.end("Not Found");
         return;
       }
     }
@@ -1475,6 +1492,16 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
       pagesAssetLookup &&
       (await tryServeStatic(req, res, clientDir, pagesAssetLookup, compress, staticCache))
     ) {
+      return;
+    }
+
+    // Invalid `_next/static/*` paths short-circuit with a plain-text 404
+    // instead of falling through to the SSR/render handler (which would
+    // render the full HTML 404 page with bootstrap scripts, CSS, etc.).
+    // Matches Next.js: packages/next/src/server/lib/router-server.ts:661-668.
+    if (isNextStaticPath(pathname, basePath, pagesAssetPathPrefix)) {
+      res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+      res.end("Not Found");
       return;
     }
 
