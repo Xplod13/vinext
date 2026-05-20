@@ -1704,12 +1704,38 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
           ].flatMap((entry) => (entry ? [toRelativeFileEntry(root, entry)] : []));
           const optimizeEntries = [...new Set([...appEntries, ...explicitInstrumentationEntries])];
 
+          // Resolve conditions per environment so package `exports` maps pick
+          // the correct file for each runtime context. Matches Next.js webpack
+          // behavior (see Next.js `build/webpack-config.ts` reactServerConditionNames)
+          // and Next.js' `test/e2e/import-conditions/`. See #1356.
+          //
+          //   RSC env  : `react-server` + server defaults (+ edge conditions on workerd)
+          //   SSR env  : server defaults (`module`, `node`, …) (+ edge conditions on workerd)
+          //   Client   : client defaults (`module`, `browser`, …)
+          //
+          // When running on Cloudflare Workers / Nitro, the runtime is workerd,
+          // so we add `edge-light`, `workerd`, and `worker` to the server-side
+          // environments. `@cloudflare/vite-plugin` already sets these for its
+          // own worker environment; we set them here for vinext's rsc/ssr envs
+          // because Cloudflare's plugin doesn't reach inside them. Without this,
+          // packages that gate exports on `edge-light` (e.g. Next.js'
+          // `library-with-exports` test fixture) resolve to their `node` export
+          // when running on workerd.
+          const SERVER_DEFAULT_CONDITIONS = ["module", "node", "development|production"];
+          const CLIENT_DEFAULT_CONDITIONS = ["module", "browser", "development|production"];
+          const EDGE_CONDITIONS =
+            hasCloudflarePlugin || hasNitroPlugin ? ["edge-light", "workerd", "worker"] : [];
+          const rscConditions = ["react-server", ...EDGE_CONDITIONS, ...SERVER_DEFAULT_CONDITIONS];
+          const ssrConditions = [...EDGE_CONDITIONS, ...SERVER_DEFAULT_CONDITIONS];
+          const clientConditions = [...CLIENT_DEFAULT_CONDITIONS];
+
           viteConfig.environments = {
             rsc: {
-              ...(hasCloudflarePlugin || hasNitroPlugin
-                ? {}
-                : {
-                    resolve: {
+              resolve: {
+                conditions: rscConditions,
+                ...(hasCloudflarePlugin || hasNitroPlugin
+                  ? {}
+                  : {
                       // Externalize native/heavy packages so the RSC environment
                       // loads them natively via Node rather than through Vite's
                       // ESM module evaluator (which can't handle native addons).
@@ -1727,8 +1753,8 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                       // When user sets `ssr.external: true`, skip noExternal since
                       // everything is already externalized.
                       ...(userSsrExternal === true ? {} : { noExternal: true as const }),
-                    },
-                  }),
+                    }),
+              },
               optimizeDeps: {
                 exclude: mergeOptimizeDepsExclude(incomingExclude, VINEXT_OPTIMIZE_DEPS_EXCLUDE),
                 entries: optimizeEntries,
@@ -1741,10 +1767,11 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
               },
             },
             ssr: {
-              ...(hasCloudflarePlugin || hasNitroPlugin
-                ? {}
-                : {
-                    resolve: {
+              resolve: {
+                conditions: ssrConditions,
+                ...(hasCloudflarePlugin || hasNitroPlugin
+                  ? {}
+                  : {
                       external: userSsrExternal === true ? true : [...userSsrExternal, "ipaddr.js"],
                       // Force all node_modules through Vite's transform pipeline
                       // so non-JS imports (CSS, images) don't hit Node's native
@@ -1752,8 +1779,8 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                       // When user sets `ssr.external: true`, skip noExternal since
                       // everything is already externalized.
                       ...(userSsrExternal === true ? {} : { noExternal: true as const }),
-                    },
-                  }),
+                    }),
+              },
               optimizeDeps: {
                 // When userSsrExternal === true, exclude React from the SSR
                 // optimizer so plugin-rsc's crawlFrameworkPkgs doesn't pre-bundle
@@ -1794,6 +1821,9 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
               // service for the client environment, causing virtual module
               // imports to leak to Node's native ESM loader (ERR_UNSUPPORTED_ESM_URL_SCHEME).
               consumer: "client",
+              resolve: {
+                conditions: clientConditions,
+              },
               optimizeDeps: {
                 // Exclude server-external packages from the client dep optimizer.
                 // These packages are server-only by design (listed in next.config's
@@ -1850,6 +1880,12 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
           viteConfig.environments = {
             client: {
               consumer: "client",
+              resolve: {
+                // See #1356: package `exports` must resolve to the browser entry
+                // in the client environment so e.g. isomorphic libs pick their
+                // browser file.
+                conditions: ["module", "browser", "development|production"],
+              },
               optimizeDeps:
                 pagesOptimizeEntries.length > 0 ? { entries: pagesOptimizeEntries } : undefined,
               build: {
@@ -1875,6 +1911,12 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
           viteConfig.environments = {
             client: {
               consumer: "client",
+              resolve: {
+                // See #1356: package `exports` must resolve to the browser entry
+                // in the client environment so e.g. isomorphic libs pick their
+                // browser file.
+                conditions: ["module", "browser", "development|production"],
+              },
               optimizeDeps:
                 pagesOptimizeEntries.length > 0 ? { entries: pagesOptimizeEntries } : undefined,
               build: {
@@ -1890,6 +1932,10 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
             },
             ssr: {
               resolve: {
+                // See #1356: package `exports` must resolve to the node entry in
+                // the Pages Router SSR environment so server-only libs (e.g.
+                // ones that gate on `node`) pick their server file.
+                conditions: ["module", "node", "development|production"],
                 external: ["react", "react-dom", "react-dom/server", "ipaddr.js"],
                 noExternal: true as const,
               },
