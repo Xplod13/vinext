@@ -49,15 +49,15 @@ import MagicString from "magic-string";
 const NEW_URL_CSS_RE =
   /\bnew\s+URL\s*\(\s*(["'`][^"'`]+\.css["'`])\s*,\s*import\.meta\.url\s*(?:,\s*)?\)/g;
 
-// Matches side-effect CSS imports:
+// Matches side-effect CSS imports, including a trailing `?…` query so that
+// the handler can decide whether the specifier carries a `?url`/`?raw`/
+// `?inline`/`?no-inline` contract before stripping:
 //   import "./x.css";
-//   import './x.css'
-// Does NOT match `import x from "./x.css"` — those are intentionally rare
-// in user code and removing the binding would break the module syntactically.
-// We also skip module IDs containing `?url` or `?raw` since those carry an
-// explicit user contract that the import resolves to a string, not a side
-// effect.
-const SIDE_EFFECT_CSS_IMPORT_RE = /^\s*import\s+(["'])([^"']+\.css)\1\s*;?\s*$/gm;
+//   import "./x.css?url";
+// Does NOT match `import x from "./x.css"` — bound imports are intentionally
+// rare in user code and removing the binding would break the module
+// syntactically.
+const SIDE_EFFECT_CSS_IMPORT_RE = /^\s*import\s+(["'])([^"']+\.css(?:\?[^"']*)?)\1\s*;?\s*$/gm;
 
 const ALLOWED_QUERY_RE = /\?(?:url|raw|inline|no-inline)\b/;
 
@@ -68,6 +68,45 @@ const ALLOWED_QUERY_RE = /\?(?:url|raw|inline|no-inline)\b/;
  */
 function mightHaveCssReference(code: string): boolean {
   return code.includes(".css");
+}
+
+/**
+ * Pure transform that powers the plugin's `transform` hook. Exposed for
+ * direct unit testing — call this with `{ id, code }` and assert against
+ * the rewritten code without spinning up a Vite build.
+ *
+ * Returns `null` when no rewrites apply, mirroring the Vite contract.
+ */
+export function transformSsrCssReferences(id: string, code: string): { code: string } | null {
+  if (!mightHaveCssReference(code)) return null;
+  // Honor explicit `?url`/`?raw`/`?inline`/`?no-inline` queries on the
+  // module ID itself — those modules are intentionally string-typed
+  // and we must not touch them.
+  if (ALLOWED_QUERY_RE.test(id)) return null;
+
+  let s: MagicString | null = null;
+
+  NEW_URL_CSS_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = NEW_URL_CSS_RE.exec(code))) {
+    const specStart = m.index + m[0].indexOf(m[1]!);
+    const specEnd = specStart + m[1]!.length;
+    if (!s) s = new MagicString(code);
+    s.overwrite(specStart, specEnd, '"data:,"');
+  }
+
+  SIDE_EFFECT_CSS_IMPORT_RE.lastIndex = 0;
+  while ((m = SIDE_EFFECT_CSS_IMPORT_RE.exec(code))) {
+    const spec = m[2]!;
+    // Skip explicit url/raw/inline queries — those imports return a
+    // string and the module body may rely on the binding's value.
+    if (ALLOWED_QUERY_RE.test(spec)) continue;
+    if (!s) s = new MagicString(code);
+    s.overwrite(m.index, m.index + m[0].length, "");
+  }
+
+  if (!s) return null;
+  return { code: s.toString() };
 }
 
 export function createStripSsrCssPlugin(): Plugin {
@@ -92,9 +131,6 @@ export function createStripSsrCssPlugin(): Plugin {
       },
       handler(code, id) {
         if (!mightHaveCssReference(code)) return null;
-        // Honor explicit `?url`/`?raw`/`?inline`/`?no-inline` queries on the
-        // module ID itself — those modules are intentionally string-typed
-        // and we must not touch them.
         if (ALLOWED_QUERY_RE.test(id)) return null;
 
         let s: MagicString | null = null;
@@ -111,8 +147,6 @@ export function createStripSsrCssPlugin(): Plugin {
         SIDE_EFFECT_CSS_IMPORT_RE.lastIndex = 0;
         while ((m = SIDE_EFFECT_CSS_IMPORT_RE.exec(code))) {
           const spec = m[2]!;
-          // Skip explicit url/raw/inline queries — those imports return a
-          // string and the module body may rely on the binding's value.
           if (ALLOWED_QUERY_RE.test(spec)) continue;
           if (!s) s = new MagicString(code);
           s.overwrite(m.index, m.index + m[0].length, "");
