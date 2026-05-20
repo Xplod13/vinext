@@ -60,6 +60,7 @@
 
 import path from "node:path";
 import fs from "node:fs/promises";
+import { createRequire } from "node:module";
 import postcss from "postcss";
 import type { ResolvedConfig } from "vite";
 // `vite` re-exports `preprocessCSS` (see `vite/dist/node/index.d.ts`).
@@ -67,6 +68,14 @@ import type { ResolvedConfig } from "vite";
 // many minor versions and is the canonical way to invoke Vite's CSS
 // preprocessor pipeline from outside a transform hook.
 import { preprocessCSS } from "vite";
+
+// vinext ships as ESM (`"type": "module"`), so bare `require` is not
+// available at runtime. Build a real CommonJS `require` anchored at this
+// module's URL so we can call `require.resolve()` for bare specifiers
+// (e.g. `composes: foo from 'shared/styles.module.css'`). Matches the
+// pattern used by the rest of the vinext source (see uses of
+// `createRequire` in src/index.ts).
+const nodeRequire = createRequire(import.meta.url);
 
 /** File extensions Vite's `preprocessCSS` knows how to handle. */
 const PREPROCESSOR_EXT_RE = /\.(scss|sass|less|styl|stylus)$/i;
@@ -158,7 +167,7 @@ export function createCssModulesPreprocessingLoader(
       // `composes: foo from 'shared/styles.module.css'`).
       if (unquoted[0] !== "." && !path.isAbsolute(unquoted)) {
         try {
-          return require.resolve(unquoted);
+          return nodeRequire.resolve(unquoted);
         } catch {
           // Fall through to the path.resolve below — matches the
           // built-in loader's behaviour of swallowing the require
@@ -223,6 +232,15 @@ export function createCssModulesPreprocessingLoader(
       // Recurse into each import, capturing exported tokens, then
       // build the local→imported translation table from the rule's
       // declarations (`localKey: exportedKey`).
+      //
+      // Intentional divergence from the built-in `FileSystemLoader`,
+      // which fetches imports sequentially via `fetchAllImports` →
+      // `Promise.all`. Each import's `depTrace` is pre-assigned from
+      // the declaration's index, and each import writes to distinct
+      // `translations[decl.prop]` keys, so parallel fetches are safe
+      // and let independent file reads / preprocessor invocations
+      // overlap. The per-file token cache (`#tokensByFile`) ensures
+      // we still de-duplicate transitive imports.
       await Promise.all(
         importRules.map(async ({ node, importPath, depNr }) => {
           const depTrace = trace + String.fromCharCode(depNr);
@@ -262,13 +280,21 @@ export function createCssModulesPreprocessingLoader(
       // got renamed by the import-translation pass above, so we apply
       // translations one more time (matching the built-in Parser's
       // `handleExport` loop).
+      //
+      // We use `replaceAll` with a function replacement so that:
+      //   1. Every occurrence of `key` is substituted (string-pattern
+      //      `replace` only handles the first match).
+      //   2. `$&` / `$1` / etc. in `translations[key]` (which can contain
+      //      `$` after Sass processing) are NOT interpreted as
+      //      replacement-string special patterns — function replacements
+      //      bypass that escaping.
       root.each((node) => {
         if (node.type === "rule" && node.selector === ":export") {
           node.each((decl) => {
             if (decl.type === "decl") {
               let value = decl.value;
               for (const key of Object.keys(translations)) {
-                value = value.replace(key, translations[key]!);
+                value = value.replaceAll(key, () => translations[key]!);
               }
               exportTokens[decl.prop] = value;
             }

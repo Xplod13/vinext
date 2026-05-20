@@ -158,22 +158,26 @@ async function buildFixture(root: string): Promise<string> {
 }
 
 /**
- * Recursively scan the build output for the bundled CSS file. The exact
- * filename is hashed and varies per Vite version; finding the first
- * `.css` under the outDir is enough.
+ * Recursively collect every `.css` file under `outDir` and return their
+ * concatenated content. Vite's filename hash + future code-splitting
+ * changes can produce multiple CSS files per build, so we concatenate
+ * to make the assertions robust to either layout.
  */
-async function findBundledCss(outDir: string): Promise<string> {
-  const entries = await fs.readdir(outDir, { withFileTypes: true });
-  for (const entry of entries) {
-    const full = path.join(outDir, entry.name);
-    if (entry.isDirectory()) {
-      const nested = await findBundledCss(full).catch(() => "");
-      if (nested) return nested;
-      continue;
+async function readAllBundledCss(outDir: string): Promise<string> {
+  const out: string[] = [];
+  const walk = async (dir: string): Promise<void> => {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(full);
+      } else if (entry.name.endsWith(".css")) {
+        out.push(await fs.readFile(full, "utf-8"));
+      }
     }
-    if (entry.name.endsWith(".css")) return full;
-  }
-  return "";
+  };
+  await walk(outDir);
+  return out.join("\n");
 }
 
 describeIfSass("SCSS composes through CSS modules (#1343)", () => {
@@ -182,9 +186,8 @@ describeIfSass("SCSS composes through CSS modules (#1343)", () => {
     let outDir = "";
     try {
       outDir = await buildFixture(root);
-      const cssPath = await findBundledCss(outDir);
-      expect(cssPath, "expected bundled CSS file in build output").not.toBe("");
-      const css = await fs.readFile(cssPath, "utf-8");
+      const css = await readAllBundledCss(outDir);
+      expect(css, "expected bundled CSS file in build output").not.toBe("");
 
       // Sass must have resolved before LightningCSS saw the source —
       // no `$var` may remain.
@@ -211,9 +214,8 @@ describeIfSass("SCSS composes through CSS modules (#1343)", () => {
     let outDir = "";
     try {
       outDir = await buildFixture(root);
-      const cssPath = await findBundledCss(outDir);
-      expect(cssPath).not.toBe("");
-      const css = await fs.readFile(cssPath, "utf-8");
+      const css = await readAllBundledCss(outDir);
+      expect(css).not.toBe("");
 
       // No leakage of either the partial's `$var` or the composing
       // module's `$bg`. The `@import` of `other3.scss` must also have

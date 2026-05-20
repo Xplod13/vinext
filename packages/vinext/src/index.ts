@@ -1299,6 +1299,26 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
         // Reference: packages/next/src/build/webpack/config/blocks/css/index.ts
         const sassPreprocessorOptions = buildSassPreprocessorOptions(nextConfig.sassOptions);
 
+        // Only install our `css.modules.Loader` (which fixes #1343) when the
+        // user has not supplied their own. Vite's config merge does a shallow
+        // merge on `css.modules`, so an explicit user Loader would otherwise
+        // be silently overridden. Detect the `false` form (CSS modules
+        // disabled) too — wiring up a Loader in that case is pointless.
+        const userCssModules = config.css?.modules;
+        // oxlint-disable-next-line typescript/no-explicit-any
+        const userSuppliedLoader = !!(userCssModules && (userCssModules as any).Loader);
+        const installCssModulesLoader = userCssModules !== false && !userSuppliedLoader;
+        if (userSuppliedLoader) {
+          // Warn so users who set a custom Loader know they have opted out
+          // of the SCSS `composes` preprocessor fix. (See #1343.) We avoid
+          // throwing because power-user setups may deliberately want to
+          // bring their own postcss-modules Loader.
+          console.warn(
+            "[vinext] css.modules.Loader is set in your config — vinext's SCSS preprocessor for `composes ... from './x.module.scss'` is disabled. " +
+              "If you import .scss CSS modules via composes, ensure your Loader preprocesses them or you will hit lightningcss minify errors. See https://github.com/cloudflare/vinext/issues/1343.",
+          );
+        }
+
         // Auto-inject @mdx-js/rollup when MDX files exist and no MDX plugin is
         // already configured. Applies remark/rehype plugins from next.config.
         hasUserMdxPlugin = pluginsFlat.some(
@@ -1637,27 +1657,39 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                   // environment default) with "Invalid empty selector".
                   // See packages/vinext/src/plugins/css-modules-preprocess.ts.
                   //
+                  // We skip this when the user has supplied their own
+                  // `css.modules.Loader` or disabled CSS modules entirely
+                  // (`css.modules: false`). See `installCssModulesLoader`
+                  // above.
+                  //
                   // `Loader` is a documented postcss-modules option that
                   // Vite passes through verbatim, but Vite's TypeScript
                   // `CSSModulesOptions` interface doesn't declare it. The
                   // cast tells TS the extra key is intentional.
-                  modules: {
-                    Loader: createCssModulesPreprocessingLoader(getResolvedConfig),
-                    // oxlint-disable-next-line typescript/no-explicit-any
-                  } as any,
+                  ...(installCssModulesLoader
+                    ? {
+                        modules: {
+                          Loader: createCssModulesPreprocessingLoader(getResolvedConfig),
+                          // oxlint-disable-next-line typescript/no-explicit-any
+                        } as any,
+                      }
+                    : {}),
                 },
               }
-            : {
-                // No PostCSS/sass overrides — still install our Loader so
-                // SCSS `composes` works for projects that don't otherwise
-                // customise CSS preprocessing. See note above on the cast.
-                css: {
-                  modules: {
-                    Loader: createCssModulesPreprocessingLoader(getResolvedConfig),
-                    // oxlint-disable-next-line typescript/no-explicit-any
-                  } as any,
-                },
-              }),
+            : installCssModulesLoader
+              ? {
+                  // No PostCSS/sass overrides — still install our Loader
+                  // so SCSS `composes` works for projects that don't
+                  // otherwise customise CSS preprocessing. See note above
+                  // on the cast and the user-supplied-Loader guard.
+                  css: {
+                    modules: {
+                      Loader: createCssModulesPreprocessingLoader(getResolvedConfig),
+                      // oxlint-disable-next-line typescript/no-explicit-any
+                    } as any,
+                  },
+                }
+              : {}),
         };
 
         // Collect user-provided ssr.external so we can propagate it into
