@@ -110,6 +110,7 @@ import { hasWranglerConfig, formatMissingCloudflarePluginError } from "./deploy.
 import { computeLazyChunks } from "./utils/lazy-chunks.js";
 import { resolvePostcssStringPlugins } from "./plugins/postcss.js";
 import { buildSassPreprocessorOptions } from "./plugins/sass.js";
+import { createCssModulesPreprocessingLoader } from "./plugins/css-modules-preprocess.js";
 import {
   createClientManualChunks,
   createClientOutputConfig,
@@ -638,6 +639,16 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
   let warnedInlineNextConfigOverride = false;
   let hasNitroPlugin = false;
   let rscCompatibilityId: string | undefined;
+
+  // Resolved Vite config, captured in `configResolved`. Read at runtime
+  // by the custom `postcss-modules` Loader (see
+  // `createCssModulesPreprocessingLoader`) so it can invoke Vite's
+  // `preprocessCSS` with the same preprocessor options as the rest of
+  // the pipeline. Lives in the plugin closure so the Loader class can
+  // be constructed up front in `config()` and still pick up the
+  // resolved config later.
+  let resolvedViteConfig: import("vite").ResolvedConfig | undefined;
+  const getResolvedConfig = () => resolvedViteConfig;
 
   // Build-time layout classification manifest, captured in the RSC virtual
   // module's load hook and consumed in generateBundle to patch the generated
@@ -1617,9 +1628,36 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                         },
                       }
                     : {}),
+                  // Custom Loader that preprocesses .scss/.sass/.less/.styl
+                  // files before postcss-modules sees them. Fixes #1343:
+                  // without it, the default `FileSystemLoader` reads raw
+                  // SCSS for `composes: foo from './other.module.scss'`
+                  // and lets Sass variables leak into the final bundle,
+                  // breaking Vite 8's lightningcss minifier (the server-
+                  // environment default) with "Invalid empty selector".
+                  // See packages/vinext/src/plugins/css-modules-preprocess.ts.
+                  //
+                  // `Loader` is a documented postcss-modules option that
+                  // Vite passes through verbatim, but Vite's TypeScript
+                  // `CSSModulesOptions` interface doesn't declare it. The
+                  // cast tells TS the extra key is intentional.
+                  modules: {
+                    Loader: createCssModulesPreprocessingLoader(getResolvedConfig),
+                    // oxlint-disable-next-line typescript/no-explicit-any
+                  } as any,
                 },
               }
-            : {}),
+            : {
+                // No PostCSS/sass overrides — still install our Loader so
+                // SCSS `composes` works for projects that don't otherwise
+                // customise CSS preprocessing. See note above on the cast.
+                css: {
+                  modules: {
+                    Loader: createCssModulesPreprocessingLoader(getResolvedConfig),
+                    // oxlint-disable-next-line typescript/no-explicit-any
+                  } as any,
+                },
+              }),
         };
 
         // Collect user-provided ssr.external so we can propagate it into
@@ -1926,6 +1964,14 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
       },
 
       configResolved(config) {
+        // Capture the resolved Vite config for the custom
+        // `css.modules.Loader` (see `createCssModulesPreprocessingLoader`).
+        // The Loader needs access to `css.preprocessorOptions` /
+        // `sassOptions` when invoking `preprocessCSS`, but it's
+        // constructed during `config()` (before this hook fires), so we
+        // hand it a getter that closes over this variable.
+        resolvedViteConfig = config;
+
         // When the user sets `ssr.external: true`, strip React entries from
         // `environments.ssr.resolve.noExternal`. @vitejs/plugin-rsc populates
         // this list via crawlFrameworkPkgs, but `noExternal` overrides
