@@ -43,11 +43,14 @@ import MagicString from "magic-string";
  */
 
 // Matches `new URL("./x.css", import.meta.url)` with optional whitespace and
-// trailing comma. Captures the full call (group 0) and the quoted specifier
-// (group 1) including its surrounding quotes so we can replace only the
-// specifier without touching anything else.
+// trailing comma. Captures the full call (group 0), the quoted specifier
+// including its surrounding quotes (group 1), and the bare specifier text
+// without quotes or any trailing `?query` (group 2). An optional `?…`
+// query suffix is allowed on the specifier so callers like
+// `new URL("./style.css?foo", import.meta.url)` are matched symmetrically
+// with the side-effect import regex below.
 const NEW_URL_CSS_RE =
-  /\bnew\s+URL\s*\(\s*(["'`][^"'`]+\.css["'`])\s*,\s*import\.meta\.url\s*(?:,\s*)?\)/g;
+  /\bnew\s+URL\s*\(\s*(["'`]([^"'`]+\.css)(?:\?[^"'`]*)?["'`])\s*,\s*import\.meta\.url\s*(?:,\s*)?\)/g;
 
 // Matches side-effect CSS imports, including a trailing `?…` query so that
 // the handler can decide whether the specifier carries a `?url`/`?raw`/
@@ -71,17 +74,17 @@ function mightHaveCssReference(code: string): boolean {
 }
 
 /**
- * Pure transform that powers the plugin's `transform` hook. Exposed for
- * direct unit testing — call this with `{ id, code }` and assert against
- * the rewritten code without spinning up a Vite build.
- *
- * Returns `null` when no rewrites apply, mirroring the Vite contract.
+ * Apply CSS-stripping rewrites to a single module. Returns the MagicString
+ * instance when at least one rewrite ran, or `null` if the module is a
+ * no-op. The caller decides whether to call `.toString()` / `.generateMap()`
+ * — this keeps the unit-test helper cheap (no source-map work) while
+ * letting the Vite plugin emit hires maps.
  */
-export function transformSsrCssReferences(id: string, code: string): { code: string } | null {
+function applyStripSsrCss(id: string, code: string): MagicString | null {
   if (!mightHaveCssReference(code)) return null;
   // Honor explicit `?url`/`?raw`/`?inline`/`?no-inline` queries on the
-  // module ID itself — those modules are intentionally string-typed
-  // and we must not touch them.
+  // module ID itself — those modules are intentionally string-typed and
+  // we must not touch them.
   if (ALLOWED_QUERY_RE.test(id)) return null;
 
   let s: MagicString | null = null;
@@ -89,8 +92,13 @@ export function transformSsrCssReferences(id: string, code: string): { code: str
   NEW_URL_CSS_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = NEW_URL_CSS_RE.exec(code))) {
-    const specStart = m.index + m[0].indexOf(m[1]!);
-    const specEnd = specStart + m[1]!.length;
+    // Skip new URL("./x.css?url", ...) for the same reason we skip the
+    // side-effect form: the user explicitly asked for a string value, so
+    // rewriting to `data:,` would lose information they intend to consume.
+    const fullQuoted = m[1]!;
+    if (ALLOWED_QUERY_RE.test(fullQuoted)) continue;
+    const specStart = m.index + m[0].indexOf(fullQuoted);
+    const specEnd = specStart + fullQuoted.length;
     if (!s) s = new MagicString(code);
     s.overwrite(specStart, specEnd, '"data:,"');
   }
@@ -105,6 +113,18 @@ export function transformSsrCssReferences(id: string, code: string): { code: str
     s.overwrite(m.index, m.index + m[0].length, "");
   }
 
+  return s;
+}
+
+/**
+ * Pure transform that powers the plugin's `transform` hook. Exposed for
+ * direct unit testing — call this with `{ id, code }` and assert against
+ * the rewritten code without spinning up a Vite build.
+ *
+ * Returns `null` when no rewrites apply, mirroring the Vite contract.
+ */
+export function transformSsrCssReferences(id: string, code: string): { code: string } | null {
+  const s = applyStripSsrCss(id, code);
   if (!s) return null;
   return { code: s.toString() };
 }
@@ -130,28 +150,7 @@ export function createStripSsrCssPlugin(): Plugin {
         id: { exclude: /\.css(?:$|\?)/ },
       },
       handler(code, id) {
-        if (!mightHaveCssReference(code)) return null;
-        if (ALLOWED_QUERY_RE.test(id)) return null;
-
-        let s: MagicString | null = null;
-
-        NEW_URL_CSS_RE.lastIndex = 0;
-        let m: RegExpExecArray | null;
-        while ((m = NEW_URL_CSS_RE.exec(code))) {
-          const specStart = m.index + m[0].indexOf(m[1]!);
-          const specEnd = specStart + m[1]!.length;
-          if (!s) s = new MagicString(code);
-          s.overwrite(specStart, specEnd, '"data:,"');
-        }
-
-        SIDE_EFFECT_CSS_IMPORT_RE.lastIndex = 0;
-        while ((m = SIDE_EFFECT_CSS_IMPORT_RE.exec(code))) {
-          const spec = m[2]!;
-          if (ALLOWED_QUERY_RE.test(spec)) continue;
-          if (!s) s = new MagicString(code);
-          s.overwrite(m.index, m.index + m[0].length, "");
-        }
-
+        const s = applyStripSsrCss(id, code);
         if (!s) return null;
         return {
           code: s.toString(),

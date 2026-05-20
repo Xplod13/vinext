@@ -199,7 +199,6 @@ describe("SSR build emits CSS assets referenced by SSR chunks", () => {
   // failure surfaces as ~5 broken assertions in `test/e2e/react-version/`.
   it("Pages Router API route URL-dependency CSS is emitted to dist/server/", async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "vinext-ssr-css-pages-url-"));
-    const outDir = await fs.mkdtemp(path.join(os.tmpdir(), "vinext-ssr-css-pages-url-out-"));
     try {
       await fs.symlink(ROOT_NODE_MODULES, path.join(tmpDir, "node_modules"), "junction");
       const pagesApiDir = path.join(tmpDir, "pages", "api");
@@ -287,7 +286,6 @@ export default async function handler(_req, res) {
       ).toEqual([]);
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
-      await fs.rm(outDir, { recursive: true, force: true }).catch(() => {});
     }
   }, 180_000);
 });

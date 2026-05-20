@@ -129,6 +129,22 @@ export default styles;
     expect(result).toBeNull();
   });
 
+  it("preserves new URL specifiers that carry a ?url/?raw/?inline query", () => {
+    // Symmetric with the side-effect import path: a `?url`-suffixed CSS
+    // specifier in `new URL` is the user explicitly asking for the resolved
+    // URL string. Rewriting it to `data:,` would lose information the
+    // module body intends to consume.
+    for (const query of ["?url", "?raw", "?inline", "?no-inline"]) {
+      const code = `const u = new URL("./styles.css${query}", import.meta.url);
+`;
+      const result = transformSsrCssReferences("/app/page.tsx", code);
+      if (result !== null) {
+        expect(result.code).toContain(`./styles.css${query}`);
+        expect(result.code).not.toContain("data:,");
+      }
+    }
+  });
+
   it("only matches `.css` extensions, not other asset URLs", () => {
     const result = transformSsrCssReferences(
       "/app/page.tsx",
