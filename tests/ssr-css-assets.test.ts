@@ -187,4 +187,107 @@ describe("SSR build emits CSS assets referenced by SSR chunks", () => {
       await fs.rm(outDir, { recursive: true, force: true }).catch(() => {});
     }
   }, 180_000);
+
+  // Mirrors Next.js `test/e2e/react-version/pages/api/pages-api-edge-url-dep.js`,
+  // which uses `import(new URL('./style.css', import.meta.url).href)` to declare
+  // a URL dependency on a CSS file from a Pages Router API route. Vite/Rolldown
+  // picks up the `new URL('./style.css', import.meta.url)` pattern, emits the
+  // CSS as an asset, and rewrites the JS to reference it. Without
+  // `emitAssets: true` on the Pages Router SSR environment, the asset is
+  // silently stripped from `dist/server/`, leaving a dangling import that
+  // crashes `vinext start` with ERR_MODULE_NOT_FOUND. The full deploy-suite
+  // failure surfaces as ~5 broken assertions in `test/e2e/react-version/`.
+  it("Pages Router API route URL-dependency CSS is emitted to dist/server/", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "vinext-ssr-css-pages-url-"));
+    const outDir = await fs.mkdtemp(path.join(os.tmpdir(), "vinext-ssr-css-pages-url-out-"));
+    try {
+      await fs.symlink(ROOT_NODE_MODULES, path.join(tmpDir, "node_modules"), "junction");
+      const pagesApiDir = path.join(tmpDir, "pages", "api");
+      await fs.mkdir(pagesApiDir, { recursive: true });
+      await fs.writeFile(path.join(pagesApiDir, "style.css"), ".foo { color: red; }\n");
+      await fs.writeFile(
+        path.join(pagesApiDir, "url-dep.js"),
+        `// URL-dependency on a CSS file. Vite picks this up, emits the CSS
+// as an asset, and rewrites the JS to point at the emitted file.
+console.log('TEST_URL_DEPENDENCY', new URL('./style.css', import.meta.url).href);
+export default async function handler(_req, res) {
+  res.json({ ok: true });
+}
+`,
+      );
+      await fs.writeFile(
+        path.join(tmpDir, "pages", "index.tsx"),
+        "export default function Home() { return <div>Hello</div>; }\n",
+      );
+
+      // Pages Router SSR env writes to `<root>/dist/server` (the
+      // ssrOutDir option only applies to the App Router build path).
+      const ssrOutDir = path.join(tmpDir, "dist", "server");
+
+      const builder = await createBuilder({
+        root: tmpDir,
+        configFile: false,
+        plugins: [vinext({ disableAppRouter: true })],
+        logLevel: "silent",
+      });
+      await builder.buildApp();
+
+      const allFiles: string[] = [];
+      async function walk(dir: string): Promise<void> {
+        const entries = await fs.readdir(dir, { withFileTypes: true });
+        for (const e of entries) {
+          const full = path.join(dir, e.name);
+          if (e.isDirectory()) await walk(full);
+          else allFiles.push(full);
+        }
+      }
+      await walk(ssrOutDir);
+
+      const jsFiles = allFiles.filter((f) => f.endsWith(".js") || f.endsWith(".mjs"));
+      expect(jsFiles.length, `expected SSR chunks under ${ssrOutDir}`).toBeGreaterThan(0);
+
+      // Every `new URL("X.css", import.meta.url)` or `import "X.css"` /
+      // `from "X.css"` reference must point at a file that exists on disk.
+      const importRe = /(?:import|from)\s+["']([^"']+\.css)["']/g;
+      const urlRe = /new\s+URL\(\s*["']([^"']+\.css)["']\s*,\s*import\.meta\.url\s*\)/g;
+
+      const missing: { from: string; spec: string; resolved: string; kind: string }[] = [];
+      for (const file of jsFiles) {
+        const code = await fs.readFile(file, "utf8");
+        for (const [re, kind] of [
+          [importRe, "import"],
+          [urlRe, "new URL"],
+        ] as const) {
+          re.lastIndex = 0;
+          let m: RegExpExecArray | null;
+          while ((m = re.exec(code))) {
+            const spec = m[1]!;
+            if (/^[a-z]+:/i.test(spec)) continue;
+            const resolved = path.resolve(path.dirname(file), spec);
+            const exists = await fs
+              .stat(resolved)
+              .then(() => true)
+              .catch(() => false);
+            // Debug helper: log all SSR files when an assertion is about
+            // to fail, so the failure message captures what was emitted.
+            if (!exists) {
+              missing.push({ from: path.relative(ssrOutDir, file), spec, resolved, kind });
+            }
+          }
+        }
+      }
+
+      expect(
+        missing,
+        `Pages Router SSR chunks reference CSS files that were not emitted:\n${JSON.stringify(
+          missing,
+          null,
+          2,
+        )}`,
+      ).toEqual([]);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+      await fs.rm(outDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }, 180_000);
 });

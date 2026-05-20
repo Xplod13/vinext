@@ -125,6 +125,7 @@ import {
   type BundleBackfillChunk,
 } from "./build/ssr-manifest.js";
 import { stripServerExports } from "./plugins/strip-server-exports.js";
+import { createStripSsrCssPlugin } from "./plugins/strip-ssr-css.js";
 import { hasMdxFiles } from "./utils/mdx-scan.js";
 import { scanPublicFileRoutes } from "./utils/public-routes.js";
 import tsconfigPaths from "vite-tsconfig-paths";
@@ -2269,6 +2270,11 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
     },
     // Stub node:async_hooks in client builds — see src/plugins/async-hooks-stub.ts
     asyncHooksStubPlugin,
+    // Strip CSS references (static `import "./x.css"` and `new URL("./x.css",
+    // import.meta.url)`) from SSR/RSC chunks — see plugins/strip-ssr-css.ts.
+    // Without this, Node's ESM loader crashes resolving the dangling CSS
+    // module the first time the SSR entry is imported during prerender.
+    createStripSsrCssPlugin(),
     createInstrumentationClientTransformPlugin(() => instrumentationClientPath),
     // Dedup client references from RSC proxy modules — see src/plugins/client-reference-dedup.ts
     ...(options.experimental?.clientReferenceDedup ? [clientReferenceDedupPlugin()] : []),
