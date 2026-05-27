@@ -22,8 +22,11 @@ export default async function CachedSlugPage({
   params: Promise<{ slug: string }>;
 }) {
   const { slug } = await params;
-  const tag = slug;
   const path = `/cached/${slug}`;
+  // Use the implicit `_N_T_<path>` page tag vinext writes onto every
+  // App Router cache entry. The slug on its own (`intro`) is not attached
+  // to anything, so revalidateTag("intro") would silently no-op.
+  const tag = `_N_T_${path}`;
 
   // Generated at render time. Embedded into the response so the client probe
   // can tell whether a subsequent fetch was actually re-rendered (new id) or

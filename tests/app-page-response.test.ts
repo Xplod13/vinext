@@ -10,7 +10,23 @@ import {
   VINEXT_RSC_COMPATIBILITY_ID_HEADER,
   VINEXT_RSC_VARY_HEADER,
 } from "../packages/vinext/src/server/app-rsc-cache-busting.js";
+import {
+  runWithExecutionContext,
+  type ExecutionContextLike,
+} from "../packages/vinext/src/shims/request-context.js";
 import { withEnvVar } from "./env-test-helpers.js";
+
+function withRequestContextCache<T>(fn: () => T): T {
+  const ctx = {
+    cache: { purge: async () => undefined },
+    waitUntil: () => undefined,
+  } as unknown as ExecutionContextLike;
+  let captured!: T;
+  void runWithExecutionContext(ctx, () => {
+    captured = fn();
+  });
+  return captured;
+}
 
 function createBody(text: string): ReadableStream {
   return new ReadableStream({
@@ -521,6 +537,40 @@ describe("app page response helpers", () => {
     });
 
     expect(response.headers.get("x-edge-runtime")).toBeNull();
+  });
+
+  it("emits Cache-Tag on fresh-rendered RSC responses when ctx.cache exists", () => {
+    // Without the gate, the outer Workers Cache would cache the response with
+    // no purgeable tags — revalidateTag/revalidatePath fan-outs would then
+    // have nothing to match. Regression test for that.
+    const response = withRequestContextCache(() =>
+      buildAppPageRscResponse(createBody("flight"), {
+        cacheTags: ["/cached/intro", "_N_T_/cached/intro"],
+        middlewareContext: { headers: null, status: null },
+        policy: { cacheControl: "s-maxage=60, stale-while-revalidate" },
+      }),
+    );
+    expect(response.headers.get("Cache-Tag")).toBe("/cached/intro,_N_T_/cached/intro");
+  });
+
+  it("omits Cache-Tag on fresh-rendered RSC responses when ctx.cache is absent", () => {
+    const response = buildAppPageRscResponse(createBody("flight"), {
+      cacheTags: ["/cached/intro"],
+      middlewareContext: { headers: null, status: null },
+      policy: { cacheControl: "s-maxage=60, stale-while-revalidate" },
+    });
+    expect(response.headers.has("Cache-Tag")).toBe(false);
+  });
+
+  it("emits Cache-Tag on fresh-rendered HTML responses when ctx.cache exists", () => {
+    const response = withRequestContextCache(() =>
+      buildAppPageHtmlResponse(createBody("<h1>page</h1>"), {
+        cacheTags: ["/cached/intro", "_N_T_/cached/intro"],
+        middlewareContext: { headers: null, status: null },
+        policy: { cacheControl: "s-maxage=60, stale-while-revalidate" },
+      }),
+    );
+    expect(response.headers.get("Cache-Tag")).toBe("/cached/intro,_N_T_/cached/intro");
   });
 });
 

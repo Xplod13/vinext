@@ -416,6 +416,7 @@ export async function renderAppPageLifecycle(
       revalidateSeconds,
     });
     const rscResponse = buildAppPageRscResponse(rscForResponse, {
+      cacheTags: rscResponsePolicy.cacheControl ? options.getPageTags() : undefined,
       isEdgeRuntime: options.isEdgeRuntime,
       middlewareContext: options.middlewareContext,
       mountedSlotsHeader: options.mountedSlotsHeader,
@@ -625,6 +626,7 @@ export async function renderAppPageLifecycle(
 
   if (htmlResponsePolicy.shouldWriteToCache || shouldSpeculativelyWriteCache) {
     const isrResponse = buildAppPageHtmlResponse(safeHtmlStream, {
+      cacheTags: htmlResponsePolicy.cacheControl ? options.getPageTags() : undefined,
       draftCookie,
       fontLinkHeader,
       isEdgeRuntime: options.isEdgeRuntime,
@@ -689,6 +691,7 @@ export async function renderAppPageLifecycle(
   }
 
   return buildAppPageHtmlResponse(safeHtmlStream, {
+    cacheTags: htmlResponsePolicy.cacheControl ? options.getPageTags() : undefined,
     draftCookie,
     fontLinkHeader,
     isEdgeRuntime: options.isEdgeRuntime,

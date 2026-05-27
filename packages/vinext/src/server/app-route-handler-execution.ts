@@ -1,7 +1,8 @@
 import type { NextI18nConfig } from "../config/next-config.js";
 import { setHeadersContext, type HeadersAccessPhase } from "vinext/shims/headers";
 import type { ExecutionContextLike } from "vinext/shims/request-context";
-import type { CachedRouteValue } from "vinext/shims/cache";
+import { isRequestContextCacheAvailable, type CachedRouteValue } from "vinext/shims/cache";
+import { applyCacheTagHeader } from "./cache-headers.js";
 import type { NextRequest } from "vinext/shims/server";
 import {
   createStaticGenerationHeadersContext,
@@ -182,6 +183,17 @@ export async function executeAppRouteHandler(
         throw new Error("Expected route handler revalidate seconds");
       }
       applyRouteHandlerRevalidateHeader(response, revalidateSeconds, options.expireSeconds);
+      // Emit Cache-Tag on fresh-render route handler responses when an outer
+      // request-context cache is in play. The inner ISR cache write may be
+      // bypassed (see isr-cache.ts), so the response itself must carry tags
+      // for `ctx.cache.purge(...)` fan-outs to be able to invalidate it.
+      if (isRequestContextCacheAvailable()) {
+        const handlerTags = options.buildPageCacheTags(
+          options.cleanPathname,
+          options.getCollectedFetchTags(),
+        );
+        if (handlerTags.length > 0) applyCacheTagHeader(response.headers, handlerTags);
+      }
     }
 
     if (

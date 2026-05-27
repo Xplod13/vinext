@@ -8,7 +8,8 @@ import {
   VINEXT_PARAMS_HEADER,
   VINEXT_TIMING_HEADER,
 } from "./headers.js";
-import { setCacheStateHeaders } from "./cache-headers.js";
+import { isRequestContextCacheAvailable } from "vinext/shims/cache";
+import { applyCacheTagHeader, setCacheStateHeaders } from "./cache-headers.js";
 import { mergeMiddlewareResponseHeaders } from "./middleware-response-headers.js";
 import {
   VINEXT_RSC_CONTENT_TYPE,
@@ -58,6 +59,7 @@ type AppPageHtmlResponsePolicy = {
 } & AppPageResponsePolicy;
 
 type BuildAppPageRscResponseOptions = {
+  cacheTags?: readonly string[];
   isEdgeRuntime?: boolean;
   middlewareContext: AppPageMiddlewareContext;
   mountedSlotsHeader?: string | null;
@@ -67,6 +69,7 @@ type BuildAppPageRscResponseOptions = {
 };
 
 type BuildAppPageHtmlResponseOptions = {
+  cacheTags?: readonly string[];
   draftCookie?: string | null;
   fontLinkHeader?: string;
   isEdgeRuntime?: boolean;
@@ -256,6 +259,13 @@ export function buildAppPageRscResponse(
   if (options.policy.cacheState) {
     setCacheStateHeaders(headers, options.policy.cacheState);
   }
+  // Emit `Cache-Tag` on fresh-render responses when an outer request-context
+  // cache is in play. Without this, the outer cache stores the response with
+  // no purgeable tags, so `revalidateTag`/`revalidatePath` fan-outs to
+  // `ctx.cache.purge` can't find anything to invalidate.
+  if (options.cacheTags && options.cacheTags.length > 0 && isRequestContextCacheAvailable()) {
+    applyCacheTagHeader(headers, options.cacheTags);
+  }
   mergeMiddlewareResponseHeaders(headers, options.middlewareContext.headers);
   applyRscCompatibilityIdHeader(headers);
 
@@ -289,6 +299,11 @@ export function buildAppPageHtmlResponse(
   }
   if (options.fontLinkHeader) {
     headers.set("Link", options.fontLinkHeader);
+  }
+  // See note in buildAppPageRscResponse — emit Cache-Tag on fresh renders
+  // when the outer request-context cache is available.
+  if (options.cacheTags && options.cacheTags.length > 0 && isRequestContextCacheAvailable()) {
+    applyCacheTagHeader(headers, options.cacheTags);
   }
 
   mergeMiddlewareResponseHeaders(headers, options.middlewareContext.headers);
