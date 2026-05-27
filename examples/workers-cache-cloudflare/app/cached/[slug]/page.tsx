@@ -16,6 +16,24 @@ export async function generateMetadata({
   return { title: `Cached page: ${slug}` };
 }
 
+/**
+ * Pretend to load post data for `slug`. The `next: { tags }` option attaches
+ * `post:<slug>` to the page's cache entry — that's the same propagation
+ * Next.js does for tagged fetches in real apps. With the tag on the entry,
+ * `revalidateTag("post:<slug>")` invalidates the page (in both the inner
+ * CacheHandler and the outer Workers Cache via `Cache-Tag`).
+ *
+ * The fetch target is a no-op data: URL so the demo has no external
+ * dependency — vinext's fetch shim records the tag before doing any I/O.
+ */
+async function loadPost(slug: string): Promise<{ title: string }> {
+  const payload = JSON.stringify({ slug });
+  await fetch(`data:application/json,${encodeURIComponent(payload)}`, {
+    next: { tags: [`post:${slug}`], revalidate: 60 },
+  });
+  return { title: `Post: ${slug}` };
+}
+
 export default async function CachedSlugPage({
   params,
 }: {
@@ -23,10 +41,8 @@ export default async function CachedSlugPage({
 }) {
   const { slug } = await params;
   const path = `/cached/${slug}`;
-  // Use the implicit `_N_T_<path>` page tag vinext writes onto every
-  // App Router cache entry. The slug on its own (`intro`) is not attached
-  // to anything, so revalidateTag("intro") would silently no-op.
-  const tag = `_N_T_${path}`;
+  const tag = `post:${slug}`;
+  const post = await loadPost(slug);
 
   // Generated at render time. Embedded into the response so the client probe
   // can tell whether a subsequent fetch was actually re-rendered (new id) or
@@ -42,14 +58,11 @@ export default async function CachedSlugPage({
       <nav className="crumbs">
         <a href="/">&larr; Demo home</a>
       </nav>
-      <h1>
-        <code>/cached/{slug}</code>
-      </h1>
+      <h1>{post.title}</h1>
       <p className="tagline">
-        ISR-cached for <code>revalidate = 60</code>. The first request renders on the server;
-        subsequent reads are served by whatever HTTP cache sits in front of the runtime — for
-        example, the platform-managed cache exposed via <code>ctx.cache</code> on Cloudflare
-        Workers when <code>cache.enabled: true</code>.
+        ISR-cached for <code>revalidate = 60</code>. A tagged fetch during render attaches{" "}
+        <code>{tag}</code> to this page's cache entry — both the inner <code>CacheHandler</code>{" "}
+        and the outer Workers Cache will honour <code>revalidateTag(&quot;{tag}&quot;)</code>.
       </p>
 
       <p>Server-side timestamp:</p>

@@ -39,10 +39,11 @@ export default function HomePage() {
             <span className="badge">Tags</span> Tagged content
           </h3>
           <p>
-            Tagged with <code>featured-post</code>. Revalidate the tag from the panel below and the
-            page is dropped from both layers.
+            A tagged <code>fetch()</code> during render attaches <code>post:&lt;slug&gt;</code> to
+            the page's cache entry. Try <code>revalidateTag(&quot;post:featured&quot;)</code> from
+            the panel.
           </p>
-          <a href="/cached/featured-post">Open /cached/featured-post &rarr;</a>
+          <a href="/cached/featured">Open /cached/featured &rarr;</a>
         </div>
 
         <div className="card">
