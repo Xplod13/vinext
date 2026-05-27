@@ -4,12 +4,35 @@ import { useCallback, useEffect, useState } from "react";
 
 type ProbeState = {
   status: number;
-  cacheState: string;
-  cacheControl: string;
-  cacheTag: string;
-  age: string;
+  cfCacheStatus: string | null;
+  age: string | null;
+  cacheControl: string | null;
+  cacheTag: string | null;
+  cfRay: string | null;
   fetchedAt: string;
 };
+
+/**
+ * Map a `cf-cache-status` value to one of our badge classes. Mirrors the
+ * states documented at
+ * https://developers.cloudflare.com/cache/concepts/default-cache-behavior/#cloudflare-cache-responses
+ */
+function badgeClassFor(status: string | null): string {
+  if (!status) return "";
+  switch (status.toUpperCase()) {
+    case "HIT":
+    case "REVALIDATED":
+      return "badge-hit";
+    case "STALE":
+    case "UPDATING":
+      return "badge-stale";
+    case "MISS":
+    case "EXPIRED":
+      return "badge-miss";
+    default:
+      return "";
+  }
+}
 
 export function CacheStatusProbe({ path }: { path: string }) {
   const [state, setState] = useState<ProbeState | null>(null);
@@ -22,17 +45,18 @@ export function CacheStatusProbe({ path }: { path: string }) {
     try {
       const res = await fetch(path, {
         method: "GET",
-        // Bypass the browser cache so we observe the actual edge response
-        // — only the Workers Cache layer should be deciding.
+        // Skip the browser HTTP cache so the response we see is the one the
+        // outer Workers Cache (or origin) actually returned.
         cache: "no-store",
         headers: { "x-probe": "1" },
       });
       setState({
         status: res.status,
-        cacheState: res.headers.get("x-vinext-cache") ?? res.headers.get("x-nextjs-cache") ?? "—",
-        cacheControl: res.headers.get("cache-control") ?? "—",
-        cacheTag: res.headers.get("cache-tag") ?? "—",
-        age: res.headers.get("age") ?? "—",
+        cfCacheStatus: res.headers.get("cf-cache-status"),
+        age: res.headers.get("age"),
+        cacheControl: res.headers.get("cache-control"),
+        cacheTag: res.headers.get("cache-tag"),
+        cfRay: res.headers.get("cf-ray"),
         fetchedAt: new Date().toLocaleTimeString(),
       });
     } catch (err) {
@@ -46,15 +70,7 @@ export function CacheStatusProbe({ path }: { path: string }) {
     void probe();
   }, [probe]);
 
-  const stateLabel = state?.cacheState ?? "—";
-  const badgeClass =
-    stateLabel === "HIT" || stateLabel === "STATIC"
-      ? "badge-hit"
-      : stateLabel === "STALE"
-        ? "badge-stale"
-        : stateLabel === "MISS"
-          ? "badge-miss"
-          : "";
+  const cfStatus = state?.cfCacheStatus ?? null;
 
   return (
     <section className="panel" aria-label="Cache status probe">
@@ -62,10 +78,11 @@ export function CacheStatusProbe({ path }: { path: string }) {
         Probe <code>{path}</code>
       </h2>
       <p style={{ marginTop: 0, color: "var(--muted)" }}>
-        Issues a no-store <code>fetch</code> against the cached route and reports the headers
-        returned by the edge. Cache layer behaviour shows up under{" "}
-        <code>x-vinext-cache</code> (vinext / inner cache) and HTTP <code>Age</code> (Workers
-        Cache outer layer).
+        Issues a no-store <code>fetch</code> against the route and surfaces the headers Cloudflare
+        attaches at the edge. <code>cf-cache-status</code> is the outer Workers Cache verdict —
+        <code>HIT</code> means the response came from cache without invoking the worker;{" "}
+        <code>MISS</code> / <code>EXPIRED</code> means the worker ran. <code>Age</code> is how
+        many seconds the cached copy has been sitting at the edge.
       </p>
 
       <div className="controls">
@@ -80,16 +97,24 @@ export function CacheStatusProbe({ path }: { path: string }) {
       <dl className="kv">
         <dt>HTTP status</dt>
         <dd>{state?.status ?? "—"}</dd>
-        <dt>Cache state</dt>
+        <dt>cf-cache-status</dt>
         <dd>
-          <span className={`badge ${badgeClass}`}>{stateLabel}</span>
+          {cfStatus ? (
+            <span className={`badge ${badgeClassFor(cfStatus)}`}>{cfStatus}</span>
+          ) : (
+            <span style={{ color: "var(--muted)" }}>
+              not set — running locally, or the runtime doesn't expose it
+            </span>
+          )}
         </dd>
+        <dt>Age</dt>
+        <dd>{state?.age ?? "—"}</dd>
         <dt>Cache-Control</dt>
         <dd>{state?.cacheControl ?? "—"}</dd>
         <dt>Cache-Tag</dt>
         <dd>{state?.cacheTag ?? "—"}</dd>
-        <dt>Age (outer)</dt>
-        <dd>{state?.age ?? "—"}</dd>
+        <dt>cf-ray</dt>
+        <dd>{state?.cfRay ?? "—"}</dd>
         <dt>Probed at</dt>
         <dd>{state?.fetchedAt ?? "—"}</dd>
       </dl>

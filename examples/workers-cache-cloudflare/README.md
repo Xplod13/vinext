@@ -18,8 +18,10 @@ exposes the binding when `cache.enabled: true` is set in `wrangler.jsonc`.
 - Revalidation API at `/api/revalidate-tag` and `/api/revalidate-path` that
   drives the UI's "Invalidate this page" controls.
 - A client-side **probe** that issues a no-store fetch against a route and
-  prints the `Cache-Control`, `Cache-Tag`, `X-Vinext-Cache`, and `Age`
-  headers — so the cache state is visible at a glance.
+  prints the headers Cloudflare's edge attaches —
+  [`cf-cache-status`](https://developers.cloudflare.com/cache/concepts/default-cache-behavior/#cloudflare-cache-responses)
+  (the outer Workers Cache verdict), `Age`, plus the `Cache-Control` /
+  `Cache-Tag` headers vinext emits to drive it.
 
 ## How vinext wires it up
 
