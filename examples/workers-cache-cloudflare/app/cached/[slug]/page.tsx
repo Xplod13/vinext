@@ -25,7 +25,13 @@ export default async function CachedSlugPage({
   const tag = slug;
   const path = `/cached/${slug}`;
 
+  // Generated at render time. Embedded into the response so the client probe
+  // can tell whether a subsequent fetch was actually re-rendered (new id) or
+  // served from cache (same id). This is the only honest source of truth for
+  // "did SSR happen for that response" — outer cache headers describe what
+  // the cache layer thinks, not what the React tree actually did.
   const renderedAt = new Date().toISOString();
+  const renderId = crypto.randomUUID();
   const random = Math.random().toFixed(6);
 
   return (
@@ -44,14 +50,22 @@ export default async function CachedSlugPage({
       </p>
 
       <p>Server-side timestamp:</p>
-      <div className="timestamp" data-testid="rendered-at">
+      <div
+        className="timestamp"
+        data-testid="rendered-at"
+        data-render-id={renderId}
+        data-render-time={renderedAt}
+      >
         {renderedAt}
       </div>
+      <p>
+        Render ID: <code data-render-id-tag>{renderId}</code>
+      </p>
       <p>
         Sample noise (re-rendered = re-randomised): <code>{random}</code>
       </p>
 
-      <CacheStatusProbe path={path} />
+      <CacheStatusProbe path={path} initialRenderId={renderId} initialRenderTime={renderedAt} />
       <RevalidateControls tag={tag} path={path} />
     </main>
   );

@@ -7,6 +7,7 @@ export const dynamic = "force-dynamic";
 
 export default function DynamicPage() {
   const renderedAt = new Date().toISOString();
+  const renderId = crypto.randomUUID();
   return (
     <main>
       <nav className="crumbs">
@@ -18,12 +19,21 @@ export default function DynamicPage() {
       <p className="tagline">
         Bypass case for comparison. <code>force-dynamic</code> means vinext emits{" "}
         <code>no-store</code> headers, so neither the outer <code>ctx.cache</code> nor the
-        inner CacheHandler retains anything. The timestamp updates on every reload.
+        inner CacheHandler retains anything. The timestamp updates on every reload — every
+        probe should produce a fresh <code>render-id</code>.
       </p>
-      <div className="timestamp" data-testid="rendered-at">
+      <div
+        className="timestamp"
+        data-testid="rendered-at"
+        data-render-id={renderId}
+        data-render-time={renderedAt}
+      >
         {renderedAt}
       </div>
-      <CacheStatusProbe path="/dynamic" />
+      <p>
+        Render ID: <code>{renderId}</code>
+      </p>
+      <CacheStatusProbe path="/dynamic" initialRenderId={renderId} initialRenderTime={renderedAt} />
     </main>
   );
 }

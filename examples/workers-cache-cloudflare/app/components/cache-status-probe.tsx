@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 type ProbeState = {
   status: number;
@@ -10,7 +10,16 @@ type ProbeState = {
   cacheTag: string | null;
   cfRay: string | null;
   fetchedAt: string;
+  /** UUID embedded in the response body at SSR time, when present. */
+  renderId: string | null;
+  /** ISO timestamp the response was rendered at, when present. */
+  renderTime: string | null;
 };
+
+type SsrVerdict =
+  | { kind: "fresh"; detail: string }
+  | { kind: "cached"; detail: string }
+  | { kind: "unknown"; detail: string };
 
 /**
  * Map a `cf-cache-status` value to one of our badge classes. Mirrors the
@@ -35,57 +44,96 @@ function badgeClassFor(status: string | null): string {
 }
 
 /**
- * Decide whether the worker actually rendered this response, based on the
- * outer cache verdict. Workers Cache `HIT` / `REVALIDATED` mean the response
- * came straight from the edge without invoking the Worker; `STALE` /
- * `UPDATING` are also served from cache (the Worker may run async to
- * refresh, but the bytes the client saw came from cache). Anything else —
- * `MISS`, `EXPIRED`, `BYPASS`, `DYNAMIC`, or no header at all (local dev,
- * non-Cloudflare runtime) — means the Worker ran for this request.
+ * Pull the render-id and render-time the server embedded into the response.
+ * HTML pages put them on `[data-testid="rendered-at"]`'s data attributes;
+ * JSON route handlers include them as top-level fields.
  */
-function deriveSsr(cfCacheStatus: string | null): {
-  ran: boolean;
-  detail: string;
-} {
-  if (!cfCacheStatus) {
-    return {
-      ran: true,
-      detail: "no cf-cache-status — running locally or no edge cache in front",
-    };
-  }
-  const upper = cfCacheStatus.toUpperCase();
-  switch (upper) {
-    case "HIT":
-      return { ran: false, detail: "served by Workers Cache without invoking the Worker" };
-    case "REVALIDATED":
+async function extractRenderMarkers(
+  res: Response,
+): Promise<{ renderId: string | null; renderTime: string | null }> {
+  const contentType = res.headers.get("content-type") ?? "";
+  try {
+    if (contentType.includes("application/json")) {
+      const body = (await res.clone().json()) as Record<string, unknown>;
+      const renderId = typeof body.renderId === "string" ? body.renderId : null;
+      const renderTime = typeof body.now === "string" ? body.now : null;
+      return { renderId, renderTime };
+    }
+    if (contentType.includes("text/html")) {
+      const html = await res.clone().text();
+      const idMatch = html.match(/data-render-id="([^"]+)"/);
+      const timeMatch = html.match(/data-render-time="([^"]+)"/);
       return {
-        ran: false,
-        detail: "conditional check returned 304 — cached body re-used, Worker not invoked",
+        renderId: idMatch ? idMatch[1] : null,
+        renderTime: timeMatch ? timeMatch[1] : null,
       };
-    case "STALE":
-    case "UPDATING":
-      return {
-        ran: false,
-        detail:
-          "stale cache served; Worker may have run async to refresh, but this response did not render",
-      };
-    case "MISS":
-      return { ran: true, detail: "Worker ran and produced this response" };
-    case "EXPIRED":
-      return { ran: true, detail: "previous cache entry expired — Worker ran to regenerate" };
-    case "BYPASS":
-      return { ran: true, detail: "cache bypassed (e.g. Set-Cookie / Authorization) — Worker ran" };
-    case "DYNAMIC":
-      return { ran: true, detail: "non-cacheable response — Worker ran" };
-    default:
-      return { ran: true, detail: `cf-cache-status: ${cfCacheStatus} — Worker ran` };
+    }
+  } catch {
+    // Ignore parse errors — the markers are best-effort.
   }
+  return { renderId: null, renderTime: null };
 }
 
-export function CacheStatusProbe({ path }: { path: string }) {
+/**
+ * Decide whether SSR actually produced the response we just received, by
+ * comparing the response's render-id against the previously-seen one.
+ *
+ * - Different (or first-ever) render-id → SSR happened on the server.
+ * - Same render-id → the same bytes came back, which means a cache (outer
+ *   Workers Cache, inner ISR, or proxy in between) served the response
+ *   without re-rendering.
+ * - No render-id in the response → we can't tell from the body alone, so
+ *   we surface "unknown" rather than make something up.
+ */
+function deriveSsr(
+  currentRenderId: string | null,
+  previousRenderId: string | null,
+): SsrVerdict {
+  if (currentRenderId === null) {
+    return {
+      kind: "unknown",
+      detail:
+        "no render-id embedded in this response — can't tell from the body whether SSR ran",
+    };
+  }
+  if (previousRenderId === null) {
+    return {
+      kind: "fresh",
+      detail: `render-id ${shorten(currentRenderId)} captured — re-probe to compare`,
+    };
+  }
+  if (currentRenderId === previousRenderId) {
+    return {
+      kind: "cached",
+      detail: `render-id matches the previous probe (${shorten(currentRenderId)}) — same bytes, no re-render`,
+    };
+  }
+  return {
+    kind: "fresh",
+    detail: `render-id changed (${shorten(previousRenderId)} → ${shorten(currentRenderId)}) — SSR produced a new response`,
+  };
+}
+
+function shorten(id: string): string {
+  return id.length > 12 ? `${id.slice(0, 8)}…` : id;
+}
+
+export function CacheStatusProbe({
+  path,
+  initialRenderId = null,
+  initialRenderTime = null,
+}: {
+  path: string;
+  initialRenderId?: string | null;
+  initialRenderTime?: string | null;
+}) {
   const [state, setState] = useState<ProbeState | null>(null);
+  const [verdict, setVerdict] = useState<SsrVerdict | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The render-id from the previous probe (or the initial server render).
+  // Compared against the next probe's render-id to detect cache vs SSR.
+  const previousRenderIdRef = useRef<string | null>(initialRenderId);
 
   const probe = useCallback(async () => {
     setBusy(true);
@@ -98,6 +146,7 @@ export function CacheStatusProbe({ path }: { path: string }) {
         cache: "no-store",
         headers: { "x-probe": "1" },
       });
+      const markers = await extractRenderMarkers(res);
       setState({
         status: res.status,
         cfCacheStatus: res.headers.get("cf-cache-status"),
@@ -106,7 +155,15 @@ export function CacheStatusProbe({ path }: { path: string }) {
         cacheTag: res.headers.get("cache-tag"),
         cfRay: res.headers.get("cf-ray"),
         fetchedAt: new Date().toLocaleTimeString(),
+        renderId: markers.renderId,
+        renderTime: markers.renderTime,
       });
+      setVerdict(deriveSsr(markers.renderId, previousRenderIdRef.current));
+      // Update for the next round. If this response had no render-id, keep
+      // the previous one so a future probe can still compare.
+      if (markers.renderId !== null) {
+        previousRenderIdRef.current = markers.renderId;
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -119,7 +176,6 @@ export function CacheStatusProbe({ path }: { path: string }) {
   }, [probe]);
 
   const cfStatus = state?.cfCacheStatus ?? null;
-  const ssr = state ? deriveSsr(cfStatus) : null;
 
   return (
     <section className="panel" aria-label="Cache status probe">
@@ -127,13 +183,14 @@ export function CacheStatusProbe({ path }: { path: string }) {
         Probe <code>{path}</code>
       </h2>
       <p style={{ marginTop: 0, color: "var(--muted)" }}>
-        Issues a no-store <code>fetch</code> against the route and surfaces the headers Cloudflare
-        attaches at the edge. <code>cf-cache-status</code> is the outer Workers Cache verdict —
-        <code>HIT</code> means the response came from cache without invoking the worker;{" "}
-        <code>MISS</code> / <code>EXPIRED</code> means the worker ran.
+        Issues a no-store <code>fetch</code> against the route. The route embeds a fresh{" "}
+        <code>render-id</code> into every server-rendered response — comparing it across probes is
+        the most reliable way to tell whether SSR actually happened or a cache served the same
+        bytes again. <code>cf-cache-status</code> is shown alongside as the outer Workers Cache
+        verdict.
       </p>
 
-      {ssr ? <SsrBadge ran={ssr.ran} detail={ssr.detail} /> : null}
+      {verdict ? <SsrBadge verdict={verdict} /> : null}
 
       <div className="controls">
         <button type="button" onClick={() => void probe()} disabled={busy}>
@@ -147,6 +204,10 @@ export function CacheStatusProbe({ path }: { path: string }) {
       <dl className="kv">
         <dt>HTTP status</dt>
         <dd>{state?.status ?? "—"}</dd>
+        <dt>render-id</dt>
+        <dd>{state?.renderId ?? "—"}</dd>
+        <dt>render-time</dt>
+        <dd>{state?.renderTime ?? initialRenderTime ?? "—"}</dd>
         <dt>cf-cache-status</dt>
         <dd>
           {cfStatus ? (
@@ -173,13 +234,23 @@ export function CacheStatusProbe({ path }: { path: string }) {
   );
 }
 
-function SsrBadge({ ran, detail }: { ran: boolean; detail: string }) {
+function SsrBadge({ verdict }: { verdict: SsrVerdict }) {
+  const cls =
+    verdict.kind === "fresh"
+      ? "ssr-banner-ran"
+      : verdict.kind === "cached"
+        ? "ssr-banner-cached"
+        : "ssr-banner-unknown";
+  const title =
+    verdict.kind === "fresh"
+      ? "SSR ran — response was freshly rendered"
+      : verdict.kind === "cached"
+        ? "No SSR — same render-id as last probe (cache served this)"
+        : "SSR status: unknown";
   return (
-    <div className={`ssr-banner ${ran ? "ssr-banner-ran" : "ssr-banner-cached"}`}>
-      <strong>
-        {ran ? "Worker ran for this response" : "Served from cache — Worker not invoked"}
-      </strong>
-      <span>{detail}</span>
+    <div className={`ssr-banner ${cls}`}>
+      <strong>{title}</strong>
+      <span>{verdict.detail}</span>
     </div>
   );
 }
