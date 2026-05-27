@@ -184,22 +184,6 @@ export function CacheStatusProbe({
     void probe();
   }, [probe]);
 
-  // Re-fire the probe whenever the revalidate panel reports a successful
-  // invalidation so the user can see the cache verdict flip in real time
-  // without clicking Re-probe themselves.
-  useEffect(() => {
-    function onRevalidated(event: Event) {
-      const detail = (event as CustomEvent<{ path?: string } | undefined>).detail;
-      // Only re-probe when the revalidation targets this probe's path (or
-      // wasn't path-scoped — `revalidateTag` doesn't know the path).
-      if (!detail || !detail.path || detail.path === path) {
-        void probe();
-      }
-    }
-    window.addEventListener("vinext-revalidated", onRevalidated);
-    return () => window.removeEventListener("vinext-revalidated", onRevalidated);
-  }, [path, probe]);
-
   const cfStatus = state?.cfCacheStatus ?? null;
 
   return (
