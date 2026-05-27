@@ -175,7 +175,9 @@ describe("pages page response", () => {
     });
 
     expect(response.status).toBe(200);
-    expect(response.headers.get("cache-control")).toBe("s-maxage=60, stale-while-revalidate=240");
+    expect(response.headers.get("cache-control")).toBe(
+      "public, s-maxage=60, stale-while-revalidate=240",
+    );
     expect(response.headers.get("x-vinext-cache")).toBe("MISS");
     expect(response.headers.get("x-nextjs-cache")).toBe("MISS");
     await expect(response.text()).resolves.toContain("<div>live-body</div>");
@@ -369,12 +371,12 @@ describe("pages page response", () => {
       gsspRes: {
         statusCode: 200,
         getHeaders() {
-          return { "cache-control": "s-maxage=120" };
+          return { "cache-control": "public, s-maxage=120" };
         },
       },
     });
 
-    expect(response.headers.get("cache-control")).toBe("s-maxage=120");
+    expect(response.headers.get("cache-control")).toBe("public, s-maxage=120");
   });
 
   it("lets ISR Cache-Control win over the gSSP default when both apply", async () => {
@@ -391,7 +393,9 @@ describe("pages page response", () => {
       isrRevalidateSeconds: 60,
     });
 
-    expect(response.headers.get("cache-control")).toBe("s-maxage=60, stale-while-revalidate");
+    expect(response.headers.get("cache-control")).toBe(
+      "public, s-maxage=60, stale-while-revalidate",
+    );
   });
 
   it("does not set a gSSP default Cache-Control when there is no gSSP response", async () => {

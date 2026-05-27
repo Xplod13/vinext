@@ -337,7 +337,7 @@ describe("Next.js compat: app-routes", () => {
     const res = await fetch(`${baseUrl}/api/static-data`);
     expect(res.status).toBe(200);
     const cacheControl = res.headers.get("cache-control");
-    expect(cacheControl).toContain("s-maxage=1");
+    expect(cacheControl).toContain("public, s-maxage=1");
     expect(cacheControl).toContain("stale-while-revalidate");
   });
 

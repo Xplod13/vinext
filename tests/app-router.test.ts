@@ -1700,7 +1700,7 @@ describe("App Router integration", () => {
 
     // force-static should set s-maxage for indefinite caching
     const cacheControl = res.headers.get("cache-control");
-    expect(cacheControl).toContain("s-maxage=31536000");
+    expect(cacheControl).toContain("public, s-maxage=31536000");
     expect(res.headers.get("x-vinext-cache")).toBe("STATIC");
   });
 
@@ -1723,7 +1723,7 @@ describe("App Router integration", () => {
     expect(html).toContain('data-testid="error-dynamic-page"');
     // Should be treated as static — long-lived cache
     const cacheControl = res.headers.get("cache-control");
-    expect(cacheControl).toContain("s-maxage=31536000");
+    expect(cacheControl).toContain("public, s-maxage=31536000");
     expect(res.headers.get("x-vinext-cache")).toBe("STATIC");
   });
 
@@ -1841,7 +1841,7 @@ describe("App Router integration", () => {
 
     // revalidate=60 should set s-maxage=60 on first request (cache MISS)
     const cacheControl = res.headers.get("cache-control");
-    expect(cacheControl).toContain("s-maxage=60");
+    expect(cacheControl).toContain("public, s-maxage=60");
     expect(cacheControl).toContain("stale-while-revalidate");
   });
 
@@ -1851,7 +1851,7 @@ describe("App Router integration", () => {
     expect(await res.text()).toContain('data-testid="layout-segment-config-revalidate"');
 
     const cacheControl = res.headers.get("cache-control");
-    expect(cacheControl).toContain("s-maxage=30");
+    expect(cacheControl).toContain("public, s-maxage=30");
     expect(cacheControl).toContain("stale-while-revalidate");
   });
 

@@ -50,7 +50,7 @@ describe("app page response helpers", () => {
         revalidateSeconds: null,
       }),
     ).toEqual({
-      cacheControl: "s-maxage=31536000, stale-while-revalidate",
+      cacheControl: "public, s-maxage=31536000, stale-while-revalidate",
       cacheState: "STATIC",
     });
 
@@ -66,7 +66,7 @@ describe("app page response helpers", () => {
         revalidateSeconds: 60,
       }),
     ).toEqual({
-      cacheControl: "s-maxage=60, stale-while-revalidate=240",
+      cacheControl: "public, s-maxage=60, stale-while-revalidate=240",
       cacheState: "MISS",
     });
   });
@@ -97,7 +97,7 @@ describe("app page response helpers", () => {
         revalidateSeconds: Infinity,
       }),
     ).toEqual({
-      cacheControl: "s-maxage=31536000, stale-while-revalidate",
+      cacheControl: "public, s-maxage=31536000, stale-while-revalidate",
       cacheState: "STATIC",
     });
 
@@ -191,7 +191,7 @@ describe("app page response helpers", () => {
         revalidateSeconds: 60,
       }),
     ).toEqual({
-      cacheControl: "s-maxage=60, stale-while-revalidate",
+      cacheControl: "public, s-maxage=60, stale-while-revalidate",
       cacheState: undefined,
       shouldWriteToCache: false,
     });
@@ -208,7 +208,7 @@ describe("app page response helpers", () => {
         revalidateSeconds: Infinity,
       }),
     ).toEqual({
-      cacheControl: "s-maxage=31536000, stale-while-revalidate",
+      cacheControl: "public, s-maxage=31536000, stale-while-revalidate",
       cacheState: "STATIC",
       shouldWriteToCache: false,
     });
@@ -227,7 +227,7 @@ describe("app page response helpers", () => {
         revalidateSeconds: 60,
       }),
     ).toEqual({
-      cacheControl: "s-maxage=60, stale-while-revalidate",
+      cacheControl: "public, s-maxage=60, stale-while-revalidate",
       cacheState: "MISS",
       shouldWriteToCache: true,
     });
@@ -330,7 +330,7 @@ describe("app page response helpers", () => {
         revalidateSeconds: 60,
       }),
     ).toEqual({
-      cacheControl: "s-maxage=60, stale-while-revalidate",
+      cacheControl: "public, s-maxage=60, stale-while-revalidate",
       cacheState: "MISS",
     });
 
@@ -346,7 +346,7 @@ describe("app page response helpers", () => {
         revalidateSeconds: 60,
       }),
     ).toEqual({
-      cacheControl: "s-maxage=60, stale-while-revalidate",
+      cacheControl: "public, s-maxage=60, stale-while-revalidate",
       cacheState: "MISS",
       shouldWriteToCache: true,
     });
@@ -383,7 +383,7 @@ describe("app page response helpers", () => {
       },
       params: { slug: "test" },
       policy: {
-        cacheControl: "s-maxage=60, stale-while-revalidate",
+        cacheControl: "public, s-maxage=60, stale-while-revalidate",
         cacheState: "MISS",
       },
       timing: {
@@ -488,7 +488,7 @@ describe("app page response helpers", () => {
         status: 203,
       },
       policy: {
-        cacheControl: "s-maxage=31536000, stale-while-revalidate",
+        cacheControl: "public, s-maxage=31536000, stale-while-revalidate",
         cacheState: "STATIC",
       },
       timing: {
@@ -547,7 +547,7 @@ describe("app page response helpers", () => {
       buildAppPageRscResponse(createBody("flight"), {
         cacheTags: ["/cached/intro", "_N_T_/cached/intro"],
         middlewareContext: { headers: null, status: null },
-        policy: { cacheControl: "s-maxage=60, stale-while-revalidate" },
+        policy: { cacheControl: "public, s-maxage=60, stale-while-revalidate" },
       }),
     );
     expect(response.headers.get("Cache-Tag")).toBe("/cached/intro,_N_T_/cached/intro");
@@ -557,7 +557,7 @@ describe("app page response helpers", () => {
     const response = buildAppPageRscResponse(createBody("flight"), {
       cacheTags: ["/cached/intro"],
       middlewareContext: { headers: null, status: null },
-      policy: { cacheControl: "s-maxage=60, stale-while-revalidate" },
+      policy: { cacheControl: "public, s-maxage=60, stale-while-revalidate" },
     });
     expect(response.headers.has("Cache-Tag")).toBe(false);
   });
@@ -567,7 +567,7 @@ describe("app page response helpers", () => {
       buildAppPageHtmlResponse(createBody("<h1>page</h1>"), {
         cacheTags: ["/cached/intro", "_N_T_/cached/intro"],
         middlewareContext: { headers: null, status: null },
-        policy: { cacheControl: "s-maxage=60, stale-while-revalidate" },
+        policy: { cacheControl: "public, s-maxage=60, stale-while-revalidate" },
       }),
     );
     expect(response.headers.get("Cache-Tag")).toBe("/cached/intro,_N_T_/cached/intro");

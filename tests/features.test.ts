@@ -591,7 +591,7 @@ describe("ISR (Pages Router)", () => {
     expect(html).toContain("Hello from ISR");
     // First request should be a cache miss
     expect(res.headers.get("x-vinext-cache")).toBe("MISS");
-    expect(res.headers.get("cache-control")).toContain("s-maxage=1");
+    expect(res.headers.get("cache-control")).toContain("public, s-maxage=1");
   });
 
   it("serves cached ISR page on second request (cache HIT)", async () => {
@@ -687,7 +687,7 @@ describe("ISR (Pages Router)", () => {
   it("sets Cache-Control header for ISR pages", async () => {
     const res = await fetch(`${baseUrl}/isr-test`);
     const cacheControl = res.headers.get("cache-control");
-    expect(cacheControl).toContain("s-maxage=1");
+    expect(cacheControl).toContain("public, s-maxage=1");
     expect(cacheControl).toContain("stale-while-revalidate");
   });
 
@@ -728,7 +728,7 @@ describe("ISR (App Router)", () => {
     const html = await res.text();
     expect(html).toContain("App Router ISR Test");
     expect(html).toContain("Hello from ISR");
-    expect(res.headers.get("cache-control")).toContain("s-maxage=1");
+    expect(res.headers.get("cache-control")).toContain("public, s-maxage=1");
     expect(res.headers.get("cache-control")).toContain("stale-while-revalidate");
   });
 
@@ -751,7 +751,7 @@ describe("ISR (App Router)", () => {
     // ISR cache reads/writes are prod-only, so no X-Vinext-Cache in dev
     expect(res.headers.get("x-vinext-cache")).toBeNull();
     // Cache-Control IS still emitted for RSC responses on ISR pages
-    expect(res.headers.get("cache-control")).toContain("s-maxage=1");
+    expect(res.headers.get("cache-control")).toContain("public, s-maxage=1");
     expect(res.headers.get("cache-control")).toContain("stale-while-revalidate");
   });
 
@@ -762,7 +762,7 @@ describe("ISR (App Router)", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/x-component");
     // Prefetch RSC requests should also get Cache-Control (no X-Vinext-Cache in dev)
-    expect(res.headers.get("cache-control")).toContain("s-maxage=1");
+    expect(res.headers.get("cache-control")).toContain("public, s-maxage=1");
     expect(res.headers.get("x-vinext-cache")).toBeNull();
   });
 

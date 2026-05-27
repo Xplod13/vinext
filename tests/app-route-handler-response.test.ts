@@ -39,7 +39,7 @@ describe("app route handler response helpers", () => {
       status: 200,
       headers: {
         "content-type": "text/plain",
-        "cache-control": "s-maxage=60, stale-while-revalidate",
+        "cache-control": "public, s-maxage=60, stale-while-revalidate",
         "x-response": "app",
       },
     });
@@ -102,7 +102,7 @@ describe("app route handler response helpers", () => {
     });
     expect(hit.headers.get("x-vinext-cache")).toBe("HIT");
     expect(hit.headers.get("x-nextjs-cache")).toBe("HIT");
-    expect(hit.headers.get("cache-control")).toBe("s-maxage=60, stale-while-revalidate");
+    expect(hit.headers.get("cache-control")).toBe("public, s-maxage=60, stale-while-revalidate");
     await expect(hit.text()).resolves.toBe("from-cache");
 
     const staleHead = buildRouteHandlerCachedResponse(cachedValue, {
@@ -113,7 +113,9 @@ describe("app route handler response helpers", () => {
     });
     expect(staleHead.headers.get("x-vinext-cache")).toBe("STALE");
     expect(staleHead.headers.get("x-nextjs-cache")).toBe("STALE");
-    expect(staleHead.headers.get("cache-control")).toBe("s-maxage=0, stale-while-revalidate");
+    expect(staleHead.headers.get("cache-control")).toBe(
+      "public, s-maxage=0, stale-while-revalidate",
+    );
     await expect(staleHead.text()).resolves.toBe("");
   });
 
@@ -128,7 +130,9 @@ describe("app route handler response helpers", () => {
       revalidateSeconds: 60,
     });
 
-    expect(response.headers.get("cache-control")).toBe("s-maxage=15, stale-while-revalidate=285");
+    expect(response.headers.get("cache-control")).toBe(
+      "public, s-maxage=15, stale-while-revalidate=285",
+    );
   });
 
   it("emits static cache-control for revalidateSeconds = Infinity (revalidate = false)", () => {
@@ -139,13 +143,17 @@ describe("app route handler response helpers", () => {
       revalidateSeconds: Infinity,
     });
     expect(response.headers.get("x-vinext-cache")).toBe("HIT");
-    expect(response.headers.get("cache-control")).toBe("s-maxage=31536000, stale-while-revalidate");
+    expect(response.headers.get("cache-control")).toBe(
+      "public, s-maxage=31536000, stale-while-revalidate",
+    );
   });
 
   it("applies revalidate header for Infinity as static cache-control", () => {
     const response = new Response("fresh");
     applyRouteHandlerRevalidateHeader(response, Infinity);
-    expect(response.headers.get("cache-control")).toBe("s-maxage=31536000, stale-while-revalidate");
+    expect(response.headers.get("cache-control")).toBe(
+      "public, s-maxage=31536000, stale-while-revalidate",
+    );
   });
 
   it("serializes APP_ROUTE cache values without cache bookkeeping headers", async () => {
@@ -153,7 +161,7 @@ describe("app route handler response helpers", () => {
       status: 201,
       headers: {
         "content-type": "text/plain",
-        "cache-control": "s-maxage=60, stale-while-revalidate",
+        "cache-control": "public, s-maxage=60, stale-while-revalidate",
         "x-vinext-cache": "MISS",
         "x-nextjs-cache": "MISS",
         "x-middleware-set-cookie": "internal=1; Path=/",
@@ -300,7 +308,9 @@ describe("app route handler response helpers", () => {
     applyRouteHandlerRevalidateHeader(response, 30);
     markRouteHandlerCacheMiss(response);
 
-    expect(response.headers.get("cache-control")).toBe("s-maxage=30, stale-while-revalidate");
+    expect(response.headers.get("cache-control")).toBe(
+      "public, s-maxage=30, stale-while-revalidate",
+    );
     expect(response.headers.get("x-vinext-cache")).toBe("MISS");
   });
 

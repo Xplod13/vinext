@@ -1,8 +1,12 @@
 export const NEVER_CACHE_CONTROL = "private, no-cache, no-store, max-age=0, must-revalidate";
 
-export const STATIC_CACHE_CONTROL = "s-maxage=31536000, stale-while-revalidate";
+// `public` makes the response unambiguously shared-cacheable. It's the
+// directive Cloudflare's Workers Cache (and most CDNs) look for as an
+// explicit opt-in; without it some caches fall back to heuristics or
+// conservative defaults.
+export const STATIC_CACHE_CONTROL = "public, s-maxage=31536000, stale-while-revalidate";
 
-const STALE_REVALIDATE_CACHE_CONTROL = "s-maxage=0, stale-while-revalidate";
+const STALE_REVALIDATE_CACHE_CONTROL = "public, s-maxage=0, stale-while-revalidate";
 
 export const NO_STORE_CACHE_CONTROL = "no-store, must-revalidate";
 
@@ -19,16 +23,16 @@ export function buildRevalidateCacheControl(
   expireSeconds?: number,
 ): string {
   if (expireSeconds === undefined) {
-    return `s-maxage=${revalidateSeconds}, stale-while-revalidate`;
+    return `public, s-maxage=${revalidateSeconds}, stale-while-revalidate`;
   }
 
   // `expire <= revalidate` is a zero-width stale window: downstream caches
   // should refetch after s-maxage instead of serving stale.
   if (revalidateSeconds >= expireSeconds) {
-    return `s-maxage=${revalidateSeconds}`;
+    return `public, s-maxage=${revalidateSeconds}`;
   }
 
-  return `s-maxage=${revalidateSeconds}, stale-while-revalidate=${
+  return `public, s-maxage=${revalidateSeconds}, stale-while-revalidate=${
     expireSeconds - revalidateSeconds
   }`;
 }

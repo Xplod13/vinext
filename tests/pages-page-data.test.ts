@@ -211,7 +211,9 @@ describe("pages page data", () => {
 
     expect(result.response.status).toBe(200);
     expect(result.response.headers.get("x-vinext-cache")).toBe("STALE");
-    expect(result.response.headers.get("cache-control")).toBe("s-maxage=0, stale-while-revalidate");
+    expect(result.response.headers.get("cache-control")).toBe(
+      "public, s-maxage=0, stale-while-revalidate",
+    );
     expect(result.response.headers.get("link")).toBe(
       "</font.woff2>; rel=preload; as=font; type=font/woff2; crossorigin",
     );
@@ -352,7 +354,7 @@ describe("pages page data", () => {
     expect(result.response.headers.get("x-vinext-cache")).toBe("HIT");
     expect(result.response.headers.get("x-nextjs-cache")).toBe("HIT");
     expect(result.response.headers.get("cache-control")).toBe(
-      "s-maxage=15, stale-while-revalidate=285",
+      "public, s-maxage=15, stale-while-revalidate=285",
     );
   });
 

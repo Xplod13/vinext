@@ -90,7 +90,9 @@ describe("app page cache helpers", () => {
     });
     expect(htmlResponse?.status).toBe(201);
     expect(htmlResponse?.headers.get("content-type")).toBe("text/html; charset=utf-8");
-    expect(htmlResponse?.headers.get("cache-control")).toBe("s-maxage=60, stale-while-revalidate");
+    expect(htmlResponse?.headers.get("cache-control")).toBe(
+      "public, s-maxage=60, stale-while-revalidate",
+    );
     expect(htmlResponse?.headers.get("x-vinext-cache")).toBe("HIT");
     // Ported from Next.js: test/e2e/app-dir/app-root-params-getters/generate-static-params.test.ts
     // https://github.com/vercel/next.js/blob/canary/test/e2e/app-dir/app-root-params-getters/generate-static-params.test.ts
@@ -106,7 +108,9 @@ describe("app page cache helpers", () => {
       }),
     );
     expect(rscResponse?.headers.get("content-type")).toBe("text/x-component");
-    expect(rscResponse?.headers.get("cache-control")).toBe("s-maxage=0, stale-while-revalidate");
+    expect(rscResponse?.headers.get("cache-control")).toBe(
+      "public, s-maxage=0, stale-while-revalidate",
+    );
     expect(rscResponse?.headers.get(VINEXT_RSC_COMPATIBILITY_ID_HEADER)).toBe("compat-a");
     expect(rscResponse?.headers.get("x-nextjs-cache")).toBe("STALE");
     expect(await rscResponse?.arrayBuffer()).toEqual(rscData);
@@ -236,7 +240,9 @@ describe("app page cache helpers", () => {
       scheduleBackgroundRegeneration: vi.fn(),
     });
 
-    expect(response?.headers.get("cache-control")).toBe("s-maxage=60, stale-while-revalidate=240");
+    expect(response?.headers.get("cache-control")).toBe(
+      "public, s-maxage=60, stale-while-revalidate=240",
+    );
   });
 
   it("emits static cache-control for cached indefinite app pages", async () => {
@@ -247,7 +253,7 @@ describe("app page cache helpers", () => {
     });
 
     expect(response?.headers.get("cache-control")).toBe(
-      "s-maxage=31536000, stale-while-revalidate",
+      "public, s-maxage=31536000, stale-while-revalidate",
     );
   });
 
@@ -276,7 +282,9 @@ describe("app page cache helpers", () => {
       scheduleBackgroundRegeneration: vi.fn(),
     });
 
-    expect(response?.headers.get("cache-control")).toBe("s-maxage=0, stale-while-revalidate");
+    expect(response?.headers.get("cache-control")).toBe(
+      "public, s-maxage=0, stale-while-revalidate",
+    );
   });
 
   it("falls back to 200 for falsy cached status values", () => {
@@ -790,7 +798,7 @@ describe("app page cache helpers", () => {
         status: 201,
         headers: {
           "Content-Type": "text/html; charset=utf-8",
-          "Cache-Control": "s-maxage=60, stale-while-revalidate",
+          "Cache-Control": "public, s-maxage=60, stale-while-revalidate",
           Vary: "RSC, Accept",
           "X-Vinext-Cache": "MISS",
         },
@@ -893,7 +901,7 @@ describe("app page cache helpers", () => {
       new Response("<h1>personalized</h1>", {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
-          "Cache-Control": "s-maxage=60, stale-while-revalidate",
+          "Cache-Control": "public, s-maxage=60, stale-while-revalidate",
           Vary: "RSC, Accept",
           "X-Vinext-Cache": "MISS",
         },
@@ -923,7 +931,7 @@ describe("app page cache helpers", () => {
       new Response("<h1>personalized</h1>", {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
-          "Cache-Control": "s-maxage=60, stale-while-revalidate",
+          "Cache-Control": "public, s-maxage=60, stale-while-revalidate",
           Vary: "RSC, Accept",
           "X-Vinext-Cache": "MISS",
         },
@@ -1039,7 +1047,7 @@ describe("app page cache helpers", () => {
       new Response("flight", {
         headers: {
           "Content-Type": "text/x-component",
-          "Cache-Control": "s-maxage=60, stale-while-revalidate",
+          "Cache-Control": "public, s-maxage=60, stale-while-revalidate",
           "X-Vinext-Cache": "MISS",
         },
       }),
