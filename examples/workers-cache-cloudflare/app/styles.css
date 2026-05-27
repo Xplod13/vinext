@@ -192,6 +192,53 @@ code {
   font-size: 0.85em;
 }
 
+.ssr-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  margin: 16px 0;
+  border: 1px solid var(--border);
+  position: relative;
+}
+
+.ssr-banner::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  border-radius: 12px 0 0 12px;
+}
+
+.ssr-banner strong {
+  font-size: 0.95rem;
+  letter-spacing: -0.01em;
+}
+
+.ssr-banner span {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.ssr-banner-ran {
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.ssr-banner-ran::before {
+  background: var(--warn);
+}
+
+.ssr-banner-cached {
+  background: rgba(52, 211, 153, 0.08);
+}
+
+.ssr-banner-cached::before {
+  background: var(--good);
+}
+
 .timestamp {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 1rem;
