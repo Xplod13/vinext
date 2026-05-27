@@ -81,7 +81,7 @@ export default async function CachedSlugPage({
         Sample noise (re-rendered = re-randomised): <code>{random}</code>
       </p>
 
-      <CacheStatusProbe path={path} initialRenderId={renderId} initialRenderTime={renderedAt} />
+      <CacheStatusProbe path={path} />
       <RevalidateControls tag={tag} path={path} />
     </main>
   );

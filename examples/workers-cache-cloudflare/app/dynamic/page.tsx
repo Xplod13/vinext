@@ -33,7 +33,7 @@ export default function DynamicPage() {
       <p>
         Render ID: <code>{renderId}</code>
       </p>
-      <CacheStatusProbe path="/dynamic" initialRenderId={renderId} initialRenderTime={renderedAt} />
+      <CacheStatusProbe path="/dynamic" />
     </main>
   );
 }

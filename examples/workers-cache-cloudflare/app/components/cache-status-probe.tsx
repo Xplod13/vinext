@@ -98,7 +98,7 @@ function deriveSsr(
   }
   if (previousRenderId === null) {
     return {
-      kind: "fresh",
+      kind: "unknown",
       detail: `render-id ${shorten(currentRenderId)} captured — re-probe to compare`,
     };
   }
@@ -118,43 +118,22 @@ function shorten(id: string): string {
   return id.length > 12 ? `${id.slice(0, 8)}…` : id;
 }
 
-export function CacheStatusProbe({
-  path,
-  initialRenderId = null,
-  initialRenderTime = null,
-}: {
-  path: string;
-  initialRenderId?: string | null;
-  initialRenderTime?: string | null;
-}) {
+export function CacheStatusProbe({ path }: { path: string }) {
   const [state, setState] = useState<ProbeState | null>(null);
   const [verdict, setVerdict] = useState<SsrVerdict | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // The render-id from the previous probe (or the initial server render).
-  // Compared against the next probe's render-id to detect cache vs SSR.
-  const previousRenderIdRef = useRef<string | null>(initialRenderId);
+  // The render-id from the previous probe. We compare probe-to-probe rather
+  // than against the page navigation's render-id — those are two separate
+  // requests with different Accept headers, so they land in different Vary
+  // buckets in the outer cache and would falsely look like an SSR diff.
+  const previousRenderIdRef = useRef<string | null>(null);
 
   const probe = useCallback(async () => {
     setBusy(true);
     setError(null);
     try {
-      // Mirror what a browser navigation would send so the probe lands in
-      // the same Vary bucket as the original page load. Our responses set
-      // `Vary: Accept, ...`, which means Workers Cache keys separate entries
-      // per Accept value — `fetch()`'s default `Accept: */*` would hit a
-      // *different* cached entry than the one the user navigated into.
-      //
-      // We intentionally do NOT pass `cache: 'no-store'`: that adds
-      // `Cache-Control: no-cache` to the request, which Workers Cache
-      // honours by bypassing and re-running the origin. The whole point of
-      // this probe is to observe what the outer cache actually serves.
-      const acceptForHtml =
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8";
-      const res = await fetch(path, {
-        method: "GET",
-        headers: { Accept: acceptForHtml },
-      });
+      const res = await fetch(path, { method: "GET" });
       const markers = await extractRenderMarkers(res);
       setState({
         status: res.status,
@@ -216,7 +195,7 @@ export function CacheStatusProbe({
         <dt>render-id</dt>
         <dd>{state?.renderId ?? "—"}</dd>
         <dt>render-time</dt>
-        <dd>{state?.renderTime ?? initialRenderTime ?? "—"}</dd>
+        <dd>{state?.renderTime ?? "—"}</dd>
         <dt>cf-cache-status</dt>
         <dd>
           {cfStatus ? (
