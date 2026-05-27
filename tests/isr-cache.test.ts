@@ -778,3 +778,55 @@ describe("revalidatePath type parameter", () => {
     expect(await handler.get("entry:/about/team")).not.toBeNull();
   });
 });
+
+describe("isrGet / isrSet bypass when request-context cache is available", () => {
+  beforeEach(() => {
+    setCacheHandler(new MemoryCacheHandler());
+  });
+
+  it("isrSet is a no-op when ctx.cache exists; isrGet returns null", async () => {
+    const handler = new MemoryCacheHandler();
+    setCacheHandler(handler);
+
+    const ctx = {
+      cache: { purge: async () => undefined },
+      waitUntil: () => undefined,
+    };
+    const key = "bypass:test";
+    const data = buildPagesCacheValue("<html>cached</html>", {});
+
+    await runWithExecutionContext(ctx, async () => {
+      // Inside the scope: write is suppressed.
+      await isrSet(key, data, 60, ["sample-tag"]);
+      // ...and read returns null.
+      const inScopeRead = await isrGet(key);
+      expect(inScopeRead).toBeNull();
+    });
+
+    // Outside the scope: the handler was never touched.
+    const outOfScopeRead = await handler.get(key);
+    expect(outOfScopeRead).toBeNull();
+  });
+
+  it("a pre-existing inner cache entry is not surfaced through isrGet when ctx.cache is set", async () => {
+    const handler = new MemoryCacheHandler();
+    setCacheHandler(handler);
+    // Populate the inner handler directly — outside the bypass scope.
+    await isrSet("preexisting", buildPagesCacheValue("<html>old</html>", {}), 60, []);
+
+    // Confirm baseline: outside the bypass scope, the entry is returned.
+    const outside = await isrGet("preexisting");
+    expect(outside?.value.value?.kind).toBe("PAGES");
+
+    // Inside the bypass scope, even an existing entry must be invisible —
+    // route-level ISR is owned entirely by the outer cache.
+    const ctx = {
+      cache: { purge: async () => undefined },
+      waitUntil: () => undefined,
+    };
+    await runWithExecutionContext(ctx, async () => {
+      const inside = await isrGet("preexisting");
+      expect(inside).toBeNull();
+    });
+  });
+});

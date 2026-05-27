@@ -506,6 +506,17 @@ export function finalizeAppPageHtmlCacheResponse(
     return response;
   }
 
+  // When an outer request-context cache (e.g. Workers Cache) is present,
+  // route-level ISR is owned entirely by that layer (see isr-cache.ts).
+  // Skip the no-store-on-first-render safety dance and the inner-cache
+  // write so the route's declared `Cache-Control: s-maxage=…` reaches the
+  // outer cache and gets honoured. Routes that opt into ISR are expected
+  // not to read request APIs during render — same contract as standard
+  // Next.js ISR.
+  if (isRequestContextCacheAvailable()) {
+    return response;
+  }
+
   const [streamForClient, streamForCache] = response.body.tee();
   const htmlKey = options.isrHtmlKey(options.cleanPathname);
   const rscKey = options.isrRscKey(options.cleanPathname, null);
@@ -600,6 +611,14 @@ export function finalizeAppPageRscCacheResponse(
   response: Response,
   options: ScheduleAppPageRscCacheWriteOptions,
 ): Response {
+  // See note in `finalizeAppPageHtmlCacheResponse` — when the outer
+  // request-context cache owns route-level ISR, vinext does not write to
+  // the inner cache and the declared Cache-Control must flow through to
+  // the outer layer.
+  if (isRequestContextCacheAvailable()) {
+    return response;
+  }
+
   const didSchedule = scheduleAppPageRscCacheWrite(options);
   if (!didSchedule) {
     return response;

@@ -15,6 +15,7 @@
 
 import {
   getCacheHandler,
+  isRequestContextCacheAvailable,
   type CacheHandlerValue,
   type IncrementalCacheValue,
   type CachedPagesValue,
@@ -38,13 +39,33 @@ export type ISRCacheEntry = {
 };
 
 /**
+ * When the request's ExecutionContext exposes an outer HTTP cache (e.g.
+ * Cloudflare's `ctx.cache`), that layer is the single source of cached
+ * responses for route-level ISR. Going through the inner `CacheHandler`
+ * as well would double-cache the same response, surface stale bodies
+ * even after the outer cache has been purged, and obscure whether the
+ * Worker actually re-rendered. So at the route-level ISR seams (this
+ * module) we bypass the inner handler entirely when the outer one is
+ * present. `unstable_cache`, fetch cache, and other application-level
+ * cached data still flow through the handler — they're not HTTP-level
+ * caches and the outer layer can't represent them.
+ */
+function shouldSkipInnerHandler(): boolean {
+  return isRequestContextCacheAvailable();
+}
+
+/**
  * Get a cache entry with staleness information.
  *
  * Returns { value, isStale: false } for fresh entries,
  * { value, isStale: true } for expired-but-usable entries,
  * or null for cache misses.
+ *
+ * When an outer request-context cache is present, returns null so the
+ * caller renders fresh and relies entirely on the outer layer.
  */
 export async function isrGet(key: string): Promise<ISRCacheEntry | null> {
+  if (shouldSkipInnerHandler()) return null;
   const handler = getCacheHandler();
   const result = await handler.get(key);
   if (!result || !result.value) return null;
@@ -60,6 +81,10 @@ export async function isrGet(key: string): Promise<ISRCacheEntry | null> {
 
 /**
  * Store a value in the ISR cache with a revalidation period.
+ *
+ * When an outer request-context cache is present, this is a no-op — the
+ * outer cache handles route-level caching based on the `Cache-Control` /
+ * `Cache-Tag` headers vinext already emits.
  */
 export async function isrSet(
   key: string,
@@ -68,6 +93,7 @@ export async function isrSet(
   tags?: string[],
   expireSeconds?: number,
 ): Promise<void> {
+  if (shouldSkipInnerHandler()) return;
   const handler = getCacheHandler();
   await handler.set(key, data, {
     cacheControl:
