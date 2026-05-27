@@ -41,6 +41,7 @@ CHECKS=(
   "nextra-docs-template          /about  About"
   "benchmarks                    /       Benchmark"
   "hackernews                    /       Hacker News"
+  "workers-cache-cloudflare      /       Request-context cache demo"
   "vinext-web                    /       Run your Next.js app on Vite"
 )
 

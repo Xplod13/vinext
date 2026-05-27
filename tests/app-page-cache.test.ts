@@ -14,7 +14,26 @@ import {
   VINEXT_RSC_VARY_HEADER,
 } from "../packages/vinext/src/server/app-rsc-cache-busting.js";
 import type { CachedAppPageValue } from "../packages/vinext/src/shims/cache.js";
+import {
+  runWithExecutionContext,
+  type ExecutionContextLike,
+} from "../packages/vinext/src/shims/request-context.js";
 import { withEnvVar } from "./env-test-helpers.js";
+
+function withRequestContextCache<T>(fn: () => T): T {
+  // Mock an ExecutionContext that exposes a compatible `ctx.cache.purge`.
+  // Response builders gate `Cache-Tag` emission on this being present —
+  // tests that exercise the header must opt in.
+  const ctx = {
+    cache: { purge: async () => undefined },
+    waitUntil: () => undefined,
+  } as unknown as ExecutionContextLike;
+  let captured!: T;
+  void runWithExecutionContext(ctx, () => {
+    captured = fn();
+  });
+  return captured;
+}
 
 function buildISRCacheEntry(
   value: CachedAppPageValue,
@@ -91,6 +110,59 @@ describe("app page cache helpers", () => {
     expect(rscResponse?.headers.get(VINEXT_RSC_COMPATIBILITY_ID_HEADER)).toBe("compat-a");
     expect(rscResponse?.headers.get("x-nextjs-cache")).toBe("STALE");
     expect(await rscResponse?.arrayBuffer()).toEqual(rscData);
+  });
+
+  it("emits a Cache-Tag header on cached HTML responses when tags are present and ctx.cache exists", () => {
+    const cachedValue = buildCachedAppPageValue("<h1>cached</h1>", undefined, 200);
+    const response = withRequestContextCache(() =>
+      buildAppPageCachedResponse(cachedValue, {
+        cacheState: "HIT",
+        cacheTags: ["/blog/hello", "_N_T_/blog/hello", "featured-post"],
+        isRscRequest: false,
+        revalidateSeconds: 60,
+      }),
+    );
+    // The Cache-Tag header is what `ctx.cache.purge({ tags })` consumes.
+    expect(response?.headers.get("Cache-Tag")).toBe("/blog/hello,_N_T_/blog/hello,featured-post");
+  });
+
+  it("emits a Cache-Tag header on cached RSC responses when tags are present and ctx.cache exists", () => {
+    const rscData = new TextEncoder().encode("flight").buffer;
+    const cachedValue = buildCachedAppPageValue("", rscData, 200);
+    const response = withRequestContextCache(() =>
+      buildAppPageCachedResponse(cachedValue, {
+        cacheState: "STALE",
+        cacheTags: ["/blog/hello"],
+        isRscRequest: true,
+        revalidateSeconds: 60,
+      }),
+    );
+    expect(response?.headers.get("Cache-Tag")).toBe("/blog/hello");
+  });
+
+  it("omits the Cache-Tag header when no tags are present", () => {
+    const cachedValue = buildCachedAppPageValue("<h1>cached</h1>", undefined, 200);
+    const response = withRequestContextCache(() =>
+      buildAppPageCachedResponse(cachedValue, {
+        cacheState: "HIT",
+        isRscRequest: false,
+        revalidateSeconds: 60,
+      }),
+    );
+    expect(response?.headers.has("Cache-Tag")).toBe(false);
+  });
+
+  it("omits the Cache-Tag header when the request context has no cache, even with tags", () => {
+    // No `runWithExecutionContext` wrapper — no outer cache to purge, so the
+    // header is purely advertising overhead and should be skipped.
+    const cachedValue = buildCachedAppPageValue("<h1>cached</h1>", undefined, 200);
+    const response = buildAppPageCachedResponse(cachedValue, {
+      cacheState: "HIT",
+      cacheTags: ["/blog/hello", "_N_T_/blog/hello"],
+      isRscRequest: false,
+      revalidateSeconds: 60,
+    });
+    expect(response?.headers.has("Cache-Tag")).toBe(false);
   });
 
   it("merges middleware response headers into cached HTML responses", async () => {

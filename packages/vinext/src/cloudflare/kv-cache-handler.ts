@@ -241,6 +241,7 @@ export class KVCacheHandler implements CacheHandler {
         value: restoredValue,
         cacheState: "stale",
         cacheControl: entry.cacheControl,
+        tags: entry.tags,
       };
     }
 
@@ -248,6 +249,7 @@ export class KVCacheHandler implements CacheHandler {
       lastModified: entry.lastModified,
       value: restoredValue,
       cacheControl: entry.cacheControl,
+      tags: entry.tags,
     };
   }
 

@@ -1,4 +1,8 @@
-import type { CachedRouteValue, CacheControlMetadata } from "vinext/shims/cache";
+import {
+  isRequestContextCacheAvailable,
+  type CachedRouteValue,
+  type CacheControlMetadata,
+} from "vinext/shims/cache";
 import {
   buildCachedRevalidateCacheControl,
   NEVER_CACHE_CONTROL,
@@ -11,7 +15,7 @@ import {
   NEXTJS_CACHE_HEADER,
   VINEXT_CACHE_HEADER,
 } from "./headers.js";
-import { setCacheStateHeaders } from "./cache-headers.js";
+import { applyCacheTagHeader, setCacheStateHeaders } from "./cache-headers.js";
 import { mergeMiddlewareResponseHeaders } from "./middleware-response-headers.js";
 import { processMiddlewareHeaders } from "./request-pipeline.js";
 
@@ -23,6 +27,7 @@ export type RouteHandlerMiddlewareContext = {
 type BuildRouteHandlerCachedResponseOptions = {
   cacheControl?: CacheControlMetadata;
   cacheState: "HIT" | "STALE";
+  cacheTags?: readonly string[];
   expireSeconds?: number;
   isHead: boolean;
   revalidateSeconds: number;
@@ -122,6 +127,11 @@ export function buildRouteHandlerCachedResponse(
     "Cache-Control",
     buildRouteHandlerCacheControl(options.cacheState, revalidateSeconds, expireSeconds),
   );
+  // Gate on the request-context cache being present — see the matching
+  // comment in `buildAppPageCachedHeaders` for the rationale.
+  if (options.cacheTags && options.cacheTags.length > 0 && isRequestContextCacheAvailable()) {
+    applyCacheTagHeader(headers, options.cacheTags);
+  }
 
   return new Response(options.isHead ? null : cachedValue.body, {
     status: cachedValue.status,

@@ -29,6 +29,7 @@ import { workUnitAsyncStorage } from "./internal/work-unit-async-storage.js";
 import { makeHangingPromise } from "./internal/make-hanging-promise.js";
 import { readCacheControlNumberField } from "../utils/cache-control-metadata.js";
 import { encodeCacheTag, encodeCacheTags } from "../utils/encode-cache-tag.js";
+import { getRequestExecutionContext } from "./request-context.js";
 import type { RenderObservation } from "../server/cache-proof.js";
 
 // ---------------------------------------------------------------------------
@@ -57,6 +58,70 @@ export function _registerCacheContextAccessor(fn: () => CacheContextLike | null)
 }
 
 // ---------------------------------------------------------------------------
+// Optional request-context cache.
+//
+// When the request's ExecutionContext exposes a `.cache` object with a
+// `.purge({ tags })` method, vinext treats it as an outer HTTP-level cache
+// that sits in front of the inner CacheHandler. `revalidateTag()` /
+// `revalidatePath()` / `updateTag()` will fan out their tag invalidations
+// to it so the outer cache stays in sync with the inner store.
+//
+// This is intentionally generic — any runtime that puts a compatible
+// `cache.purge` on the ExecutionContext gets the integration for free. No
+// registration, no runtime-specific module.
+// ---------------------------------------------------------------------------
+
+/**
+ * Subset of the request-context cache shape vinext uses. A runtime sets
+ * `ctx.cache` on the ExecutionContext if it wants vinext to forward tag
+ * invalidations to its outer HTTP cache.
+ */
+export type RequestContextCache = {
+  purge(options: { tags?: string[] }): Promise<void>;
+};
+
+type ExecutionContextWithCache = {
+  cache?: unknown;
+  waitUntil(promise: Promise<unknown>): void;
+};
+
+function _getRequestContextCache(): RequestContextCache | null {
+  const ctx = getRequestExecutionContext() as ExecutionContextWithCache | null;
+  const cache = ctx?.cache;
+  if (
+    !cache ||
+    typeof cache !== "object" ||
+    typeof (cache as { purge?: unknown }).purge !== "function"
+  ) {
+    return null;
+  }
+  return cache as RequestContextCache;
+}
+
+/**
+ * Returns true when the current request's ExecutionContext exposes a
+ * compatible `ctx.cache.purge` method. Response builders use this to decide
+ * whether to emit headers (e.g. `Cache-Tag`) that are only meaningful when
+ * the outer cache is actually present to consume them.
+ */
+export function isRequestContextCacheAvailable(): boolean {
+  return _getRequestContextCache() !== null;
+}
+
+async function _purgeRequestContextCacheTags(tags: readonly string[]): Promise<void> {
+  if (tags.length === 0) return;
+  const cache = _getRequestContextCache();
+  if (!cache) return;
+  try {
+    await cache.purge({ tags: [...tags] });
+  } catch (err) {
+    // Outer cache failures must not break the revalidation that triggered
+    // them — the inner CacheHandler is the source of truth.
+    console.error("[vinext] request-context cache purge failed:", err);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // CacheHandler interface — matches Next.js 16's CacheHandler class shape.
 // Implement this to provide a custom cache backend.
 // ---------------------------------------------------------------------------
@@ -66,6 +131,12 @@ export type CacheHandlerValue = {
   age?: number;
   cacheState?: string;
   cacheControl?: CacheControlMetadata;
+  /**
+   * Tags stored alongside the cache entry. Optional because not all
+   * `CacheHandler` adapters surface them on read — when missing, callers
+   * fall back to deriving tags from request context (e.g. pathname).
+   */
+  tags?: string[];
   value: IncrementalCacheValue | null;
 };
 
@@ -240,6 +311,7 @@ export class MemoryCacheHandler implements CacheHandler {
         value: entry.value,
         cacheState: "stale",
         cacheControl: entry.cacheControl,
+        tags: entry.tags,
       };
     }
 
@@ -247,6 +319,7 @@ export class MemoryCacheHandler implements CacheHandler {
       lastModified: entry.lastModified,
       value: entry.value,
       cacheControl: entry.cacheControl,
+      tags: entry.tags,
     };
   }
 
@@ -324,7 +397,8 @@ export class MemoryCacheHandler implements CacheHandler {
 // ---------------------------------------------------------------------------
 
 export type { ExecutionContextLike } from "./request-context.js";
-export { runWithExecutionContext, getRequestExecutionContext } from "./request-context.js";
+export { runWithExecutionContext } from "./request-context.js";
+export { getRequestExecutionContext };
 
 // ---------------------------------------------------------------------------
 // Active cache handler — the singleton used by next/cache API functions.
@@ -401,7 +475,11 @@ export async function revalidateTag(
   if (!profile || !durations || durations.expire === 0) {
     markActionRevalidation(ACTION_DID_REVALIDATE_STATIC_AND_DYNAMIC);
   }
-  await _getActiveHandler().revalidateTag(encodeCacheTag(tag), durations);
+  const encodedTag = encodeCacheTag(tag);
+  await Promise.all([
+    _getActiveHandler().revalidateTag(encodedTag, durations),
+    _purgeRequestContextCacheTags([encodedTag]),
+  ]);
 }
 
 /**
@@ -424,7 +502,15 @@ export async function revalidatePath(path: string, type?: "page" | "layout"): Pr
   // Strip trailing slash so root "/" becomes "" — avoids double-slash in _N_T_//layout
   const stem = path.endsWith("/") ? path.slice(0, -1) : path;
   const tag = type ? `_N_T_${stem}/${type}` : `_N_T_${stem || "/"}`;
-  await _getActiveHandler().revalidateTag(encodeCacheTag(tag));
+  const encodedTag = encodeCacheTag(tag);
+  // Purge the bare path tag from outer caches in addition to the `_N_T_`
+  // prefixed form. Responses emit the path itself as a Cache-Tag (see
+  // `buildAppPageCacheTags`), and that is what `ctx.cache.purge` matches on.
+  const outerTags = type ? [encodedTag] : [encodedTag, encodeCacheTag(stem || "/")];
+  await Promise.all([
+    _getActiveHandler().revalidateTag(encodedTag),
+    _purgeRequestContextCacheTags(outerTags),
+  ]);
 }
 
 /**
@@ -449,7 +535,11 @@ export function refresh(): void {
 export async function updateTag(tag: string): Promise<void> {
   markActionRevalidation(ACTION_DID_REVALIDATE_STATIC_AND_DYNAMIC);
   // Expire the tag immediately (same as revalidateTag without SWR)
-  await _getActiveHandler().revalidateTag(encodeCacheTag(tag));
+  const encodedTag = encodeCacheTag(tag);
+  await Promise.all([
+    _getActiveHandler().revalidateTag(encodedTag),
+    _purgeRequestContextCacheTags([encodedTag]),
+  ]);
 }
 
 /**

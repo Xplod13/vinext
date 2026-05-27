@@ -210,15 +210,16 @@ Add new test pages to fixtures, not to examples. Examples are for user-facing de
 
 The `examples/` directory contains real-world Next.js apps ported to run on vinext. These are deployed to Cloudflare Workers on every push to main (see `.github/workflows/deploy-examples.yml`).
 
-| Example                   | Type                               | URL                                          |
-| ------------------------- | ---------------------------------- | -------------------------------------------- |
-| `app-router-cloudflare`   | App Router basics                  | `app-router-cloudflare.vinext.workers.dev`   |
-| `pages-router-cloudflare` | Pages Router basics                | `pages-router-cloudflare.vinext.workers.dev` |
-| `app-router-playground`   | Next.js playground (MDX, Tailwind) | `app-router-playground.vinext.workers.dev`   |
-| `realworld-api-rest`      | RealWorld spec (Pages Router)      | `realworld-api-rest.vinext.workers.dev`      |
-| `nextra-docs-template`    | Nextra docs site (MDX, App Router) | `nextra-docs-template.vinext.workers.dev`    |
-| `benchmarks`              | Performance benchmarks             | `benchmarks.vinext.workers.dev`              |
-| `hackernews`              | HN clone (App Router, RSC)         | `hackernews.vinext.workers.dev`              |
+| Example                    | Type                               | URL                                           |
+| -------------------------- | ---------------------------------- | --------------------------------------------- |
+| `app-router-cloudflare`    | App Router basics                  | `app-router-cloudflare.vinext.workers.dev`    |
+| `pages-router-cloudflare`  | Pages Router basics                | `pages-router-cloudflare.vinext.workers.dev`  |
+| `app-router-playground`    | Next.js playground (MDX, Tailwind) | `app-router-playground.vinext.workers.dev`    |
+| `realworld-api-rest`       | RealWorld spec (Pages Router)      | `realworld-api-rest.vinext.workers.dev`       |
+| `nextra-docs-template`     | Nextra docs site (MDX, App Router) | `nextra-docs-template.vinext.workers.dev`     |
+| `benchmarks`               | Performance benchmarks             | `benchmarks.vinext.workers.dev`               |
+| `hackernews`               | HN clone (App Router, RSC)         | `hackernews.vinext.workers.dev`               |
+| `workers-cache-cloudflare` | ctx.cache route-cache demo         | `workers-cache-cloudflare.vinext.workers.dev` |
 
 #### Adding a New Example
 

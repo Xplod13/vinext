@@ -86,6 +86,7 @@ export async function readAppRouteHandlerCacheResponse(
         buildRouteHandlerCachedResponse(cachedValue, {
           cacheState: "HIT",
           cacheControl: cached?.value.cacheControl,
+          cacheTags: cached?.value.tags,
           expireSeconds: options.expireSeconds,
           isHead: options.isAutoHead,
           revalidateSeconds: options.revalidateSeconds,
@@ -150,6 +151,7 @@ export async function readAppRouteHandlerCacheResponse(
         buildRouteHandlerCachedResponse(staleValue, {
           cacheState: "STALE",
           cacheControl: cached.value.cacheControl,
+          cacheTags: cached.value.tags,
           expireSeconds: options.expireSeconds,
           isHead: options.isAutoHead,
           revalidateSeconds: options.revalidateSeconds,

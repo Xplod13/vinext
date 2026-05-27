@@ -1,4 +1,8 @@
-import type { CachedAppPageValue, CacheControlMetadata } from "vinext/shims/cache";
+import {
+  isRequestContextCacheAvailable,
+  type CachedAppPageValue,
+  type CacheControlMetadata,
+} from "vinext/shims/cache";
 import {
   VINEXT_RSC_CONTENT_TYPE,
   VINEXT_RSC_VARY_HEADER,
@@ -7,7 +11,7 @@ import {
 import { buildCachedRevalidateCacheControl } from "./cache-control.js";
 import { VINEXT_MOUNTED_SLOTS_HEADER } from "./headers.js";
 import { applyEdgeRuntimeHeader } from "./app-page-response.js";
-import { setCacheStateHeaders } from "./cache-headers.js";
+import { applyCacheTagHeader, setCacheStateHeaders } from "./cache-headers.js";
 import { buildAppPageCacheValue, type ISRCacheEntry } from "./isr-cache.js";
 import { mergeMiddlewareResponseHeaders } from "./middleware-response-headers.js";
 import { readStreamAsText } from "../utils/text-stream.js";
@@ -68,6 +72,7 @@ type AppPageCacheRenderResult = {
 type BuildAppPageCachedResponseOptions = {
   cacheControl?: CacheControlMetadata;
   cacheState: "HIT" | "STALE";
+  cacheTags?: readonly string[];
   expireSeconds?: number;
   isEdgeRuntime?: boolean;
   isRscRequest: boolean;
@@ -198,6 +203,7 @@ function buildAppPageCacheControl(
 function buildAppPageCachedHeaders(options: {
   cacheControl: string;
   cacheState: BuildAppPageCachedResponseOptions["cacheState"];
+  cacheTags?: readonly string[];
   contentType: string;
   isEdgeRuntime?: boolean;
   middlewareHeaders?: Headers | null;
@@ -213,6 +219,14 @@ function buildAppPageCachedHeaders(options: {
 
   if (options.mountedSlotsHeader) {
     headers.set(VINEXT_MOUNTED_SLOTS_HEADER, options.mountedSlotsHeader);
+  }
+
+  // Only emit Cache-Tag when the request-context cache that would consume it
+  // is actually present. Skipping when absent keeps the response surface
+  // clean for runtimes that don't have an outer cache and avoids advertising
+  // tags that no layer will act on.
+  if (options.cacheTags && options.cacheTags.length > 0 && isRequestContextCacheAvailable()) {
+    applyCacheTagHeader(headers, options.cacheTags);
   }
 
   mergeMiddlewareResponseHeaders(headers, options.middlewareHeaders ?? null);
@@ -274,6 +288,7 @@ export function buildAppPageCachedResponse(
     const rscHeaders = buildAppPageCachedHeaders({
       cacheControl,
       cacheState: options.cacheState,
+      cacheTags: options.cacheTags,
       contentType: VINEXT_RSC_CONTENT_TYPE,
       isEdgeRuntime: options.isEdgeRuntime,
       middlewareHeaders: options.middlewareHeaders,
@@ -294,6 +309,7 @@ export function buildAppPageCachedResponse(
   const htmlHeaders = buildAppPageCachedHeaders({
     cacheControl,
     cacheState: options.cacheState,
+    cacheTags: options.cacheTags,
     contentType: "text/html; charset=utf-8",
     isEdgeRuntime: options.isEdgeRuntime,
     middlewareHeaders: options.middlewareHeaders,
@@ -332,6 +348,7 @@ export async function readAppPageCacheResponse(
       const hitResponse = buildAppPageCachedResponse(cachedValue, {
         cacheState: "HIT",
         cacheControl: cached?.value.cacheControl,
+        cacheTags: cached?.value.tags,
         expireSeconds: options.expireSeconds,
         isEdgeRuntime: options.isEdgeRuntime,
         isRscRequest: options.isRscRequest,
@@ -425,6 +442,7 @@ export async function readAppPageCacheResponse(
       const staleResponse = buildAppPageCachedResponse(cachedValue, {
         cacheState: "STALE",
         cacheControl: cached.value.cacheControl,
+        cacheTags: cached.value.tags,
         expireSeconds: options.expireSeconds,
         isEdgeRuntime: options.isEdgeRuntime,
         isRscRequest: options.isRscRequest,
