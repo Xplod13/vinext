@@ -133,7 +133,14 @@ export function CacheStatusProbe({ path }: { path: string }) {
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch(path, { method: "GET" });
+      // `cache: 'no-store'` bypasses the browser HTTP cache. With
+      // `max-age=60` on cacheable responses, consecutive probes within a
+      // minute would otherwise be served from the browser cache and never
+      // talk to the edge — making the probe useless for observing outer
+      // cache behaviour. Workers Cache itself is unaffected: confirmed
+      // empirically that both probe and navigation responses still report
+      // `cf-cache-status: HIT` from the same edge entry.
+      const res = await fetch(path, { method: "GET", cache: "no-store" });
       const markers = await extractRenderMarkers(res);
       setState({
         status: res.status,
