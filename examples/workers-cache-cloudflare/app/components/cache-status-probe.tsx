@@ -139,16 +139,25 @@ export function CacheStatusProbe({
     setBusy(true);
     setError(null);
     try {
+      // Mirror what a browser navigation would send so the probe lands in
+      // the same Vary bucket as the original page load. Our responses set
+      // `Vary: Accept, ...`, which means Workers Cache keys separate entries
+      // per Accept value. Without this, `fetch()`'s default `Accept: */*`
+      // would hit a *different* cached entry than the one the user
+      // navigated into — both might be cache HITs, but they'd carry
+      // different render-ids and the probe would wrongly conclude SSR ran.
+      const acceptForHtml =
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8";
       const res = await fetch(path, {
         method: "GET",
         // Intentionally NOT passing `cache: 'no-store'`: that adds
-        // `Cache-Control: no-cache` to the request, which Workers Cache (and
-        // most HTTP caches) honours by bypassing and re-running the origin.
-        // The whole point of this probe is to observe what the outer cache
-        // actually serves, so we let the request flow through normally.
-        // The responses we probe carry `s-maxage=…` without `max-age`, so
-        // the browser HTTP cache won't store them anyway.
-        headers: { "x-probe": "1" },
+        // `Cache-Control: no-cache` to the request, which Workers Cache
+        // honours by bypassing and re-running the origin. The whole point
+        // of this probe is to observe what the outer cache actually serves.
+        headers: {
+          "x-probe": "1",
+          Accept: acceptForHtml,
+        },
       });
       const markers = await extractRenderMarkers(res);
       setState({
