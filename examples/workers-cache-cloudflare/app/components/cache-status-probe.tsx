@@ -141,9 +141,13 @@ export function CacheStatusProbe({
     try {
       const res = await fetch(path, {
         method: "GET",
-        // Skip the browser HTTP cache so the response we see is the one the
-        // outer Workers Cache (or origin) actually returned.
-        cache: "no-store",
+        // Intentionally NOT passing `cache: 'no-store'`: that adds
+        // `Cache-Control: no-cache` to the request, which Workers Cache (and
+        // most HTTP caches) honours by bypassing and re-running the origin.
+        // The whole point of this probe is to observe what the outer cache
+        // actually serves, so we let the request flow through normally.
+        // The responses we probe carry `s-maxage=…` without `max-age`, so
+        // the browser HTTP cache won't store them anyway.
         headers: { "x-probe": "1" },
       });
       const markers = await extractRenderMarkers(res);
@@ -174,6 +178,22 @@ export function CacheStatusProbe({
   useEffect(() => {
     void probe();
   }, [probe]);
+
+  // Re-fire the probe whenever the revalidate panel reports a successful
+  // invalidation so the user can see the cache verdict flip in real time
+  // without clicking Re-probe themselves.
+  useEffect(() => {
+    function onRevalidated(event: Event) {
+      const detail = (event as CustomEvent<{ path?: string } | undefined>).detail;
+      // Only re-probe when the revalidation targets this probe's path (or
+      // wasn't path-scoped — `revalidateTag` doesn't know the path).
+      if (!detail || !detail.path || detail.path === path) {
+        void probe();
+      }
+    }
+    window.addEventListener("vinext-revalidated", onRevalidated);
+    return () => window.removeEventListener("vinext-revalidated", onRevalidated);
+  }, [path, probe]);
 
   const cfStatus = state?.cfCacheStatus ?? null;
 

@@ -40,6 +40,14 @@ export function RevalidateControls({
           message: `Revalidated ${kind}=${value}`,
           detail: `Inner cache cleared and ctx.cache.purge invoked for the matching Cache-Tag entries.`,
         });
+        // Tell any active probes to re-fire so the user can immediately see
+        // the cache verdict flip from HIT to MISS (or render-id from same
+        // to changed). Scoped to the path when we know it.
+        window.dispatchEvent(
+          new CustomEvent("vinext-revalidated", {
+            detail: kind === "path" ? { path: value } : undefined,
+          }),
+        );
       } else {
         setResult({
           ok: false,
