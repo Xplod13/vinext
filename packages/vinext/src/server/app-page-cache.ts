@@ -509,7 +509,7 @@ export function finalizeAppPageHtmlCacheResponse(
   // When an outer request-context cache (e.g. Workers Cache) is present,
   // route-level ISR is owned entirely by that layer (see isr-cache.ts).
   // Skip the no-store-on-first-render safety dance and the inner-cache
-  // write so the route's declared `Cache-Control: s-maxage=…` reaches the
+  // write so the route's declared `Cache-Control: max-age=…` reaches the
   // outer cache and gets honoured. Routes that opt into ISR are expected
   // not to read request APIs during render — same contract as standard
   // Next.js ISR.

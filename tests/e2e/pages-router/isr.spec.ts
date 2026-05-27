@@ -83,12 +83,12 @@ test.describe("Pages Router ISR", () => {
     expect(hitRes.headers()["x-vinext-cache"]).toBe("HIT");
   });
 
-  test("Cache-Control header includes s-maxage and stale-while-revalidate", async ({ request }) => {
+  test("Cache-Control header includes max-age and stale-while-revalidate", async ({ request }) => {
     const res = await request.get(`${BASE}/isr-test`);
     const cc = res.headers()["cache-control"];
 
     expect(cc).toBeDefined();
-    expect(cc).toContain("s-maxage=1");
+    expect(cc).toContain("max-age=1");
     expect(cc).toContain("stale-while-revalidate");
   });
 

@@ -70,12 +70,12 @@ test.describe("App Router ISR", () => {
     expect(hitRes.headers()["x-vinext-cache"]).toBe("HIT");
   });
 
-  test("Cache-Control header includes s-maxage and stale-while-revalidate", async ({ request }) => {
+  test("Cache-Control header includes max-age and stale-while-revalidate", async ({ request }) => {
     const res = await request.get(`${BASE}/isr-test`);
     const cc = res.headers()["cache-control"];
 
     expect(cc).toBeDefined();
-    expect(cc).toContain("s-maxage=1");
+    expect(cc).toContain("max-age=1");
     expect(cc).toContain("stale-while-revalidate");
   });
 
@@ -107,7 +107,7 @@ test.describe("App Router ISR", () => {
     const cc = res.headers()["cache-control"];
 
     expect(cc).toBeDefined();
-    expect(cc).toContain("s-maxage=60");
+    expect(cc).toContain("max-age=60");
     expect(cc).toContain("stale-while-revalidate");
   });
 });
@@ -189,9 +189,11 @@ test.describe("ISR dynamicParams cache headers", () => {
 
     const cc = res.headers()["cache-control"];
     if (cc) {
-      // Should not have s-maxage or stale-while-revalidate on 404
-      expect(cc).not.toContain("s-maxage");
+      // Should not advertise positive caching on a 404 — `max-age=0` is
+      // allowed as part of an explicit never-cache header, but a positive
+      // s/maxage value or any stale-while-revalidate window is not.
       expect(cc).not.toContain("stale-while-revalidate");
+      expect(cc).toMatch(/no-cache|no-store|max-age=0/);
     }
   });
 });

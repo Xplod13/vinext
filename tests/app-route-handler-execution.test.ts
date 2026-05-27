@@ -183,7 +183,7 @@ describe("app route handler execution helpers", () => {
 
     expect(response.status).toBe(202);
     expect(response.headers.get("cache-control")).toBe(
-      "public, s-maxage=60, stale-while-revalidate=240",
+      "public, max-age=60, stale-while-revalidate=240",
     );
     expect(response.headers.get("x-vinext-cache")).toBe("MISS");
     expect(response.headers.get("x-middleware")).toBe("present");

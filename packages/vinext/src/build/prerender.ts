@@ -1448,16 +1448,16 @@ function resolveRenderedCacheControl(
   cacheControl: string,
   fallbackExpireSeconds: number,
 ): { expire: number; revalidate?: number } {
-  const sMaxage = parseCacheControlSeconds(cacheControl, "s-maxage");
+  const maxAge = parseCacheControlSeconds(cacheControl, "max-age");
   const staleWhileRevalidate = parseCacheControlSeconds(cacheControl, "stale-while-revalidate");
   const revalidate =
-    requestCacheLife.revalidate ?? (staleWhileRevalidate === undefined ? undefined : sMaxage);
+    requestCacheLife.revalidate ?? (staleWhileRevalidate === undefined ? undefined : maxAge);
   return {
     expire:
       requestCacheLife.expire ??
       resolveRenderedExpireSeconds({
         fallbackExpireSeconds,
-        sMaxage,
+        maxAge,
         staleWhileRevalidate,
       }),
     ...(revalidate === undefined ? {} : { revalidate }),
@@ -1466,15 +1466,15 @@ function resolveRenderedCacheControl(
 
 function resolveRenderedExpireSeconds(options: {
   fallbackExpireSeconds: number;
-  sMaxage?: number;
+  maxAge?: number;
   staleWhileRevalidate?: number;
 }): number {
-  const { fallbackExpireSeconds, sMaxage, staleWhileRevalidate } = options;
-  if (sMaxage === undefined || staleWhileRevalidate === undefined) {
+  const { fallbackExpireSeconds, maxAge, staleWhileRevalidate } = options;
+  if (maxAge === undefined || staleWhileRevalidate === undefined) {
     return fallbackExpireSeconds;
   }
 
-  return sMaxage + staleWhileRevalidate;
+  return maxAge + staleWhileRevalidate;
 }
 
 function parseCacheControlSeconds(cacheControl: string, directive: string): number | undefined {

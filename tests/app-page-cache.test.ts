@@ -91,7 +91,7 @@ describe("app page cache helpers", () => {
     expect(htmlResponse?.status).toBe(201);
     expect(htmlResponse?.headers.get("content-type")).toBe("text/html; charset=utf-8");
     expect(htmlResponse?.headers.get("cache-control")).toBe(
-      "public, s-maxage=60, stale-while-revalidate",
+      "public, max-age=60, stale-while-revalidate",
     );
     expect(htmlResponse?.headers.get("x-vinext-cache")).toBe("HIT");
     // Ported from Next.js: test/e2e/app-dir/app-root-params-getters/generate-static-params.test.ts
@@ -109,7 +109,7 @@ describe("app page cache helpers", () => {
     );
     expect(rscResponse?.headers.get("content-type")).toBe("text/x-component");
     expect(rscResponse?.headers.get("cache-control")).toBe(
-      "public, s-maxage=0, stale-while-revalidate",
+      "public, max-age=0, stale-while-revalidate",
     );
     expect(rscResponse?.headers.get(VINEXT_RSC_COMPATIBILITY_ID_HEADER)).toBe("compat-a");
     expect(rscResponse?.headers.get("x-nextjs-cache")).toBe("STALE");
@@ -241,7 +241,7 @@ describe("app page cache helpers", () => {
     });
 
     expect(response?.headers.get("cache-control")).toBe(
-      "public, s-maxage=60, stale-while-revalidate=240",
+      "public, max-age=60, stale-while-revalidate=240",
     );
   });
 
@@ -253,7 +253,7 @@ describe("app page cache helpers", () => {
     });
 
     expect(response?.headers.get("cache-control")).toBe(
-      "public, s-maxage=31536000, stale-while-revalidate",
+      "public, max-age=31536000, stale-while-revalidate",
     );
   });
 
@@ -283,7 +283,7 @@ describe("app page cache helpers", () => {
     });
 
     expect(response?.headers.get("cache-control")).toBe(
-      "public, s-maxage=0, stale-while-revalidate",
+      "public, max-age=0, stale-while-revalidate",
     );
   });
 
@@ -798,7 +798,7 @@ describe("app page cache helpers", () => {
         status: 201,
         headers: {
           "Content-Type": "text/html; charset=utf-8",
-          "Cache-Control": "public, s-maxage=60, stale-while-revalidate",
+          "Cache-Control": "public, max-age=60, stale-while-revalidate",
           Vary: "RSC, Accept",
           "X-Vinext-Cache": "MISS",
         },
@@ -901,7 +901,7 @@ describe("app page cache helpers", () => {
       new Response("<h1>personalized</h1>", {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
-          "Cache-Control": "public, s-maxage=60, stale-while-revalidate",
+          "Cache-Control": "public, max-age=60, stale-while-revalidate",
           Vary: "RSC, Accept",
           "X-Vinext-Cache": "MISS",
         },
@@ -931,7 +931,7 @@ describe("app page cache helpers", () => {
       new Response("<h1>personalized</h1>", {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
-          "Cache-Control": "public, s-maxage=60, stale-while-revalidate",
+          "Cache-Control": "public, max-age=60, stale-while-revalidate",
           Vary: "RSC, Accept",
           "X-Vinext-Cache": "MISS",
         },
@@ -1047,7 +1047,7 @@ describe("app page cache helpers", () => {
       new Response("flight", {
         headers: {
           "Content-Type": "text/x-component",
-          "Cache-Control": "public, s-maxage=60, stale-while-revalidate",
+          "Cache-Control": "public, max-age=60, stale-while-revalidate",
           "X-Vinext-Cache": "MISS",
         },
       }),

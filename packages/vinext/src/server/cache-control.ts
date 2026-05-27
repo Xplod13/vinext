@@ -4,9 +4,9 @@ export const NEVER_CACHE_CONTROL = "private, no-cache, no-store, max-age=0, must
 // directive Cloudflare's Workers Cache (and most CDNs) look for as an
 // explicit opt-in; without it some caches fall back to heuristics or
 // conservative defaults.
-export const STATIC_CACHE_CONTROL = "public, s-maxage=31536000, stale-while-revalidate";
+export const STATIC_CACHE_CONTROL = "public, max-age=31536000, stale-while-revalidate";
 
-const STALE_REVALIDATE_CACHE_CONTROL = "public, s-maxage=0, stale-while-revalidate";
+const STALE_REVALIDATE_CACHE_CONTROL = "public, max-age=0, stale-while-revalidate";
 
 export const NO_STORE_CACHE_CONTROL = "no-store, must-revalidate";
 
@@ -23,16 +23,16 @@ export function buildRevalidateCacheControl(
   expireSeconds?: number,
 ): string {
   if (expireSeconds === undefined) {
-    return `public, s-maxage=${revalidateSeconds}, stale-while-revalidate`;
+    return `public, max-age=${revalidateSeconds}, stale-while-revalidate`;
   }
 
   // `expire <= revalidate` is a zero-width stale window: downstream caches
-  // should refetch after s-maxage instead of serving stale.
+  // should refetch after max-age instead of serving stale.
   if (revalidateSeconds >= expireSeconds) {
-    return `public, s-maxage=${revalidateSeconds}`;
+    return `public, max-age=${revalidateSeconds}`;
   }
 
-  return `public, s-maxage=${revalidateSeconds}, stale-while-revalidate=${
+  return `public, max-age=${revalidateSeconds}, stale-while-revalidate=${
     expireSeconds - revalidateSeconds
   }`;
 }
@@ -41,7 +41,7 @@ export function buildRevalidateCacheControl(
  * Builds Cache-Control for ISR cache reads. HIT responses and STALE responses
  * with stored expire metadata use the same route policy because Next.js derives
  * this header from cache-control metadata, not from the cache hit/stale state.
- * STALE entries without expire metadata keep vinext's legacy `s-maxage=0`
+ * STALE entries without expire metadata keep vinext's legacy `max-age=0`
  * fallback so older cache entries are not treated as newly fresh downstream.
  */
 export function buildCachedRevalidateCacheControl(

@@ -597,7 +597,7 @@ describe("app page render lifecycle", () => {
     });
 
     expect(response.headers.get("cache-control")).toBe(
-      "public, s-maxage=1, stale-while-revalidate=2",
+      "public, max-age=1, stale-while-revalidate=2",
     );
     expect(response.headers.get("x-vinext-cache")).toBeNull();
     await expect(response.text()).resolves.toBe("<html>page</html>");
@@ -636,7 +636,7 @@ describe("app page render lifecycle", () => {
     });
 
     expect(response.headers.get("cache-control")).toBe(
-      "public, s-maxage=1, stale-while-revalidate=2",
+      "public, max-age=1, stale-while-revalidate=2",
     );
     await expect(response.text()).resolves.toBe("<html>page</html>");
     expect(common.isrSet).not.toHaveBeenCalled();
@@ -676,7 +676,7 @@ describe("app page render lifecycle", () => {
       revalidateSeconds: null,
     });
 
-    expect(response.headers.get("cache-control")).toBe("public, s-maxage=1");
+    expect(response.headers.get("cache-control")).toBe("public, max-age=1");
     await expect(response.text()).resolves.toBe("<html>page</html>");
     expect(consumeRequestCacheLife()).toEqual({ revalidate: 1, expire: 1 });
   });
@@ -712,7 +712,7 @@ describe("app page render lifecycle", () => {
     });
 
     expect(response.headers.get("cache-control")).toBe(
-      "public, s-maxage=1, stale-while-revalidate=2",
+      "public, max-age=1, stale-while-revalidate=2",
     );
     expect(response.headers.get("x-vinext-cache")).toBe("MISS");
     await expect(response.text()).resolves.toBe("<html>page</html>");

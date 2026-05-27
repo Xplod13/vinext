@@ -39,7 +39,7 @@ describe("app route handler response helpers", () => {
       status: 200,
       headers: {
         "content-type": "text/plain",
-        "cache-control": "public, s-maxage=60, stale-while-revalidate",
+        "cache-control": "public, max-age=60, stale-while-revalidate",
         "x-response": "app",
       },
     });
@@ -102,7 +102,7 @@ describe("app route handler response helpers", () => {
     });
     expect(hit.headers.get("x-vinext-cache")).toBe("HIT");
     expect(hit.headers.get("x-nextjs-cache")).toBe("HIT");
-    expect(hit.headers.get("cache-control")).toBe("public, s-maxage=60, stale-while-revalidate");
+    expect(hit.headers.get("cache-control")).toBe("public, max-age=60, stale-while-revalidate");
     await expect(hit.text()).resolves.toBe("from-cache");
 
     const staleHead = buildRouteHandlerCachedResponse(cachedValue, {
@@ -114,7 +114,7 @@ describe("app route handler response helpers", () => {
     expect(staleHead.headers.get("x-vinext-cache")).toBe("STALE");
     expect(staleHead.headers.get("x-nextjs-cache")).toBe("STALE");
     expect(staleHead.headers.get("cache-control")).toBe(
-      "public, s-maxage=0, stale-while-revalidate",
+      "public, max-age=0, stale-while-revalidate",
     );
     await expect(staleHead.text()).resolves.toBe("");
   });
@@ -131,7 +131,7 @@ describe("app route handler response helpers", () => {
     });
 
     expect(response.headers.get("cache-control")).toBe(
-      "public, s-maxage=15, stale-while-revalidate=285",
+      "public, max-age=15, stale-while-revalidate=285",
     );
   });
 
@@ -144,7 +144,7 @@ describe("app route handler response helpers", () => {
     });
     expect(response.headers.get("x-vinext-cache")).toBe("HIT");
     expect(response.headers.get("cache-control")).toBe(
-      "public, s-maxage=31536000, stale-while-revalidate",
+      "public, max-age=31536000, stale-while-revalidate",
     );
   });
 
@@ -152,7 +152,7 @@ describe("app route handler response helpers", () => {
     const response = new Response("fresh");
     applyRouteHandlerRevalidateHeader(response, Infinity);
     expect(response.headers.get("cache-control")).toBe(
-      "public, s-maxage=31536000, stale-while-revalidate",
+      "public, max-age=31536000, stale-while-revalidate",
     );
   });
 
@@ -161,7 +161,7 @@ describe("app route handler response helpers", () => {
       status: 201,
       headers: {
         "content-type": "text/plain",
-        "cache-control": "public, s-maxage=60, stale-while-revalidate",
+        "cache-control": "public, max-age=60, stale-while-revalidate",
         "x-vinext-cache": "MISS",
         "x-nextjs-cache": "MISS",
         "x-middleware-set-cookie": "internal=1; Path=/",
@@ -309,7 +309,7 @@ describe("app route handler response helpers", () => {
     markRouteHandlerCacheMiss(response);
 
     expect(response.headers.get("cache-control")).toBe(
-      "public, s-maxage=30, stale-while-revalidate",
+      "public, max-age=30, stale-while-revalidate",
     );
     expect(response.headers.get("x-vinext-cache")).toBe("MISS");
   });
@@ -341,7 +341,7 @@ describe("app route handler response helpers", () => {
   it("emits a no-store Cache-Control for revalidate = 0 route handlers", () => {
     // A handler exporting `revalidate = 0` opts out of caching entirely.
     // The Cache-Control must tell browsers and CDNs never to store the
-    // response. Emitting `s-maxage=0, stale-while-revalidate` (the SWR
+    // response. Emitting `max-age=0, stale-while-revalidate` (the SWR
     // template) would still permit intermediate caches to serve stale
     // copies, which is the exact opposite of the author's intent.
     // The exact string matches Next.js's own cache-control helper:

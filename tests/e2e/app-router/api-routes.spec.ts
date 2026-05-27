@@ -264,15 +264,15 @@ test.describe("Route Handler HTTP Methods (OpenNext compat)", () => {
  * Tests: ON-3 #13-14 in TRACKING.md
  *
  * In Next.js, a GET-only route handler with `export const revalidate = N`
- * receives Cache-Control: s-maxage=N, stale-while-revalidate.
+ * receives Cache-Control: max-age=N, stale-while-revalidate.
  */
 test.describe("Route Handler Cache Headers (OpenNext compat)", () => {
   // Ref: opennextjs-cloudflare methods.test.ts — static GET cache headers
-  test("static GET route handler has s-maxage Cache-Control", async ({ request }) => {
+  test("static GET route handler has max-age Cache-Control", async ({ request }) => {
     const res = await request.get(`${BASE}/api/static-data`);
     expect(res.status()).toBe(200);
     const cacheControl = res.headers()["cache-control"];
-    expect(cacheControl).toContain("s-maxage=1");
+    expect(cacheControl).toContain("max-age=1");
     expect(cacheControl).toContain("stale-while-revalidate");
   });
 

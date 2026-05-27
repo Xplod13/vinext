@@ -654,7 +654,7 @@ export function createSSRHandler(
             const hitHeaders: Record<string, string> = {
               "Content-Type": "text/html",
               ...buildCacheStateHeaders("HIT"),
-              "Cache-Control": `public, s-maxage=${revalidateSecs}, stale-while-revalidate`,
+              "Cache-Control": `public, max-age=${revalidateSecs}, stale-while-revalidate`,
             };
             if (earlyFontLinkHeader) hitHeaders["Link"] = earlyFontLinkHeader;
             res.writeHead(200, hitHeaders);
@@ -811,7 +811,7 @@ export function createSSRHandler(
             const staleHeaders: Record<string, string> = {
               "Content-Type": "text/html",
               ...buildCacheStateHeaders("STALE"),
-              "Cache-Control": `public, s-maxage=${revalidateSecs}, stale-while-revalidate`,
+              "Cache-Control": `public, max-age=${revalidateSecs}, stale-while-revalidate`,
             };
             if (earlyFontLinkHeader) staleHeaders["Link"] = earlyFontLinkHeader;
             res.writeHead(200, staleHeaders);
@@ -1091,7 +1091,7 @@ hydrate();
             extraHeaders["Cache-Control"] = "no-store, must-revalidate";
           } else {
             extraHeaders["Cache-Control"] =
-              `public, s-maxage=${isrRevalidateSeconds}, stale-while-revalidate`;
+              `public, max-age=${isrRevalidateSeconds}, stale-while-revalidate`;
             Object.assign(extraHeaders, buildCacheStateHeaders("MISS"));
           }
         }

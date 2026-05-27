@@ -330,25 +330,27 @@ describe("Next.js compat: app-routes", () => {
 
   // ── Route segment config: revalidate ────────────────────────
   // Next.js: GET-only route handlers with `export const revalidate = N`
-  // get Cache-Control: s-maxage=N, stale-while-revalidate
+  // get Cache-Control: max-age=N, stale-while-revalidate
   // Fixture: /api/static-data exports revalidate = 1
 
-  it("sets Cache-Control s-maxage from route handler revalidate config", async () => {
+  it("sets Cache-Control max-age from route handler revalidate config", async () => {
     const res = await fetch(`${baseUrl}/api/static-data`);
     expect(res.status).toBe(200);
     const cacheControl = res.headers.get("cache-control");
-    expect(cacheControl).toContain("public, s-maxage=1");
+    expect(cacheControl).toContain("public, max-age=1");
     expect(cacheControl).toContain("stale-while-revalidate");
   });
 
-  it("does not set s-maxage when revalidate is 0", async () => {
-    // revalidate=0 means "never cache" in Next.js — no s-maxage header
+  it("does not set positive max-age when revalidate is 0", async () => {
+    // revalidate=0 means "never cache" in Next.js — the header may set
+    // `max-age=0, must-revalidate` to be explicit, but it must not advertise
+    // positive cacheability via `stale-while-revalidate`.
     const res = await fetch(`${baseUrl}/api/no-cache`);
     expect(res.status).toBe(200);
     const cacheControl = res.headers.get("cache-control");
-    // Should either be null or not contain s-maxage
     if (cacheControl) {
-      expect(cacheControl).not.toContain("s-maxage");
+      expect(cacheControl).not.toContain("stale-while-revalidate");
+      expect(cacheControl).toMatch(/no-cache|no-store|max-age=0/);
     }
   });
 
@@ -360,7 +362,7 @@ describe("Next.js compat: app-routes", () => {
     expect(cacheControl).toBe("public, max-age=300");
   });
 
-  it("does not set s-maxage when a revalidated GET handler reads request-specific data", async () => {
+  it("does not set positive max-age when a revalidated GET handler reads request-specific data", async () => {
     const res = await fetch(`${baseUrl}/api/dynamic-request-data`, {
       headers: {
         "x-test-ping": "pong",
@@ -376,8 +378,8 @@ describe("Next.js compat: app-routes", () => {
 
     const cacheControl = res.headers.get("cache-control");
     if (cacheControl) {
-      expect(cacheControl).not.toContain("s-maxage");
       expect(cacheControl).not.toContain("stale-while-revalidate");
+      expect(cacheControl).toMatch(/no-cache|no-store|max-age=0/);
     }
   });
 

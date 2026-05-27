@@ -7,45 +7,45 @@ import {
 describe("cache-control helpers", () => {
   it("uses Next.js expire minus revalidate for finite SWR windows", () => {
     expect(buildRevalidateCacheControl(60, 300)).toBe(
-      "public, s-maxage=60, stale-while-revalidate=240",
+      "public, max-age=60, stale-while-revalidate=240",
     );
   });
 
   it("omits stale-while-revalidate when expire does not exceed revalidate", () => {
-    expect(buildRevalidateCacheControl(300, 300)).toBe("public, s-maxage=300");
+    expect(buildRevalidateCacheControl(300, 300)).toBe("public, max-age=300");
   });
 
   it("preserves vinext's legacy unbounded SWR header when expire is unknown", () => {
-    expect(buildRevalidateCacheControl(60)).toBe("public, s-maxage=60, stale-while-revalidate");
+    expect(buildRevalidateCacheControl(60)).toBe("public, max-age=60, stale-while-revalidate");
   });
 
   it("uses route policy for STALE cached responses when expire is known", () => {
     expect(buildCachedRevalidateCacheControl("STALE", 60, 300)).toBe(
-      "public, s-maxage=60, stale-while-revalidate=240",
+      "public, max-age=60, stale-while-revalidate=240",
     );
   });
 
   it("uses route policy for HIT cached responses when expire is known", () => {
     expect(buildCachedRevalidateCacheControl("HIT", 60, 300)).toBe(
-      "public, s-maxage=60, stale-while-revalidate=240",
+      "public, max-age=60, stale-while-revalidate=240",
     );
   });
 
   it("uses static cache-control for cached indefinite responses", () => {
     expect(buildCachedRevalidateCacheControl("HIT", Infinity)).toBe(
-      "public, s-maxage=31536000, stale-while-revalidate",
+      "public, max-age=31536000, stale-while-revalidate",
     );
   });
 
   it("preserves legacy STALE cached response headers when expire is unknown", () => {
     expect(buildCachedRevalidateCacheControl("STALE", 60)).toBe(
-      "public, s-maxage=0, stale-while-revalidate",
+      "public, max-age=0, stale-while-revalidate",
     );
   });
 
   it("keeps the full expire window when revalidate is zero", () => {
     expect(buildRevalidateCacheControl(0, 300)).toBe(
-      "public, s-maxage=0, stale-while-revalidate=300",
+      "public, max-age=0, stale-while-revalidate=300",
     );
   });
 });
