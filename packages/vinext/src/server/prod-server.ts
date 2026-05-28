@@ -28,6 +28,7 @@ import { StaticFileCache, CONTENT_TYPES, etagFromFilenameHash } from "./static-f
 import {
   matchRedirect,
   matchRewrite,
+  matchHeaders,
   requestContextFromRequest,
   applyMiddlewareRequestHeaders,
   isExternalUrl,
@@ -35,6 +36,7 @@ import {
   sanitizeDestination,
 } from "../config/config-matchers.js";
 import type { RequestContext } from "../config/config-matchers.js";
+import type { NextHeader, NextI18nConfig } from "../config/next-config.js";
 import {
   isImageOptimizationPath,
   IMAGE_CONTENT_SECURITY_POLICY,
@@ -292,6 +294,145 @@ function stripHeaders(
   }
 }
 
+/**
+ * Build an `extraHeaders` record for `tryServeStatic` from matched
+ * `next.config.js` `headers()` rules.
+ *
+ * Used by the early `/_next/static/*` short-circuit (both App Router and
+ * Pages Router prod servers) to honor user-configured headers for hashed
+ * build assets. Without this, the short-circuit bypasses all header
+ * processing and only the framework defaults (Cache-Control, ETag) reach
+ * the client. See issue #1551.
+ *
+ * Pages Router calls this with the basePath-stripped pathname (matching
+ * what subsequent steps use). App Router passes the un-stripped pathname
+ * along with a `basePath: ""` state — the App Router static branch fires
+ * before basePath stripping, but the user's `headers()` `source` values are
+ * always written without basePath, so we treat the request as
+ * `hadBasePath: true` to apply default-rule matching unconditionally.
+ *
+ * Returns undefined when no rules match, so callers can skip the merge.
+ */
+function buildStaticAssetConfigHeaders(
+  configHeaders: NextHeader[],
+  matchPathname: string,
+  reqCtx: RequestContext,
+  basePathState: { basePath: string; hadBasePath: boolean },
+): Record<string, string | string[]> | undefined {
+  if (!configHeaders.length) return undefined;
+  const matched = matchHeaders(matchPathname, configHeaders, reqCtx, basePathState);
+  if (!matched.length) return undefined;
+  const out: Record<string, string | string[]> = {};
+  for (const { key, value } of matched) {
+    const lower = key.toLowerCase();
+    if (lower === "set-cookie") {
+      const existing = out[key] ?? out[lower];
+      const existingArr = Array.isArray(existing)
+        ? existing
+        : existing !== undefined
+          ? [existing]
+          : [];
+      out[key] = [...existingArr, value];
+    } else if (lower === "vary") {
+      const existingKey = Object.keys(out).find((k) => k.toLowerCase() === "vary") ?? key;
+      const existing = out[existingKey];
+      out[existingKey] =
+        existing === undefined
+          ? value
+          : Array.isArray(existing)
+            ? existing.join(", ") + ", " + value
+            : existing + ", " + value;
+    } else {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
+/**
+ * Build the pre-RSC request context used to match `headers()` rules against
+ * an incoming static-asset request. Light wrapper around
+ * `requestContextFromRequest` that synthesises the Web Request from the raw
+ * Node IncomingMessage without buffering the body (static-asset GET/HEAD
+ * never carry a body).
+ */
+function reqCtxFromNodeReqForStaticHeaders(req: IncomingMessage, url: string): RequestContext {
+  // Use a placeholder host; matchHeaders normalises host via the Host header
+  // already present in the WHATWG Headers we hand to requestContextFromRequest.
+  const headers = nodeHeadersToWebHeaders(req.headers);
+  const webReq = new Request(`http://localhost${url.startsWith("/") ? url : "/" + url}`, {
+    method: req.method ?? "GET",
+    headers,
+  });
+  return requestContextFromRequest(webReq);
+}
+
+/**
+ * Case-insensitively merge `overrides` onto `base`, with overrides winning
+ * on conflict for the same lowercased name. Used by `tryServeStatic` to apply
+ * `next.config.js` `headers()` rules and middleware-set headers on top of the
+ * pre-computed defaults: matching keys (e.g. "Cache-Control" vs "cache-control")
+ * collapse to the override's value under the override's casing, so the response
+ * has at most one entry per header name.
+ *
+ * `Vary` and `Set-Cookie` get the override appended to the base value instead
+ * of replacing it: cookies because RFC 6265 forbids comma-joining them, and
+ * Vary because additive narrowing is the correct merge semantic for shared
+ * caches. Set-Cookie values are collected as a string array.
+ *
+ * The result preserves Node `writeHead`-friendly shape (string | string[]).
+ * See issue #1551 for the motivating regression (config headers being ignored
+ * for static assets because case-mismatched keys produced duplicate headers).
+ */
+function mergeStaticHeadersCaseInsensitive(
+  base: Record<string, string>,
+  overrides: Record<string, string | string[]>,
+): Record<string, string | string[]> {
+  const overrideLower = new Map<string, string>();
+  for (const key of Object.keys(overrides)) {
+    overrideLower.set(key.toLowerCase(), key);
+  }
+  const merged: Record<string, string | string[]> = {};
+  for (const [key, value] of Object.entries(base)) {
+    const lower = key.toLowerCase();
+    const overrideKey = overrideLower.get(lower);
+    if (overrideKey === undefined) {
+      merged[key] = value;
+      continue;
+    }
+    const overrideValue = overrides[overrideKey];
+    if (lower === "set-cookie") {
+      const baseArr: string[] = Array.isArray(value) ? value : [value];
+      const overArr: string[] = Array.isArray(overrideValue) ? overrideValue : [overrideValue];
+      merged[overrideKey] = baseArr.concat(overArr);
+    } else if (lower === "vary") {
+      const baseStr = Array.isArray(value) ? value.join(", ") : value;
+      const overStr = Array.isArray(overrideValue) ? overrideValue.join(", ") : overrideValue;
+      // Skip the merge if the override already contains the base Vary value.
+      // The common static-file case has base="Accept-Encoding" and the override
+      // also carries "Accept-Encoding" from earlier merging — joining would
+      // produce a duplicated "Accept-Encoding, Accept-Encoding" string.
+      merged[overrideKey] = overStr
+        .toLowerCase()
+        .split(",")
+        .map((s) => s.trim())
+        .includes(baseStr.toLowerCase())
+        ? overStr
+        : baseStr + ", " + overStr;
+    } else {
+      // Override wins — drop the base entry under its (possibly different) casing.
+      merged[overrideKey] = overrideValue;
+    }
+  }
+  // Pull in override-only headers (those not already present in base).
+  for (const [lower, overrideKey] of overrideLower) {
+    if (!Object.keys(base).some((baseKey) => baseKey.toLowerCase() === lower)) {
+      merged[overrideKey] = overrides[overrideKey];
+    }
+  }
+  return merged;
+}
+
 function isNoBodyResponseStatus(status: number): boolean {
   return NO_BODY_RESPONSE_STATUSES.has(status);
 }
@@ -499,7 +640,10 @@ async function tryServeStatic(
       matchesIfNoneMatchHeader(ifNoneMatch, entry.etag)
     ) {
       if (extraHeaders) {
-        res.writeHead(304, { ...entry.notModifiedHeaders, ...extraHeaders });
+        res.writeHead(
+          304,
+          mergeStaticHeadersCaseInsensitive(entry.notModifiedHeaders, extraHeaders),
+        );
       } else {
         res.writeHead(304, entry.notModifiedHeaders);
       }
@@ -527,7 +671,10 @@ async function tryServeStatic(
       : entry.original;
 
     if (extraHeaders) {
-      res.writeHead(responseStatus, { ...variant.headers, ...extraHeaders });
+      res.writeHead(
+        responseStatus,
+        mergeStaticHeadersCaseInsensitive(variant.headers, extraHeaders),
+      );
     } else {
       res.writeHead(responseStatus, variant.headers);
     }
@@ -602,29 +749,38 @@ async function tryServeStatic(
     typeof ifNoneMatch === "string" &&
     matchesIfNoneMatchHeader(ifNoneMatch, etag)
   ) {
-    const notModifiedHeaders: Record<string, string | string[]> = {
+    const notModifiedBase: Record<string, string> = {
       ETag: etag,
       "Cache-Control": cacheControl,
       ...(isCompressible ? { Vary: "Accept-Encoding" } : undefined),
-      ...extraHeaders,
     };
-    res.writeHead(304, notModifiedHeaders);
+    res.writeHead(
+      304,
+      extraHeaders
+        ? mergeStaticHeadersCaseInsensitive(notModifiedBase, extraHeaders)
+        : notModifiedBase,
+    );
     res.end();
     return true;
   }
 
-  const baseHeaders: Record<string, string | string[]> = {
+  const baseHeaderDefaults: Record<string, string> = {
     "Content-Type": ct,
     "Cache-Control": cacheControl,
     ETag: etag,
-    ...extraHeaders,
   };
+  const baseHeaders: Record<string, string | string[]> = extraHeaders
+    ? mergeStaticHeadersCaseInsensitive(baseHeaderDefaults, extraHeaders)
+    : { ...baseHeaderDefaults };
 
   if (isCompressible) {
     const encoding = negotiateEncoding(req);
     if (encoding) {
       // Content-Length omitted intentionally: compressed size isn't known
       // ahead of time, so Node.js uses chunked transfer encoding.
+      // Spread last so Content-Encoding and Vary always reflect the
+      // negotiated encoding (overrides take precedence for Cache-Control etc.
+      // but the per-request encoding fields are framework-owned).
       res.writeHead(responseStatus, {
         ...baseHeaders,
         "Content-Encoding": encoding,
@@ -1090,6 +1246,18 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
   // before locating files on disk includes this path plus `_next/static/`.
   const appAssetPathPrefix = assetPrefixPathname(appRouterAssetPrefix);
 
+  // `headers()` rules and i18n config exposed by the RSC entry so the
+  // static-asset short-circuit (below) can apply user-configured headers to
+  // `/_next/static/*` requests that bypass the RSC handler. Default to safe
+  // empty values so older RSC entries (without these re-exports) keep working.
+  // See issue #1551.
+  const appConfigHeaders: NextHeader[] = Array.isArray(rscModule.__vinextConfigHeaders)
+    ? (rscModule.__vinextConfigHeaders as NextHeader[])
+    : [];
+  const appI18nConfig: NextI18nConfig | null =
+    (rscModule.__vinextI18nConfig as NextI18nConfig | null | undefined) ?? null;
+  const appBasePath: string = typeof rscModule.__basePath === "string" ? rscModule.__basePath : "";
+
   // Seed the memory cache with pre-rendered routes so the first request to
   // any pre-rendered page is a cache HIT instead of a full re-render.
   const seedPrerenderedRoutes = resolveAppRouterPrerenderSeeder(rscModule);
@@ -1175,7 +1343,41 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
         appRouterAssetPrefix,
       );
       if (assetLookupPath) {
-        if (await tryServeStatic(req, res, clientDir, assetLookupPath, compress, staticCache)) {
+        // Apply `next.config.js` `headers()` rules even though the static
+        // branch bypasses the RSC handler. Mirrors Next.js's router-server
+        // ordering where `resolveRoutes` (which evaluates `headers()`) runs
+        // for every request before the `/_next/static/` short-circuit. See
+        // issue #1551.
+        let staticExtraHeaders: Record<string, string | string[]> | undefined;
+        if (appConfigHeaders.length) {
+          const reqCtx = reqCtxFromNodeReqForStaticHeaders(req, rawUrl);
+          // Match against the basePath-stripped pathname (Next.js's
+          // `headers()` `source` values are written without basePath). When
+          // basePath is empty this is a no-op.
+          const matchPath = stripBasePath(pathname, appBasePath);
+          const matchPathLocale = appI18nConfig
+            ? normalizeDefaultLocalePathname(matchPath, appI18nConfig, {
+                hostname: reqCtx.host,
+              })
+            : matchPath;
+          staticExtraHeaders = buildStaticAssetConfigHeaders(
+            appConfigHeaders,
+            matchPathLocale,
+            reqCtx,
+            { basePath: appBasePath, hadBasePath: hasBasePath(pathname, appBasePath) },
+          );
+        }
+        if (
+          await tryServeStatic(
+            req,
+            res,
+            clientDir,
+            assetLookupPath,
+            compress,
+            staticCache,
+            staticExtraHeaders,
+          )
+        ) {
           return;
         }
         res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
@@ -1523,7 +1725,36 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
     const staticLookupPath = stripBasePath(pathname, basePath);
     const pagesAssetLookup = resolveAppRouterAssetPath(pathname, pagesAssetPathPrefix, assetPrefix);
     if (pagesAssetLookup) {
-      if (await tryServeStatic(req, res, clientDir, pagesAssetLookup, compress, staticCache)) {
+      // Apply `next.config.js` `headers()` rules to `/_next/static/*` even
+      // though this short-circuit bypasses middleware and SSR. Mirrors
+      // Next.js's router-server ordering — `resolveRoutes` (which evaluates
+      // `headers()`) runs before the `/_next/static/` short-circuit. See
+      // issue #1551.
+      let staticExtraHeaders: Record<string, string | string[]> | undefined;
+      if (configHeaders.length) {
+        const reqCtx = reqCtxFromNodeReqForStaticHeaders(req, rawUrl);
+        const matchPath = stripBasePath(pathname, basePath);
+        const matchPathLocale = i18nConfig
+          ? normalizeDefaultLocalePathname(matchPath, i18nConfig, {
+              hostname: reqCtx.host,
+            })
+          : matchPath;
+        staticExtraHeaders = buildStaticAssetConfigHeaders(configHeaders, matchPathLocale, reqCtx, {
+          basePath,
+          hadBasePath: hasBasePath(pathname, basePath),
+        });
+      }
+      if (
+        await tryServeStatic(
+          req,
+          res,
+          clientDir,
+          pagesAssetLookup,
+          compress,
+          staticCache,
+          staticExtraHeaders,
+        )
+      ) {
         return;
       }
       res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
@@ -2104,4 +2335,6 @@ export {
   mergeResponseHeaders,
   mergeWebResponse,
   tryServeStatic,
+  buildStaticAssetConfigHeaders,
+  mergeStaticHeadersCaseInsensitive,
 };

@@ -4214,6 +4214,19 @@ describe("App Router next.config.js features (generateRscEntry)", () => {
     expect(code).toContain("vinext");
   });
 
+  it("exposes __vinextConfigHeaders / __vinextI18nConfig so the prod-server static branch can match headers() rules (#1551)", () => {
+    const code = generateRscEntry("/tmp/test/app", minimalRoutes, null, [], null, "", false, {
+      headers: [
+        {
+          source: "/_next/static/:path*",
+          headers: [{ key: "cache-control", value: "max-age=1234" }],
+        },
+      ],
+    });
+    expect(code).toContain("export const __vinextConfigHeaders = __configHeaders");
+    expect(code).toContain("export const __vinextI18nConfig = __i18nConfig");
+  });
+
   it("routes hybrid Pages API misses through the Pages server entry", () => {
     // Ported from Next.js: test/e2e/og-api/index.test.ts
     // https://github.com/vercel/next.js/blob/canary/test/e2e/og-api/index.test.ts
