@@ -142,6 +142,7 @@ import {
   VINEXT_PARAMS_HEADER,
   VINEXT_RSC_REDIRECT_HEADER,
 } from "./headers.js";
+import { removeStylesheetLinksCoveredByInlineCss } from "./app-inline-css-client.js";
 
 type SearchParamInput = ConstructorParameters<typeof URLSearchParams>[0];
 
@@ -869,6 +870,12 @@ function BrowserRoot({
 
   useLayoutEffect(() => {
     setMountedSlotsHeader(getMountedSlotIdsHeader(stateRef.current.elements));
+    // After committing a navigation, drop any `<link rel="stylesheet">`
+    // tags React preinit'd whose CSS the server already inlined as a
+    // `<style data-vinext-inline-css>` block — otherwise the browser
+    // re-fetches stylesheets it already has. No-op when inlineCss is off
+    // (no inline `<style>` tags → early return).
+    removeStylesheetLinksCoveredByInlineCss();
     getNavigationRuntime()?.functions.pingVisibleLinks?.();
   }, [treeState.elements]);
 

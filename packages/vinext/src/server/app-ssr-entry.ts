@@ -149,11 +149,16 @@ function renderBeforeInteractiveInlineScripts(
   return html;
 }
 
-function renderFontHtml(fontData?: FontData, nonce?: string): string {
+function renderFontHtml(
+  fontData?: FontData,
+  nonce?: string,
+  options: { includeStyles?: boolean } = {},
+): string {
   if (!fontData) return "";
 
   let fontHTML = "";
   const nonceAttr = createNonceAttribute(nonce);
+  const includeStyles = options.includeStyles ?? true;
 
   for (const url of fontData.links ?? []) {
     fontHTML += `<link rel="stylesheet"${nonceAttr} href="${escapeHtmlAttr(url)}" />\n`;
@@ -163,11 +168,17 @@ function renderFontHtml(fontData?: FontData, nonce?: string): string {
     fontHTML += `<link rel="preload"${nonceAttr} href="${escapeHtmlAttr(preload.href)}" as="font" type="${escapeHtmlAttr(preload.type)}" crossorigin />\n`;
   }
 
-  if (fontData.styles && fontData.styles.length > 0) {
+  if (includeStyles && fontData.styles && fontData.styles.length > 0) {
     fontHTML += `<style data-vinext-fonts${nonceAttr}>${fontData.styles.join("\n")}</style>\n`;
   }
 
   return fontHTML;
+}
+
+function renderFontStylesOnly(fontData?: FontData, nonce?: string): string {
+  if (!fontData?.styles || fontData.styles.length === 0) return "";
+  const nonceAttr = createNonceAttribute(nonce);
+  return `<style data-vinext-fonts${nonceAttr}>${fontData.styles.join("\n")}</style>\n`;
 }
 
 /**
@@ -415,7 +426,25 @@ export async function handleSsr(
           await htmlStream.allReady;
         }
 
-        const fontHTML = renderFontHtml(fontData, options?.scriptNonce);
+        // When `experimental.inlineCss` is enabled and there's any font
+        // CSS to ship, merge the font styles into the first inlined `<style>`
+        // block instead of emitting a separate `<style data-vinext-fonts>`.
+        // Matches Next.js's behavior — the upstream e2e fixture asserts the
+        // font @font-face rule lives inside the very first inline style.
+        // The inline-css transform consumes `prependCss` on its first
+        // rewrite; if no link gets rewritten (e.g. page has zero CSS
+        // imports), it falls back to emitting the standalone style tag
+        // before `</head>`.
+        const inlineCssActive = globalThis.__VINEXT_INLINE_CSS_MAP__ !== undefined;
+        const fontStyles = fontData?.styles ?? [];
+        const mergeFontIntoInlineCss = inlineCssActive && fontStyles.length > 0;
+        const fontHTML = renderFontHtml(fontData, options?.scriptNonce, {
+          includeStyles: !mergeFontIntoInlineCss,
+        });
+        const inlineCssPrependCss = mergeFontIntoInlineCss ? fontStyles.join("\n") : "";
+        const inlineCssFallbackHTML = mergeFontIntoInlineCss
+          ? renderFontStylesOnly(fontData, options?.scriptNonce)
+          : "";
         // Trace meta tags only need to land in the document head once.
         // Read the active OTel context lazily so the value reflects the
         // span that was active when the SSR shell rendered. When
@@ -469,7 +498,12 @@ export async function handleSsr(
           .pipeThrough(
             createTickBufferedTransform(rscEmbed, getInsertedHTML, getBeforeInteractiveHeadHTML),
           )
-          .pipeThrough(createInlineCssTransform(options?.scriptNonce));
+          .pipeThrough(
+            createInlineCssTransform(options?.scriptNonce, {
+              prependCss: inlineCssPrependCss,
+              fallbackHTML: inlineCssFallbackHTML,
+            }),
+          );
         return deferUntilStreamConsumed(transformed, cleanup);
       } catch (error) {
         cleanup();

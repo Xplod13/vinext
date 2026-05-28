@@ -27,10 +27,14 @@ import {
  * the tag, otherwise the regex misses the rewrite and we'd silently emit
  * the original `<link rel="stylesheet">`.
  */
-async function runTransform(chunks: string | string[], nonce?: string): Promise<string> {
+async function runTransform(
+  chunks: string | string[],
+  nonce?: string,
+  options?: { prependCss?: string; fallbackHTML?: string },
+): Promise<string> {
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
-  const transform = createInlineCssTransform(nonce);
+  const transform = createInlineCssTransform(nonce, options);
   const writer = transform.writable.getWriter();
   const reader = transform.readable.getReader();
   const out: string[] = [];
@@ -60,9 +64,10 @@ describe("rewriteRscCssLinksToInline", () => {
       `href="/_next/static/foo.css" data-rsc-css-href="/_next/static/foo.css"/></head>`;
     const map = { "/_next/static/foo.css": "p { color: red; }" };
     const out = rewriteRscCssLinksToInline(html, map);
-    expect(out).toContain('<style data-vinext-inline-css="/_next/static/foo.css">');
-    expect(out).toContain("p { color: red; }");
-    expect(out).not.toContain('<link rel="stylesheet"');
+    expect(out.html).toContain('<style data-vinext-inline-css="/_next/static/foo.css">');
+    expect(out.html).toContain("p { color: red; }");
+    expect(out.html).not.toContain('<link rel="stylesheet"');
+    expect(out.consumedPrependCss).toBe(false);
   });
 
   it("emits nonce on the inlined <style> tag when provided", () => {
@@ -73,7 +78,7 @@ describe("rewriteRscCssLinksToInline", () => {
     // `<style>` to preserve parity.
     const html = `<link rel="stylesheet" data-rsc-css-href="/x.css" href="/x.css"/>`;
     const out = rewriteRscCssLinksToInline(html, { "/x.css": "a {}" }, "abc123");
-    expect(out).toContain('<style data-vinext-inline-css="/x.css" nonce="abc123">');
+    expect(out.html).toContain('<style data-vinext-inline-css="/x.css" nonce="abc123">');
   });
 
   it("looks up CSS by URL pathname when assetPrefix yields an absolute URL", () => {
@@ -87,15 +92,15 @@ describe("rewriteRscCssLinksToInline", () => {
       `href="https://cdn.example.com/_next/static/foo.css"/>`;
     const map = { "/_next/static/foo.css": "p { color: blue; }" };
     const out = rewriteRscCssLinksToInline(html, map);
-    expect(out).toContain("<style");
-    expect(out).toContain("p { color: blue; }");
-    expect(out).not.toContain("<link");
+    expect(out.html).toContain("<style");
+    expect(out.html).toContain("p { color: blue; }");
+    expect(out.html).not.toContain("<link");
   });
 
   it("leaves user-authored stylesheet links (no data-rsc-css-href) alone", () => {
     const html = `<head><link rel="stylesheet" href="https://fonts/foo.css"/></head>`;
     const out = rewriteRscCssLinksToInline(html, { "/_next/static/foo.css": "x" });
-    expect(out).toBe(html);
+    expect(out.html).toBe(html);
   });
 
   it("leaves the link tag when the URL is not in the map", () => {
@@ -103,18 +108,18 @@ describe("rewriteRscCssLinksToInline", () => {
       `<link rel="stylesheet" href="/_next/static/missing.css" ` +
       `data-rsc-css-href="/_next/static/missing.css"/>`;
     const out = rewriteRscCssLinksToInline(html, { "/_next/static/other.css": "x" });
-    expect(out).toBe(html);
+    expect(out.html).toBe(html);
   });
 
   it("is a no-op when no map is provided", () => {
     const html = `<link rel="stylesheet" data-rsc-css-href="/x.css" href="/x.css"/>`;
-    expect(rewriteRscCssLinksToInline(html, undefined)).toBe(html);
+    expect(rewriteRscCssLinksToInline(html, undefined).html).toBe(html);
   });
 
   it("escapes </style> inside CSS contents to prevent tag breakout", () => {
     const evil = "p::before { content: '</style><script>x</script>'; }";
     const html = `<link rel="stylesheet" data-rsc-css-href="/x.css" href="/x.css"/>`;
-    const out = rewriteRscCssLinksToInline(html, { "/x.css": evil });
+    const out = rewriteRscCssLinksToInline(html, { "/x.css": evil }).html;
     // The hostile `</style>` from the source CSS must have been escaped.
     expect(out).toContain("<\\/style>");
     // Only one literal `</style>` is left — the one that closes our
@@ -135,9 +140,47 @@ describe("rewriteRscCssLinksToInline", () => {
     // Vite hrefs don't normally contain `&`, but if React Fizz serialises
     // any future tag with one we still need to look up by the decoded URL.
     const html = `<link rel="stylesheet" data-rsc-css-href="/a.css?x=1&amp;y=2" href="/a.css?x=1&amp;y=2"/>`;
-    const out = rewriteRscCssLinksToInline(html, { "/a.css?x=1&y=2": "z" });
+    const out = rewriteRscCssLinksToInline(html, { "/a.css?x=1&y=2": "z" }).html;
     expect(out).toContain("<style");
     expect(out).toContain(">z</style>");
+  });
+
+  it("does not double-unescape entities in the href attribute", () => {
+    // Regression for CodeQL "Double escaping or unescaping". An input like
+    // `&amp;quot;` is the *literal* text `&quot;` with `&` escaped — naive
+    // chained replaceAll() would collapse it to `"`. The single-pass decode
+    // must leave `&quot;` intact.
+    const html = `<link rel="stylesheet" data-rsc-css-href="/a.css?q=&amp;quot;" href="/a.css?q=&amp;quot;"/>`;
+    const out = rewriteRscCssLinksToInline(html, { "/a.css?q=&quot;": "y" }).html;
+    expect(out).toContain("<style");
+    expect(out).toContain(">y</style>");
+    expect(out).not.toContain('data-vinext-inline-css="/a.css?q=&quot;');
+  });
+
+  it("prepends prependCss into the first rewritten <style>", () => {
+    const html =
+      `<link rel="stylesheet" data-rsc-css-href="/a.css" href="/a.css"/>` +
+      `<link rel="stylesheet" data-rsc-css-href="/b.css" href="/b.css"/>`;
+    const map = { "/a.css": ".a {}", "/b.css": ".b {}" };
+    const out = rewriteRscCssLinksToInline(html, map, undefined, "@font-face { src: u; }");
+    expect(out.consumedPrependCss).toBe(true);
+    // Font CSS rides inside the first inlined style, not the second.
+    const firstStyleOpen = out.html.indexOf("<style");
+    const firstStyleClose = out.html.indexOf("</style>");
+    expect(out.html.slice(firstStyleOpen, firstStyleClose)).toContain("@font-face");
+    expect(out.html.slice(firstStyleClose)).not.toContain("@font-face");
+  });
+
+  it("skips the prepend when the CSS opens with @import or @namespace", () => {
+    // CSS imports must stay first-byte; prepending font CSS in front would
+    // silently invalidate the import. Caller is expected to fall back to a
+    // standalone <style data-vinext-fonts> when consumedPrependCss=false.
+    const html = `<link rel="stylesheet" data-rsc-css-href="/a.css" href="/a.css"/>`;
+    const map = { "/a.css": "@import url('/reset.css'); .a {}" };
+    const out = rewriteRscCssLinksToInline(html, map, undefined, "@font-face { src: u; }");
+    expect(out.consumedPrependCss).toBe(false);
+    expect(out.html).not.toContain("@font-face");
+    expect(out.html).toContain("@import url('/reset.css');");
   });
 });
 
@@ -177,5 +220,69 @@ describe("createInlineCssTransform", () => {
     expect(out).toContain("<style");
     expect(out).toContain("a {}");
     expect(out).not.toContain("<link");
+  });
+
+  it("merges font CSS into the first inlined <style> via prependCss", async () => {
+    setInlineCssMap({ "/a.css": ".page { color: yellow; }" });
+    const html =
+      `<html><head>` +
+      `<link rel="stylesheet" data-rsc-css-href="/a.css" href="/a.css"/>` +
+      `</head><body></body></html>`;
+    const out = await runTransform(html, undefined, {
+      prependCss: "@font-face { font-family: f; src: url('/f.woff2'); }",
+      fallbackHTML: "<style data-vinext-fonts>FALLBACK</style>",
+    });
+    // Font CSS rides inside the first inline-css <style> block.
+    const open = out.indexOf("<style data-vinext-inline-css");
+    const close = out.indexOf("</style>", open);
+    expect(open).toBeGreaterThanOrEqual(0);
+    expect(out.slice(open, close)).toContain("@font-face");
+    expect(out.slice(open, close)).toContain(".page { color: yellow; }");
+    // Fallback was suppressed — no standalone <style data-vinext-fonts>.
+    expect(out).not.toContain("FALLBACK");
+  });
+
+  it("emits the fallback when no stylesheet link gets inlined", async () => {
+    // Page has zero `data-rsc-css-href` links, so no `<style>` is emitted
+    // for the page CSS. The font CSS still needs to land in <head> — the
+    // transform injects the fallback right before </head>.
+    setInlineCssMap({});
+    const html = `<html><head><meta charset="utf-8"/></head><body>x</body></html>`;
+    const out = await runTransform(html, undefined, {
+      prependCss: "@font-face { font-family: f; src: url('/f.woff2'); }",
+      fallbackHTML: "<style data-vinext-fonts>F</style>",
+    });
+    const fallbackIdx = out.indexOf("<style data-vinext-fonts>F</style>");
+    const headCloseIdx = out.indexOf("</head>");
+    expect(fallbackIdx).toBeGreaterThanOrEqual(0);
+    // Fallback must land before </head>, not after.
+    expect(fallbackIdx).toBeLessThan(headCloseIdx);
+  });
+
+  it("skips fallback when the page CSS preamble is import-sensitive", async () => {
+    // The inlined CSS starts with `@import`, so prepending font CSS would
+    // invalidate the import. The transform must keep the inline link
+    // rewrite but still fall back to the standalone font style tag.
+    setInlineCssMap({ "/a.css": "@import url('/r.css'); .a {}" });
+    const html =
+      `<html><head>` +
+      `<link rel="stylesheet" data-rsc-css-href="/a.css" href="/a.css"/>` +
+      `</head><body></body></html>`;
+    const out = await runTransform(html, undefined, {
+      prependCss: "@font-face { font-family: f; src: url('/f.woff2'); }",
+      fallbackHTML: "<style data-vinext-fonts>F</style>",
+    });
+    // Inline rewrite still happened…
+    expect(out).toContain("<style data-vinext-inline-css");
+    expect(out).toContain("@import url('/r.css');");
+    // …but the font CSS did NOT get prepended into it.
+    const open = out.indexOf("<style data-vinext-inline-css");
+    const close = out.indexOf("</style>", open);
+    expect(out.slice(open, close)).not.toContain("@font-face");
+    // And the fallback DID land before </head>.
+    const fallbackIdx = out.indexOf("<style data-vinext-fonts>F</style>");
+    const headCloseIdx = out.indexOf("</head>");
+    expect(fallbackIdx).toBeGreaterThan(close);
+    expect(fallbackIdx).toBeLessThan(headCloseIdx);
   });
 });

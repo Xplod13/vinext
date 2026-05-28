@@ -1,17 +1,20 @@
 /**
- * Build-time helper for `experimental.inlineCss`.
+ * Shared helper for `experimental.inlineCss`.
  *
  * Walks a directory looking for `.css` files and returns a URL→content
  * map keyed on the URL `@vitejs/plugin-rsc` will emit in `data-rsc-css-href`
  * (Vite's `base` is `/` by default; the URL is therefore `/<relativePath>`).
  *
- * Used by `vinext:cloudflare-build` to inline the map into the Worker
- * bundle. The Node prod server uses an async variant in
- * `server/prod-server.ts` for the same purpose at startup.
+ * Two callers:
+ *   - `vinext:cloudflare-build` invokes this at build time to inline the map
+ *     into the Worker bundle.
+ *   - The Node prod server invokes this once at startup, before any request
+ *     is served — synchronous I/O is fine there because the server is not
+ *     yet accepting connections.
  *
  * Errors reading individual files are logged but not fatal — a partial map
- * is better than a build failure and the SSR transform falls back to the
- * original `<link rel="stylesheet">` tag for any URL not in the map.
+ * is better than a build/startup failure, and the SSR transform falls back to
+ * the original `<link rel="stylesheet">` tag for any URL not in the map.
  */
 import fs from "node:fs";
 import path from "node:path";

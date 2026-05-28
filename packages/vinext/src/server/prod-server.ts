@@ -65,6 +65,7 @@ import {
   assetPrefixPathname,
   isAbsoluteAssetPrefix,
 } from "../utils/asset-prefix.js";
+import { collectInlineCssMap } from "../utils/inline-css.js";
 import { computeLazyChunks } from "../utils/lazy-chunks.js";
 import { manifestFileWithBase } from "../utils/manifest-paths.js";
 import { normalizePathnameForRouteMatchStrict } from "../routing/utils.js";
@@ -1028,54 +1029,6 @@ export function resolveAppRouterAssetPath(
 }
 
 /**
- * Walk `clientDir` and build a URL→CSS-content map for every `.css` file
- * discovered. The URL key matches the `href` emitted by
- * `@vitejs/plugin-rsc`'s `Resources` component — that's Vite's `base`
- * (defaulting to `/`) followed by the file's relative path under
- * `dist/client`. Used by the App Router SSR transform to inline stylesheets
- * when `experimental.inlineCss` is enabled.
- *
- * Errors reading individual files are logged but not fatal — a partial map
- * is better than a startup failure, and the SSR transform falls back to the
- * original `<link rel="stylesheet">` tag for any URL not in the map.
- */
-async function buildInlineCssMap(clientDir: string): Promise<Record<string, string>> {
-  const map: Record<string, string> = {};
-
-  async function walk(dir: string): Promise<void> {
-    let entries: fs.Dirent[];
-    try {
-      entries = await fsp.readdir(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      const full = path.join(dir, entry.name);
-      // Skip Vite's internal metadata directory (`.vite/`).
-      if (entry.isDirectory()) {
-        if (entry.name === ".vite") continue;
-        await walk(full);
-        continue;
-      }
-      if (!entry.isFile()) continue;
-      if (!entry.name.endsWith(".css")) continue;
-      try {
-        const content = await fsp.readFile(full, "utf-8");
-        const relative = path.relative(clientDir, full).split(path.sep).join("/");
-        map["/" + relative] = content;
-      } catch (error) {
-        if (process.env.NODE_ENV !== "production") {
-          console.warn("[vinext] failed to read inline-CSS source:", full, error);
-        }
-      }
-    }
-  }
-
-  await walk(clientDir);
-  return map;
-}
-
-/**
  * Start the App Router production server.
  *
  * The App Router entry (dist/server/index.js) can export either:
@@ -1153,9 +1106,10 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
   // stream transform consumes this map to rewrite
   // `<link rel="stylesheet" data-rsc-css-href="…">` tags into inline
   // `<style>` blocks. Mirrors Next.js's
-  // `experimental.inlineCss` (production-only).
+  // `experimental.inlineCss` (production-only). Synchronous I/O is fine here
+  // — the HTTP server hasn't accepted any connections yet.
   if (rscModule.__inlineCss === true) {
-    const inlineMap = await buildInlineCssMap(clientDir);
+    const inlineMap = collectInlineCssMap(clientDir);
     if (Object.keys(inlineMap).length > 0) {
       globalThis.__VINEXT_INLINE_CSS_MAP__ = inlineMap;
     }
