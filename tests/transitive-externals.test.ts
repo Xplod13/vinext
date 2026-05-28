@@ -139,78 +139,91 @@ describe("resolveTransitiveExternal", () => {
 });
 
 describe("vinext:transitive-externals plugin", () => {
-  function runResolveId(
-    plugin: ReturnType<typeof _createPluginForTest>,
-    source: string,
-    importer: string,
-  ): string | null {
-    const hook = plugin.resolveId;
-    if (typeof hook !== "function") throw new Error("plugin.resolveId must be a function");
-    // Wire up configResolved so the plugin captures its root resolver.
+  /**
+   * Build a plugin instance and call `configResolved` once, matching Vite's
+   * real lifecycle (lifecycle hooks fire once per build, not per resolveId
+   * call). Tests then invoke the returned `resolveId` helper as many times
+   * as they need against the same initialized instance.
+   */
+  function setupPlugin(options: {
+    root: string;
+    externalPackages: string[];
+    environment?: string;
+  }) {
+    const plugin = _createPluginForTest({
+      root: options.root,
+      externalPackages: options.externalPackages,
+    });
     const configResolved = plugin.configResolved;
     if (typeof configResolved === "function") {
       // biome-ignore lint/suspicious/noExplicitAny: invoking lifecycle hooks manually for testing
       (configResolved as any).call({});
     }
-    // biome-ignore lint/suspicious/noExplicitAny: invoking lifecycle hooks manually for testing
-    const result = (hook as any).call({}, source, importer);
-    if (result == null) return null;
-    if (typeof result === "string") return result;
-    if (typeof result === "object" && result !== null && "id" in result) {
-      return (result as { id: string }).id;
-    }
-    return null;
+    const hook = plugin.resolveId;
+    if (typeof hook !== "function") throw new Error("plugin.resolveId must be a function");
+    const ctx = { environment: { name: options.environment ?? "ssr" } };
+    const resolveId = (source: string, importer: string): string | null => {
+      // biome-ignore lint/suspicious/noExplicitAny: invoking lifecycle hooks manually for testing
+      const result = (hook as any).call(ctx, source, importer);
+      if (result == null) return null;
+      if (typeof result === "string") return result;
+      if (typeof result === "object" && result !== null && "id" in result) {
+        return (result as { id: string }).id;
+      }
+      return null;
+    };
+    return { plugin, resolveId };
   }
 
   it("redirects the import to the nested copy when versions differ (#1503)", () => {
     const { depB } = buildFixture(tmpDir);
-    const plugin = _createPluginForTest({
+    const { resolveId } = setupPlugin({
       root: tmpDir,
       externalPackages: ["lodash"],
     });
-    const result = runResolveId(plugin, "lodash", path.join(depB, "index.js"));
+    const result = resolveId("lodash", path.join(depB, "index.js"));
     expect(result).toBe(fs.realpathSync(path.join(depB, "node_modules", "lodash", "index.js")));
   });
 
   it("leaves the import alone when the importer would resolve to the root copy", () => {
     const { depA } = buildFixture(tmpDir);
-    const plugin = _createPluginForTest({
+    const { resolveId } = setupPlugin({
       root: tmpDir,
       externalPackages: ["lodash"],
     });
-    const result = runResolveId(plugin, "lodash", path.join(depA, "index.js"));
+    const result = resolveId("lodash", path.join(depA, "index.js"));
     expect(result).toBeNull();
   });
 
   it("ignores packages that are not in the externals list", () => {
     const { depB } = buildFixture(tmpDir);
-    const plugin = _createPluginForTest({
+    const { resolveId } = setupPlugin({
       root: tmpDir,
       externalPackages: ["@storybook/global"],
     });
-    const result = runResolveId(plugin, "lodash", path.join(depB, "index.js"));
+    const result = resolveId("lodash", path.join(depB, "index.js"));
     expect(result).toBeNull();
   });
 
   it("ignores user-source importers (outside node_modules)", () => {
     buildFixture(tmpDir);
     writeFile(tmpDir, "app/page.js", "import 'lodash';\n");
-    const plugin = _createPluginForTest({
+    const { resolveId } = setupPlugin({
       root: tmpDir,
       externalPackages: ["lodash"],
     });
-    const result = runResolveId(plugin, "lodash", path.join(tmpDir, "app/page.js"));
+    const result = resolveId("lodash", path.join(tmpDir, "app/page.js"));
     expect(result).toBeNull();
   });
 
   it("ignores virtual / non-absolute importers", () => {
     buildFixture(tmpDir);
-    const plugin = _createPluginForTest({
+    const { resolveId } = setupPlugin({
       root: tmpDir,
       externalPackages: ["lodash"],
     });
-    expect(runResolveId(plugin, "lodash", "\0virtual:vinext-server-entry")).toBeNull();
-    expect(runResolveId(plugin, "lodash", "virtual:some-module")).toBeNull();
+    expect(resolveId("lodash", "\0virtual:vinext-server-entry")).toBeNull();
+    expect(resolveId("lodash", "virtual:some-module")).toBeNull();
   });
 
   it("matches scoped package names correctly", () => {
@@ -220,13 +233,83 @@ describe("vinext:transitive-externals plugin", () => {
     const depRoot = path.join(tmpDir, "node_modules", "@scope/dep");
     writePackage(tmpDir, "@scope/lib", "2.0.0", {}, { parent: path.join(depRoot, "node_modules") });
 
-    const plugin = _createPluginForTest({
+    const { resolveId } = setupPlugin({
       root: tmpDir,
       externalPackages: ["@scope/lib"],
     });
-    const result = runResolveId(plugin, "@scope/lib", path.join(depRoot, "index.js"));
+    const result = resolveId("@scope/lib", path.join(depRoot, "index.js"));
     expect(result).toBe(
       fs.realpathSync(path.join(depRoot, "node_modules", "@scope/lib", "index.js")),
     );
+  });
+
+  it("resolves subpath imports against the nested copy (e.g. lodash/cloneDeep)", () => {
+    // Layout: root has lodash@3, dep-b has nested lodash@4 with a subpath file.
+    writeFile(
+      tmpDir,
+      "package.json",
+      JSON.stringify({ name: "app", dependencies: { lodash: "3.10.1" } }, null, 2),
+    );
+    writePackage(tmpDir, "lodash", "3.10.1");
+    // Add a subpath file (cloneDeep.js) to the root copy so it resolves.
+    writeFile(
+      tmpDir,
+      "node_modules/lodash/cloneDeep.js",
+      "module.exports = function cloneDeep() {};\n",
+    );
+    const depB = writePackage(tmpDir, "dep-b", "1.0.0", { lodash: "4.17.21" });
+    writePackage(tmpDir, "lodash", "4.17.21", {}, { parent: path.join(depB, "node_modules") });
+    writeFile(
+      tmpDir,
+      "node_modules/dep-b/node_modules/lodash/cloneDeep.js",
+      "module.exports = function cloneDeep4() {};\n",
+    );
+
+    const { resolveId } = setupPlugin({
+      root: tmpDir,
+      externalPackages: ["lodash"],
+    });
+    const result = resolveId("lodash/cloneDeep", path.join(depB, "index.js"));
+    // Subpath should resolve through pkgName extraction ("lodash") and
+    // return the nested copy's cloneDeep.js, not the root's.
+    expect(result).toBe(fs.realpathSync(path.join(depB, "node_modules", "lodash", "cloneDeep.js")));
+  });
+
+  it("resolves scoped subpath imports against the nested copy (e.g. @scope/lib/utils)", () => {
+    writeFile(tmpDir, "package.json", JSON.stringify({ name: "app" }, null, 2));
+    writePackage(tmpDir, "@scope/dep", "1.0.0", { "@scope/lib": "2.0.0" });
+    writePackage(tmpDir, "@scope/lib", "1.0.0");
+    writeFile(tmpDir, "node_modules/@scope/lib/utils.js", "module.exports = { which: 'root' };\n");
+    const depRoot = path.join(tmpDir, "node_modules", "@scope/dep");
+    writePackage(tmpDir, "@scope/lib", "2.0.0", {}, { parent: path.join(depRoot, "node_modules") });
+    writeFile(
+      tmpDir,
+      path.join("node_modules", "@scope/dep", "node_modules", "@scope/lib", "utils.js"),
+      "module.exports = { which: 'nested' };\n",
+    );
+
+    const { resolveId } = setupPlugin({
+      root: tmpDir,
+      externalPackages: ["@scope/lib"],
+    });
+    const result = resolveId("@scope/lib/utils", path.join(depRoot, "index.js"));
+    // Scoped subpath: pkgName extraction takes "@scope/lib", then the
+    // subpath ("utils") resolves against the nested copy.
+    expect(result).toBe(
+      fs.realpathSync(path.join(depRoot, "node_modules", "@scope/lib", "utils.js")),
+    );
+  });
+
+  it("is inert in the client environment", () => {
+    const { depB } = buildFixture(tmpDir);
+    const { resolveId } = setupPlugin({
+      root: tmpDir,
+      externalPackages: ["lodash"],
+      environment: "client",
+    });
+    // Even with a real version mismatch, the plugin must return null in
+    // client builds (resolve.external is never configured there).
+    const result = resolveId("lodash", path.join(depB, "index.js"));
+    expect(result).toBeNull();
   });
 });

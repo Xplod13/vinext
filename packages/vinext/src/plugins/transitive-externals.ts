@@ -4,6 +4,16 @@ import { createRequire } from "node:module";
 import type { Plugin } from "vite";
 
 /**
+ * Transitive-externals resolution for `serverExternalPackages`.
+ *
+ * This plugin is inert on Cloudflare / Nitro deployment targets: those
+ * builds bundle everything (no `resolve.external` entries), so the
+ * configured external set is empty and `resolveId` short-circuits on the
+ * `set.size === 0` check. It only does work for Node-server targets that
+ * actually populate `serverExternalPackages`.
+ */
+
+/**
  * Decide whether an external request from `importer` would resolve to a
  * different installed copy than the same request from the project root.
  *
@@ -120,6 +130,10 @@ export function createTransitiveExternalsPlugin(options: {
     },
 
     resolveId(source, importer) {
+      // `resolve.external` is only configured on server environments (rsc,
+      // ssr), so the client environment has nothing to disambiguate.
+      // Bail out immediately to avoid per-import work on client builds.
+      if (this.environment?.name === "client") return null;
       const set = externalSet;
       const resolver = rootResolver;
       if (!set || !resolver) return null;
