@@ -461,12 +461,15 @@ export async function handleSsr(
         // is absent (dev, or feature disabled) the transform is a
         // pass-through. Run AFTER the tick-buffered transform so its
         // re-emit of RSC chunks doesn't accidentally feed a partial tag
-        // into the link-tag rewriter.
+        // into the link-tag rewriter. The SSR-time `scriptNonce` is
+        // forwarded so emitted `<style>` blocks pass CSP `style-src
+        // 'nonce-…'` policies — the `<link>` tags they replace don't need
+        // nonces, but inline styles do.
         const transformed = htmlStream
           .pipeThrough(
             createTickBufferedTransform(rscEmbed, getInsertedHTML, getBeforeInteractiveHeadHTML),
           )
-          .pipeThrough(createInlineCssTransform());
+          .pipeThrough(createInlineCssTransform(options?.scriptNonce));
         return deferUntilStreamConsumed(transformed, cleanup);
       } catch (error) {
         cleanup();

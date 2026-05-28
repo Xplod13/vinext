@@ -24,6 +24,7 @@
  * ones, and the e2e test that motivates this feature is itself gated to
  * production only.
  */
+import { createNonceAttribute, escapeHtmlAttr } from "./html.js";
 
 /**
  * Map of CSS asset URLs (e.g. `"/_next/static/foo.css"`) to file contents.
@@ -70,13 +71,39 @@ function decodeRscCssHref(value: string): string {
 }
 
 /**
- * Escape `</style>` and `</STYLE>` so user-authored CSS can't break out of the
- * inline `<style>` element. The CSS spec doesn't recognize `</style>` as a
- * comment terminator, but the HTML parser does — once it sees the closing
- * tag, everything after is parsed as HTML. The minimal mitigation is to
- * escape the `<` in `</style>` to `\3C` (the CSS-escape for `<`), which
- * leaves the rule grammar intact and the HTML tokenizer doesn't see a
- * matching tag. Case-insensitive because the HTML tokenizer is.
+ * Normalise the URL the RSC plugin put in `data-rsc-css-href` to a key that
+ * could appear in our map. We always store keys as the on-disk relative
+ * path with a leading slash (`/_next/static/foo.css`). When `assetPrefix`
+ * is configured as an absolute URL (e.g. `https://cdn.example.com`), the
+ * plugin emits a fully-qualified URL and the bare-path lookup would miss
+ * — so we yield both the original string *and* the path portion so callers
+ * can probe in order. Path-prefix assetPrefix (`/cdn/_next/static/foo.css`)
+ * works without normalisation because the on-disk layout matches the URL
+ * 1-for-1.
+ */
+function inlineCssMapKeyCandidates(href: string): string[] {
+  // Cheap fast-path: bare paths are the common case.
+  if (href.startsWith("/")) return [href];
+  // `https://…/_next/static/foo.css` → also try `/_next/static/foo.css`.
+  try {
+    const url = new URL(href);
+    return [href, url.pathname];
+  } catch {
+    return [href];
+  }
+}
+
+/**
+ * Escape `</style>` and `</STYLE>` so user-authored CSS can't break out of
+ * the inline `<style>` element. The CSS spec doesn't recognize `</style>`
+ * as a comment terminator, but the HTML parser does — once it sees the
+ * closing tag, everything after is parsed as HTML. The minimal mitigation
+ * is to insert a backslash so the HTML tokenizer no longer matches the
+ * closing tag (CSS itself happily ignores the backslash since it's not
+ * inside a recognised escape sequence; the literal text `<\/style>` is not
+ * a valid CSS production but the rule containing it is already inside a
+ * `content:` string literal or comment, so the parser drops the rule
+ * rather than emitting it). Case-insensitive because the HTML tokenizer is.
  *
  * See https://html.spec.whatwg.org/multipage/parsing.html#parse-error-end-tag-in-style
  */
@@ -92,17 +119,31 @@ function escapeStyleTagBoundary(css: string): string {
  * the URL is not present in `map` (e.g. a stale entry, a third-party CSS,
  * or no map was registered) the link tag is left in place — the page still
  * works, just without the inlining optimisation.
+ *
+ * `nonce` is forwarded to the emitted `<style>` so CSP policies that use
+ * `style-src 'nonce-…'` continue to apply — the original `<link>` tags
+ * don't carry nonces, but inline `<style>` blocks must (otherwise CSP
+ * blocks them and the page renders unstyled).
  */
 export function rewriteRscCssLinksToInline(
   html: string,
   map: Record<string, string> | undefined,
+  nonce?: string,
 ): string {
   if (!map) return html;
+  const nonceAttr = createNonceAttribute(nonce);
   return html.replace(RSC_CSS_LINK_RE, (match, hrefAttr: string) => {
     const href = decodeRscCssHref(hrefAttr);
-    const css = map[href];
+    let css: string | undefined;
+    for (const key of inlineCssMapKeyCandidates(href)) {
+      css = map[key];
+      if (css !== undefined) break;
+    }
     if (css === undefined) return match;
-    return `<style data-vinext-inline-css="${hrefAttr}">${escapeStyleTagBoundary(css)}</style>`;
+    return (
+      `<style data-vinext-inline-css="${escapeHtmlAttr(href)}"${nonceAttr}>` +
+      `${escapeStyleTagBoundary(css)}</style>`
+    );
   });
 }
 
@@ -118,8 +159,12 @@ export function rewriteRscCssLinksToInline(
  * chunks, the partial tag is held until the rest of the tag arrives — the
  * regex would otherwise fail to match a tag whose `data-rsc-css-href`
  * attribute lands in the next chunk.
+ *
+ * `nonce` is the SSR-time script/style nonce — when present, the inlined
+ * `<style>` tags carry `nonce="…"` so they pass CSP policies that gate
+ * inline styles behind `style-src 'nonce-…'`.
  */
-export function createInlineCssTransform(): TransformStream<Uint8Array, Uint8Array> {
+export function createInlineCssTransform(nonce?: string): TransformStream<Uint8Array, Uint8Array> {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let pending = "";
@@ -149,13 +194,13 @@ export function createInlineCssTransform(): TransformStream<Uint8Array, Uint8Arr
         emit = text;
         pending = "";
       }
-      const rewritten = rewriteRscCssLinksToInline(emit, map);
+      const rewritten = rewriteRscCssLinksToInline(emit, map, nonce);
       if (rewritten) controller.enqueue(encoder.encode(rewritten));
     },
     flush(controller) {
       if (!pending) return;
       const map = getInlineCssMap();
-      const out = rewriteRscCssLinksToInline(pending, map);
+      const out = rewriteRscCssLinksToInline(pending, map, nonce);
       pending = "";
       controller.enqueue(encoder.encode(out));
     },

@@ -20,10 +20,17 @@ import {
   setInlineCssMap,
 } from "../packages/vinext/src/server/app-inline-css.js";
 
-async function runTransform(html: string): Promise<string> {
+/**
+ * Drive the transform with one or more pre-encoded chunks. Splitting input
+ * across chunks exercises the cross-chunk tag-buffering codepath — the
+ * transform must hold partial `<link …>` openings until a chunk completes
+ * the tag, otherwise the regex misses the rewrite and we'd silently emit
+ * the original `<link rel="stylesheet">`.
+ */
+async function runTransform(chunks: string | string[], nonce?: string): Promise<string> {
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
-  const transform = createInlineCssTransform();
+  const transform = createInlineCssTransform(nonce);
   const writer = transform.writable.getWriter();
   const reader = transform.readable.getReader();
   const out: string[] = [];
@@ -36,7 +43,10 @@ async function runTransform(html: string): Promise<string> {
     }
   })();
 
-  await writer.write(encoder.encode(html));
+  const list = Array.isArray(chunks) ? chunks : [chunks];
+  for (const piece of list) {
+    await writer.write(encoder.encode(piece));
+  }
   await writer.close();
   await readPromise;
 
@@ -53,6 +63,33 @@ describe("rewriteRscCssLinksToInline", () => {
     expect(out).toContain('<style data-vinext-inline-css="/_next/static/foo.css">');
     expect(out).toContain("p { color: red; }");
     expect(out).not.toContain('<link rel="stylesheet"');
+  });
+
+  it("emits nonce on the inlined <style> tag when provided", () => {
+    // Without a nonce, sites that ship `Content-Security-Policy:
+    // style-src 'nonce-…'` see the inlined block blocked at parse time
+    // and render unstyled. The `<link>` tag the feature replaces wasn't
+    // subject to the same rule, so the nonce has to land on the new
+    // `<style>` to preserve parity.
+    const html = `<link rel="stylesheet" data-rsc-css-href="/x.css" href="/x.css"/>`;
+    const out = rewriteRscCssLinksToInline(html, { "/x.css": "a {}" }, "abc123");
+    expect(out).toContain('<style data-vinext-inline-css="/x.css" nonce="abc123">');
+  });
+
+  it("looks up CSS by URL pathname when assetPrefix yields an absolute URL", () => {
+    // With `assetPrefix: "https://cdn.example.com"`, the RSC plugin emits a
+    // fully-qualified URL in `data-rsc-css-href`. The map is keyed by the
+    // path portion (matching the on-disk relative path under dist/client),
+    // so the lookup needs to try both forms.
+    const html =
+      `<link rel="stylesheet" ` +
+      `data-rsc-css-href="https://cdn.example.com/_next/static/foo.css" ` +
+      `href="https://cdn.example.com/_next/static/foo.css"/>`;
+    const map = { "/_next/static/foo.css": "p { color: blue; }" };
+    const out = rewriteRscCssLinksToInline(html, map);
+    expect(out).toContain("<style");
+    expect(out).toContain("p { color: blue; }");
+    expect(out).not.toContain("<link");
   });
 
   it("leaves user-authored stylesheet links (no data-rsc-css-href) alone", () => {
@@ -119,5 +156,26 @@ describe("createInlineCssTransform", () => {
   it("is a pass-through when no map is registered", async () => {
     const html = `<link rel="stylesheet" data-rsc-css-href="/x.css" href="/x.css"/>`;
     expect(await runTransform(html)).toBe(html);
+  });
+
+  it("forwards the SSR nonce onto the inlined <style> tag", async () => {
+    setInlineCssMap({ "/x.css": "a {}" });
+    const html = `<link rel="stylesheet" data-rsc-css-href="/x.css" href="/x.css"/>`;
+    const out = await runTransform(html, "nonce-abc");
+    expect(out).toContain('nonce="nonce-abc"');
+    expect(out).toContain("<style");
+  });
+
+  it("rewrites a tag that React Fizz split across two chunks", async () => {
+    // The transform buffers the open angle bracket until the closing `>`
+    // arrives in a later chunk — otherwise the regex would see just
+    // `<link rel="stylesheet" data-r` and miss the rewrite.
+    setInlineCssMap({ "/x.css": "a {}" });
+    const before = `<head><link rel="stylesheet" data-rsc-`;
+    const after = `css-href="/x.css" href="/x.css"/></head>`;
+    const out = await runTransform([before, after]);
+    expect(out).toContain("<style");
+    expect(out).toContain("a {}");
+    expect(out).not.toContain("<link");
   });
 });
