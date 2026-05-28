@@ -37,12 +37,28 @@ function extractTestData(html: string): { url: string } {
   if (!match) {
     throw new Error(`#test-data not found in HTML: ${html.slice(0, 200)}`);
   }
-  const decoded = match[1]
-    .replace(/<!--[\s\S]*?-->/g, "")
-    .replace(/&quot;/g, '"')
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">");
+  // Strip HTML comments in a loop until none remain — guards against
+  // accidentally reintroducing a "<!--" sequence after the first pass.
+  let stripped = match[1];
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const next = stripped.replace(/<!--[\s\S]*?-->/g, "");
+    if (next === stripped) break;
+    stripped = next;
+  }
+  // Single-pass entity decode to avoid the double-unescape pitfall
+  // (e.g. "&amp;lt;" must NOT become "<"). All known named entities are
+  // matched in one regex; the replacer picks the canonical decoded form.
+  const ENTITIES: Record<string, string> = {
+    "&quot;": '"',
+    "&amp;": "&",
+    "&lt;": "<",
+    "&gt;": ">",
+  };
+  const decoded = stripped.replace(
+    /&(?:quot|amp|lt|gt);/g,
+    (m) => ENTITIES[m] ?? m,
+  );
   return JSON.parse(decoded);
 }
 
