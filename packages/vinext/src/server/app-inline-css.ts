@@ -31,7 +31,7 @@ import { createNonceAttribute, escapeHtmlAttr } from "./html.js";
  * Returns `undefined` when no map has been registered — callers should
  * keep the original `<link rel="stylesheet">` tag in that case.
  */
-export function getInlineCssMap(): Record<string, string> | undefined {
+function getInlineCssMap(): Record<string, string> | undefined {
   return globalThis.__VINEXT_INLINE_CSS_MAP__;
 }
 
