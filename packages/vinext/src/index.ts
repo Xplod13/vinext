@@ -119,6 +119,7 @@ import {
 } from "./plugins/fonts.js";
 import { hasWranglerConfig, formatMissingCloudflarePluginError } from "./deploy.js";
 import { computeLazyChunks } from "./utils/lazy-chunks.js";
+import { collectInlineCssMap } from "./utils/inline-css.js";
 import { resolvePostcssStringPlugins } from "./plugins/postcss.js";
 import { buildSassPreprocessorOptions } from "./plugins/sass.js";
 import {
@@ -2279,6 +2280,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
               publicFiles: scanPublicFileRoutes(root),
               globalNotFoundPath,
               draftModeSecret,
+              inlineCss: nextConfig?.inlineCss,
             },
             instrumentationPath,
           );
@@ -4237,13 +4239,23 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
             }
           }
 
+          // When `experimental.inlineCss` is enabled, build a URL→content
+          // map of every CSS file under `dist/client/` so the Workers
+          // runtime (which has no fs access at request time) can rewrite
+          // App Router stylesheet links into inline `<style>` blocks. The
+          // Node prod-server walks the same directory at startup instead.
+          let inlineCssMap: Record<string, string> | null = null;
+          if (nextConfig?.inlineCss === true) {
+            inlineCssMap = collectInlineCssMap(clientDir);
+          }
+
           if (hasAppDir) {
             // App Router: the RSC plugin handles __VINEXT_CLIENT_ENTRY__
             // via loadBootstrapScriptContent(), but we still need to inject
             // __VINEXT_LAZY_CHUNKS__ and __VINEXT_SSR_MANIFEST__ into the
             // worker entry at dist/server/index.js.
             const workerEntry = path.resolve(distDir, "server", "index.js");
-            if (fs.existsSync(workerEntry) && (lazyChunksData || ssrManifestData)) {
+            if (fs.existsSync(workerEntry) && (lazyChunksData || ssrManifestData || inlineCssMap)) {
               let code = fs.readFileSync(workerEntry, "utf-8");
               const globals: string[] = [];
               if (ssrManifestData) {
@@ -4254,6 +4266,11 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
               if (lazyChunksData) {
                 globals.push(
                   `globalThis.__VINEXT_LAZY_CHUNKS__ = ${JSON.stringify(lazyChunksData)};`,
+                );
+              }
+              if (inlineCssMap && Object.keys(inlineCssMap).length > 0) {
+                globals.push(
+                  `globalThis.__VINEXT_INLINE_CSS_MAP__ = ${JSON.stringify(inlineCssMap)};`,
                 );
               }
               code = globals.join("\n") + "\n" + code;

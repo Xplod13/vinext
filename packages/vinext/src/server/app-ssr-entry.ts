@@ -36,6 +36,7 @@ import {
   createRscEmbedTransform,
   createTickBufferedTransform,
 } from "./app-ssr-stream.js";
+import { createInlineCssTransform } from "./app-inline-css.js";
 import { deferUntilStreamConsumed } from "./app-page-stream.js";
 import { createSsrErrorMetaRenderer } from "./app-ssr-error-meta.js";
 import { getClientTraceMetadataHTML } from "./client-trace-metadata.js";
@@ -454,12 +455,19 @@ export async function handleSsr(
         const getBeforeInteractiveHeadHTML = (): string =>
           renderBeforeInteractiveInlineScripts(beforeInteractiveInlineScripts);
 
-        return deferUntilStreamConsumed(
-          htmlStream.pipeThrough(
+        // When `experimental.inlineCss` is enabled, an inline-css map will
+        // have been registered (Node prod server: built from disk at
+        // startup; Cloudflare worker: inlined at build time). When the map
+        // is absent (dev, or feature disabled) the transform is a
+        // pass-through. Run AFTER the tick-buffered transform so its
+        // re-emit of RSC chunks doesn't accidentally feed a partial tag
+        // into the link-tag rewriter.
+        const transformed = htmlStream
+          .pipeThrough(
             createTickBufferedTransform(rscEmbed, getInsertedHTML, getBeforeInteractiveHeadHTML),
-          ),
-          cleanup,
-        );
+          )
+          .pipeThrough(createInlineCssTransform());
+        return deferUntilStreamConsumed(transformed, cleanup);
       } catch (error) {
         cleanup();
         throw error;

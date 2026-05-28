@@ -247,6 +247,21 @@ declare global {
   var __VINEXT_CLIENT_ENTRY__: string | undefined;
 
   /**
+   * Map of CSS asset URLs (as emitted by `@vitejs/plugin-rsc`'s Resources
+   * component, e.g. `"/_next/static/foo.css"`) to their full file contents.
+   * Populated when `experimental.inlineCss` is enabled in `next.config`:
+   * Cloudflare worker entries get this inlined at build time; the Node
+   * production server populates it from disk on startup. Read by the App
+   * Router SSR HTML stream transform to replace
+   * `<link rel="stylesheet" data-rsc-css-href="…">` tags with inline
+   * `<style>…</style>` blocks. Mirrors Next.js `experimental.inlineCss`.
+   *
+   * @see https://nextjs.org/docs/app/api-reference/config/next-config-js/inlineCss
+   */
+  // oxlint-disable-next-line no-var
+  var __VINEXT_INLINE_CSS_MAP__: Record<string, string> | undefined;
+
+  /**
    * Current active locale, set on `globalThis` for server-side SSR rendering
    * (Pages Router with i18n).  Mirrors `window.__VINEXT_LOCALE__` for use in
    * environments where `window` is not available (e.g. Cloudflare Workers).

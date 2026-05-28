@@ -222,6 +222,11 @@ const CONFIG_SUPPORT: Record<string, { status: Status; detail?: string }> = {
     detail:
       "App Shell prefetching not yet implemented; requires cacheComponents and other co-flags vinext does not support",
   },
+  "experimental.inlineCss": {
+    status: "supported",
+    detail:
+      'production builds inline App Router CSS as <style> tags in <head> instead of <link rel="stylesheet">',
+  },
   "i18n.domains": {
     status: "partial",
     detail: "supported for Pages Router; App Router unchanged",

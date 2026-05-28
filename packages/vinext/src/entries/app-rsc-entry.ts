@@ -152,6 +152,17 @@ type AppRouterConfig = {
   publicFiles?: string[];
   /** Server-only token used to validate the draft-mode bypass cookie. */
   draftModeSecret?: string;
+  /**
+   * When true, the App Router rewrites RSC stylesheet links to inline
+   * `<style>` tags during SSR. Sourced from `experimental.inlineCss` in
+   * next.config. Re-exported as `__inlineCss` so the production server
+   * (Node prod-server and the Cloudflare build step) can read CSS contents
+   * from disk and populate `globalThis.__VINEXT_INLINE_CSS_MAP__` at
+   * startup.
+   *
+   * @see https://nextjs.org/docs/app/api-reference/config/next-config-js/inlineCss
+   */
+  inlineCss?: boolean;
 };
 
 /**
@@ -182,6 +193,7 @@ export function generateRscEntry(
   const htmlLimitedBots = config?.htmlLimitedBots;
   const clientTraceMetadata = config?.clientTraceMetadata;
   const assetPrefix = config?.assetPrefix ?? "";
+  const inlineCss = config?.inlineCss === true;
   const expireTime = config?.expireTime ?? DEFAULT_EXPIRE_TIME;
   const i18nConfig = config?.i18n ?? null;
   const hasPagesDir = config?.hasPagesDir ?? false;
@@ -496,6 +508,10 @@ const __clientTraceMetadata = ${JSON.stringify(clientTraceMetadata)};
 // mirrors the embedded \`__basePath\` pattern (and Pages Router's
 // \`vinextConfig\` export). Empty string when unset.
 export const __assetPrefix = ${JSON.stringify(assetPrefix)};
+// Re-exported so prod-server / cloudflare-build know whether to populate
+// \`globalThis.__VINEXT_INLINE_CSS_MAP__\`. Mirrors \`experimental.inlineCss\`
+// from next.config; production-only, dev is a no-op.
+export const __inlineCss = ${JSON.stringify(inlineCss)};
 
 export function seedMemoryCacheFromPrerender(serverDir) {
   return __seedMemoryCacheFromPrerender(serverDir, {

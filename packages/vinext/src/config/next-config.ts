@@ -432,6 +432,15 @@ export type ResolvedNextConfig = {
    * Mirrors Next.js: packages/next/src/server/lib/trace/utils.ts (getTracedMetadata).
    */
   clientTraceMetadata: string[] | undefined;
+  /**
+   * Inline compiled CSS as `<style>` tags in `<head>` instead of emitting
+   * `<link rel="stylesheet">` references. Sourced from
+   * `experimental.inlineCss` in next.config. Production-only (Next.js
+   * disables inlining in dev because it breaks HMR).
+   *
+   * @see https://nextjs.org/docs/app/api-reference/config/next-config-js/inlineCss
+   */
+  inlineCss: boolean;
 };
 
 // Mirrors Next.js's accepted set in packages/next/src/shared/lib/constants.ts
@@ -1091,6 +1100,7 @@ export async function resolveNextConfig(
       compilerDefineServer: {},
       instrumentationClientInject: [],
       clientTraceMetadata: undefined,
+      inlineCss: false,
     };
     detectNextIntlConfig(root, resolved);
     return resolved;
@@ -1323,6 +1333,11 @@ export async function resolveNextConfig(
           (value): value is string => typeof value === "string",
         )
       : undefined,
+    // Production-only: Next.js skips inlining in dev because HMR keeps
+    // inserting/removing <style> nodes that conflict with the inlined ones.
+    // We mirror the Next.js gate at the transform site, but still expose
+    // the resolved flag so build-time wiring can decide what to emit.
+    inlineCss: experimental?.inlineCss === true,
   };
 
   // Auto-detect next-intl (lowest priority — explicit aliases from
