@@ -1151,6 +1151,7 @@ describe("detectNextIntlConfig", () => {
       compilerDefineServer: {},
       instrumentationClientInject: [],
       clientTraceMetadata: undefined,
+      inlineCss: false,
       ...overrides,
     };
   }
