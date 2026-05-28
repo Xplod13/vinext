@@ -93,6 +93,7 @@ import {
 import { asyncHooksStubPlugin } from "./plugins/async-hooks-stub.js";
 import { clientReferenceDedupPlugin } from "./plugins/client-reference-dedup.js";
 import { dataUrlCssPlugin } from "./plugins/css-data-url.js";
+import { styledJsxPlugin } from "./plugins/styled-jsx.js";
 import { createRscClientReferenceLoadersPlugin } from "./plugins/rsc-client-reference-loaders.js";
 import { createInstrumentationClientTransformPlugin } from "./plugins/instrumentation-client.js";
 import {
@@ -984,6 +985,11 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
     // load. Matches Turbopack's behaviour for the Next.js
     // `css-modules-data-urls` fixture. See plugins/css-data-url.ts.
     dataUrlCssPlugin(),
+    // Minify CSS inside `<style jsx>` blocks so the SSR HTML matches
+    // Next.js's canonical styled-jsx output shape (e.g. `p{color:blue}`).
+    // Next.js's compiler runs the styled-jsx transform; vinext's OXC JSX
+    // transform does not. See plugins/styled-jsx.ts and issue #1556.
+    styledJsxPlugin(),
     {
       name: "vinext:config",
       enforce: "pre",
