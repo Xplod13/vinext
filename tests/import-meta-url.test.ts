@@ -55,10 +55,7 @@ function extractTestData(html: string): { url: string } {
     "&lt;": "<",
     "&gt;": ">",
   };
-  const decoded = stripped.replace(
-    /&(?:quot|amp|lt|gt);/g,
-    (m) => ENTITIES[m] ?? m,
-  );
+  const decoded = stripped.replace(/&(?:quot|amp|lt|gt);/g, (m) => ENTITIES[m] ?? m);
   return JSON.parse(decoded);
 }
 
