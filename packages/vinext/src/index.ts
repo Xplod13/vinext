@@ -102,6 +102,7 @@ import {
 import { createMiddlewareServerOnlyPlugin } from "./plugins/middleware-server-only.js";
 import { createOptimizeImportsPlugin } from "./plugins/optimize-imports.js";
 import { createOgInlineFetchAssetsPlugin, ogAssetsPlugin } from "./plugins/og-assets.js";
+import { createImportMetaUrlPlugin } from "./plugins/import-meta-url.js";
 import { generateRouteTypes } from "./typegen.js";
 import {
   mergeOptimizeDepsExclude,
@@ -3817,6 +3818,14 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
     createOgInlineFetchAssetsPlugin(),
     // Copy @vercel/og binary assets to the RSC output directory — see src/plugins/og-assets.ts
     ogAssetsPlugin,
+    // Rewrite `import.meta.url` in user source modules to the source file URL
+    // before Rolldown collapses everything into one entry. Without this,
+    // bundled `import.meta.url` resolves to the entry file path instead of
+    // the user's source path, breaking Next.js parity. Registered AFTER
+    // og-assets so its `fetch(new URL(..., import.meta.url))` matching still
+    // runs first on `@vercel/og` and similar libraries — see
+    // src/plugins/import-meta-url.ts and cloudflare/vinext#1505.
+    createImportMetaUrlPlugin(),
     // Collect SSR/RSC bundle externals and write dist/server/vinext-externals.json.
     // Used by emitStandaloneOutput to determine which packages to copy into
     // standalone/node_modules/ — uses the bundler's own import graph instead of
