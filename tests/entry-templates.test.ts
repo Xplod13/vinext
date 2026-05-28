@@ -798,4 +798,69 @@ describe("Pages Router entry template", () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  // Issue #1336 (test/e2e/i18n-ignore-rewrite-source-locale): rewrites whose
+  // destination resolves to a `public/` file need to serve the file via the
+  // Workers Assets binding. The generated server entry embeds the public-file
+  // list at build time so the worker can detect those rewrites at runtime
+  // without re-scanning the filesystem.
+  it("embeds the project's public/ file list in vinextConfig.publicFiles", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "vinext-pages-public-"));
+    const pagesDir = path.join(tmpDir, "pages");
+    const publicDir = path.join(tmpDir, "public");
+
+    try {
+      fs.mkdirSync(pagesDir, { recursive: true });
+      fs.mkdirSync(publicDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(pagesDir, "index.tsx"),
+        "export default function Page() { return null; }",
+      );
+      fs.writeFileSync(path.join(publicDir, "file.txt"), "hello from file.txt");
+      fs.writeFileSync(path.join(publicDir, "logo.svg"), "<svg/>");
+
+      const code = await generateServerEntry(
+        pagesDir,
+        await resolveNextConfig({}),
+        createValidFileMatcher(),
+        null,
+        null,
+        tmpDir,
+      );
+
+      // The serialized vinextConfig must contain the publicFiles slot with
+      // both files. Order is sorted ASCII (`file.txt` < `logo.svg`).
+      expect(code).toContain('"publicFiles":["/file.txt","/logo.svg"]');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("emits an empty publicFiles list when no project root is provided", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "vinext-pages-no-public-"));
+    const pagesDir = path.join(tmpDir, "pages");
+
+    try {
+      fs.mkdirSync(pagesDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(pagesDir, "index.tsx"),
+        "export default function Page() { return null; }",
+      );
+
+      // Older callers pass no root — they get an empty publicFiles list and
+      // the public-file rewrite branch is a no-op. This guards against the
+      // worker template crashing when `vinextConfig.publicFiles` is missing.
+      const code = await generateServerEntry(
+        pagesDir,
+        await resolveNextConfig({}),
+        createValidFileMatcher(),
+        null,
+        null,
+      );
+
+      expect(code).toContain('"publicFiles":[]');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 });

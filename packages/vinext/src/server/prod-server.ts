@@ -1886,6 +1886,30 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
         }
       }
 
+      // ── 7a. Serve public/ file when a beforeFiles rewrite lands on one ──
+      // Mirrors Next.js's `check_fs` step between beforeFiles and afterFiles
+      // rewrites (resolve-routes.ts). Without this branch a rewrite like
+      // `{ source: '/:locale/rewrite-files/:path*', destination: '/:path*',
+      //    locale: false }` (#1336) cannot reach the static file it targets,
+      // because step 5b only saw the pre-rewrite pathname.
+      if (
+        configRewriteFired &&
+        resolvedPathname !== "/" &&
+        !resolvedPathname.startsWith("/api/") &&
+        !resolvedPathname.startsWith(`/${ASSET_PREFIX_URL_DIR}/`) &&
+        (await tryServeStatic(
+          req,
+          res,
+          clientDir,
+          resolvedPathname,
+          compress,
+          staticCache,
+          middlewareHeaders,
+        ))
+      ) {
+        return;
+      }
+
       // ── 7b. Reject out-of-basePath requests that no rule rewrote ──
       // When `basePath` is configured and the request was outside it,
       // only `basePath: false` rules can keep it alive. If none matched,

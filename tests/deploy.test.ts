@@ -627,6 +627,35 @@ describe("generatePagesRouterWorkerEntry", () => {
     expect(content).toContain('from "vinext/server/request-pipeline"');
   });
 
+  // Ported from Next.js: test/e2e/i18n-ignore-rewrite-source-locale/rewrites.test.ts
+  // — "get public file by skipping locale in rewrite". A rewrite with
+  // `locale: false` whose destination resolves to a `public/` file must
+  // serve the file via `env.ASSETS` after the rewrite fires. Without this
+  // branch the rewritten path (`/file.txt`) misses every page route and
+  // returns the 404 page instead of the asset contents (issue #1336).
+  it("serves public files after a beforeFiles rewrite lands on one", () => {
+    const content = generatePagesRouterWorkerEntry();
+    // The worker template must read the build-time publicFiles list.
+    expect(content).toContain("vinextConfig?.publicFiles");
+    expect(content).toContain("const publicFiles: ReadonlySet<string>");
+    // After the rewrite fires, the worker must short-circuit through
+    // env.ASSETS for any path whose pathname is in the publicFiles set.
+    expect(content).toMatch(/configRewriteFired\s*&&\s*publicFiles\.has\(resolvedPathname\)/);
+    expect(content).toContain("env.ASSETS.fetch");
+  });
+
+  it("serves public files after an afterFiles rewrite lands on one", () => {
+    const content = generatePagesRouterWorkerEntry();
+    // The afterFiles branch updates resolvedPathname when a rewrite matches;
+    // the same publicFiles short-circuit must apply there so an `afterFiles`
+    // rule that targets `/public-asset.png` is honoured too.
+    const afterFilesPos = content.indexOf("Apply afterFiles rewrites");
+    expect(afterFilesPos).toBeGreaterThan(-1);
+    const afterFilesBlock = content.slice(afterFilesPos, afterFilesPos + 1200);
+    expect(afterFilesBlock).toContain("publicFiles.has(resolvedPathname)");
+    expect(afterFilesBlock).toContain("fetchPublicAsset");
+  });
+
   it("handles basePath stripping and creates a new request with stripped URL for middleware", () => {
     const content = generatePagesRouterWorkerEntry();
     expect(content).toContain("basePath");

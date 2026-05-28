@@ -578,6 +578,12 @@ const i18nConfig = vinextConfig?.i18n ?? null;
 const configRedirects = vinextConfig?.redirects ?? [];
 const configRewrites = vinextConfig?.rewrites ?? { beforeFiles: [], afterFiles: [], fallback: [] };
 const configHeaders = vinextConfig?.headers ?? [];
+// Public/ files scanned at build time. Rewrites/redirects can land on these
+// paths (issue #1336: \`source: '/:locale/rewrite-files/:path*'\` →
+// \`destination: '/:path*'\` rewrites to public file paths), so the worker
+// has to recognise them and fetch from \`env.ASSETS\` instead of falling
+// through to \`renderPage\` (which returns 404 for unknown routes).
+const publicFiles: ReadonlySet<string> = new Set(vinextConfig?.publicFiles ?? []);
 const imageConfig: ImageConfig | undefined = vinextConfig?.images ? {
   dangerouslyAllowSVG: vinextConfig.images.dangerouslyAllowSVG,
   dangerouslyAllowLocalIP: vinextConfig.images.dangerouslyAllowLocalIP,
@@ -593,6 +599,14 @@ function hasBasePath(pathname: string, basePath: string): boolean {
 function stripBasePath(pathname: string, basePath: string): string {
   if (!hasBasePath(pathname, basePath)) return pathname;
   return pathname.slice(basePath.length) || "/";
+}
+
+// Fetch a public/ file from the bound Workers Assets binding after a rewrite
+// resolves to a static asset. The url constructed here preserves the worker
+// origin so env.ASSETS treats the request as same-origin.
+function fetchPublicAsset(env: Env, request: Request, pathname: string): Promise<Response> {
+  const assetUrl = new URL(pathname, request.url);
+  return Promise.resolve(env.ASSETS.fetch(new Request(assetUrl, { headers: request.headers })));
 }
 
 export default {
@@ -855,6 +869,23 @@ export default {
         });
       }
 
+      // ── 6b. Serve public/ file when a beforeFiles rewrite lands on one ──
+      // Next.js routing order (resolve-routes.ts) checks the filesystem (which
+      // includes public/) between beforeFiles and afterFiles rewrites. In a
+      // Worker, Cloudflare Assets serves direct hits to public/ paths BEFORE
+      // the worker runs, but a rewrite produces a path we never see directly.
+      // Without this branch a rewrite like
+      //   { source: '/:locale/rewrite-files/:path*', destination: '/:path*',
+      //     locale: false }
+      // (#1336: i18n-ignore-rewrite-source-locale) would 404 because
+      // \`renderPage\` doesn't know about public/ files.
+      if (configRewriteFired && publicFiles.has(resolvedPathname)) {
+        if (request.method === "GET" || request.method === "HEAD") {
+          const assetResponse = await fetchPublicAsset(env, request, resolvedPathname);
+          return mergeHeaders(assetResponse, middlewareHeaders, middlewareRewriteStatus);
+        }
+      }
+
       // ── 7. API routes ─────────────────────────────────────────────
       // Forward ctx so handlePagesApiRoute can wrap the user handler in
       // runWithExecutionContext, making ctx.waitUntil() reachable from
@@ -890,6 +921,13 @@ export default {
           }
           resolvedUrl = mergeRewriteQuery(resolvedUrl, rewritten);
           resolvedPathname = resolvedUrl.split("?")[0];
+          // Same public/ short-circuit as the beforeFiles branch above.
+          if (publicFiles.has(resolvedPathname)) {
+            if (request.method === "GET" || request.method === "HEAD") {
+              const assetResponse = await fetchPublicAsset(env, request, resolvedPathname);
+              return mergeHeaders(assetResponse, middlewareHeaders, middlewareRewriteStatus);
+            }
+          }
         }
       }
 
