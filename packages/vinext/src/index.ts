@@ -102,6 +102,7 @@ import {
 import { createMiddlewareServerOnlyPlugin } from "./plugins/middleware-server-only.js";
 import { createOptimizeImportsPlugin } from "./plugins/optimize-imports.js";
 import { createOgInlineFetchAssetsPlugin, ogAssetsPlugin } from "./plugins/og-assets.js";
+import { createServerAssetImportMetaUrlPlugin } from "./plugins/server-asset-import-meta-url.js";
 import { generateRouteTypes } from "./typegen.js";
 import {
   mergeOptimizeDepsExclude,
@@ -3812,6 +3813,13 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
         },
       },
     },
+    // Emit assets referenced via `new URL("./asset", import.meta.url)` in
+    // SSR/server environments. Vite's built-in asset-import-meta-url plugin
+    // only runs in the client environment, so server-side URL dependencies
+    // (e.g. edge API routes with `import(new URL('./style.css', ...))`) are
+    // left untransformed and reference files that never get emitted. See
+    // src/plugins/server-asset-import-meta-url.ts and #1346.
+    createServerAssetImportMetaUrlPlugin(),
     // Inline binary assets fetched via `fetch(new URL("./asset", import.meta.url))` —
     // see src/plugins/og-assets.ts
     createOgInlineFetchAssetsPlugin(),

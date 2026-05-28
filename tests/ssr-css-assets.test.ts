@@ -30,7 +30,7 @@ import { describe, it, expect } from "vite-plus/test";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import { resolveConfig, createBuilder, type ResolvedConfig } from "vite";
+import { resolveConfig, createBuilder, build as viteBuild, type ResolvedConfig } from "vite";
 import vinext from "../packages/vinext/src/index.js";
 
 const ROOT_NODE_MODULES = path.resolve(import.meta.dirname, "../node_modules");
@@ -182,6 +182,94 @@ describe("SSR build emits CSS assets referenced by SSR chunks", () => {
         missing,
         `SSR chunks import CSS files that were not emitted:\n${JSON.stringify(missing, null, 2)}`,
       ).toEqual([]);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+      await fs.rm(outDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }, 180_000);
+
+  // Regression test for cloudflare/vinext#1346.
+  //
+  // Mirrors the Next.js deploy-suite fixture
+  // test/e2e/react-version/pages/api/pages-api-edge-url-dep.js which adds a
+  // URL dependency to an edge API route to ensure it does not break the
+  // build:
+  //
+  //   import(new URL('./style.css', import.meta.url).href)
+  //
+  // Vite's built-in `vite:asset-import-meta-url` plugin only runs in the
+  // `client` environment, so prior to the fix the SSR/server bundle was
+  // left with an untransformed `new URL("./style.css", import.meta.url)`
+  // and no emitted CSS file, producing ERR_MODULE_NOT_FOUND at runtime.
+  it("emits assets referenced via `new URL('./X', import.meta.url)` in Pages Router API routes", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "vinext-ssr-url-dep-"));
+    const outDir = await fs.mkdtemp(path.join(os.tmpdir(), "vinext-ssr-url-dep-out-"));
+    try {
+      await fs.symlink(ROOT_NODE_MODULES, path.join(tmpDir, "node_modules"), "junction");
+      const apiDir = path.join(tmpDir, "pages", "api");
+      await fs.mkdir(apiDir, { recursive: true });
+
+      // The CSS file the API route references — this is the artefact we
+      // want emitted to the server bundle output.
+      await fs.writeFile(path.join(apiDir, "style.css"), ".foo { color: red; }\n");
+
+      // Mirror the Next.js fixture verbatim — a URL dependency added to an
+      // edge API route purely to validate that it does not break the build.
+      await fs.writeFile(
+        path.join(apiDir, "with-url-dep.js"),
+        `console.log('TEST_URL', import(new URL('./style.css', import.meta.url).href))\n` +
+          `export default async function handler() { return Response.json({ ok: true }) }\n`,
+      );
+      await fs.writeFile(
+        path.join(tmpDir, "pages", "index.tsx"),
+        "export default function Home() {\n  return <div>Hello</div>;\n}\n",
+      );
+
+      // Run the Pages Router SSR build directly. This mirrors the CLI's
+      // hybrid-app branch (cli.ts) which calls `vite.build(...)` with
+      // `build.ssr` set to the virtual server entry.
+      await viteBuild({
+        root: tmpDir,
+        configFile: false,
+        plugins: [vinext({ disableAppRouter: true })],
+        logLevel: "silent",
+        build: {
+          outDir,
+          emptyOutDir: false,
+          ssr: "virtual:vinext-server-entry",
+          rollupOptions: { output: { entryFileNames: "entry.js" } },
+        },
+      });
+
+      // The server entry must reference the emitted file via a relative
+      // URL (not the untransformed `./style.css` and not the root-absolute
+      // `/_next/static/...` that Vite's default SSR asset URL resolver
+      // would produce, which would resolve to `file:///_next/...` and
+      // crash at Node runtime).
+      const entryPath = path.join(outDir, "entry.js");
+      const entryCode = await fs.readFile(entryPath, "utf8");
+
+      // The original `./style.css` specifier must have been rewritten to
+      // the emitted asset path under `_next/static/`. Match either the
+      // relative or implicit-current-directory form.
+      const urlMatch = entryCode.match(
+        /new URL\(["'](\.\/[^"']*_next\/static\/[^"']*\.css)["']\s*,\s*import\.meta\.url/,
+      );
+      expect(
+        urlMatch,
+        `expected rewritten relative URL to an emitted CSS asset; entry begins:\n` +
+          entryCode.slice(0, 500),
+      ).not.toBeNull();
+
+      const emittedRelPath = urlMatch![1]!;
+      const emittedAbsPath = path.resolve(path.dirname(entryPath), emittedRelPath);
+      const exists = await fs
+        .stat(emittedAbsPath)
+        .then(() => true)
+        .catch(() => false);
+      expect(exists, `expected emitted CSS file at ${emittedAbsPath}; new URL points there`).toBe(
+        true,
+      );
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
       await fs.rm(outDir, { recursive: true, force: true }).catch(() => {});
