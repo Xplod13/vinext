@@ -4654,6 +4654,17 @@ describe("Production server next.config.js features (Pages Router)", () => {
     expect(body).toContain("hello from static-asset.txt");
   });
 
+  // Same parity guarantee for afterFiles rewrites — bonk review on #1645
+  // flagged that deploy.ts handled both rewrite stages but prod-server
+  // only handled beforeFiles. AGENTS.md requires fixing the same bug in
+  // every affected pipeline.
+  it("serves a public file after an afterFiles rewrite resolves to one", async () => {
+    const res = await fetch(`${prodUrl}/aliased-asset-after`);
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("hello from static-asset.txt");
+  });
+
   it("applies rewrites with repeated dynamic params in production", async () => {
     const res = await fetch(`${prodUrl}/repeat-rewrite/hello`);
     expect(res.status).toBe(200);

@@ -77,6 +77,14 @@ const nextConfig = {
           has: [{ type: "cookie", key: "mw-user" }],
           destination: "/about",
         },
+        // Issue #1336 (PR #1645 review): the afterFiles branch must also
+        // re-attempt static file serving once it rewrites to a public/ path.
+        // Without this an afterFiles rewrite to a public file 404s on the
+        // Node prod server even though the equivalent worker entry serves it.
+        {
+          source: "/aliased-asset-after",
+          destination: "/static-asset.txt",
+        },
       ],
       fallback: [
         {

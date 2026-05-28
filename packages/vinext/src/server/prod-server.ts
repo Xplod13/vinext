@@ -1986,6 +1986,26 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
           }
           resolvedUrl = mergeRewriteQuery(resolvedUrl, rewritten);
           resolvedPathname = resolvedUrl.split("?")[0];
+          // Same public/ short-circuit as the beforeFiles branch at step 7a.
+          // Without this an `afterFiles` rewrite that lands on a public file
+          // would 404 here while the equivalent worker entry (deploy.ts)
+          // serves it from `env.ASSETS` — see PR review on #1645.
+          if (
+            resolvedPathname !== "/" &&
+            !resolvedPathname.startsWith("/api/") &&
+            !resolvedPathname.startsWith(`/${ASSET_PREFIX_URL_DIR}/`) &&
+            (await tryServeStatic(
+              req,
+              res,
+              clientDir,
+              resolvedPathname,
+              compress,
+              staticCache,
+              middlewareHeaders,
+            ))
+          ) {
+            return;
+          }
         }
       }
 

@@ -606,7 +606,7 @@ function stripBasePath(pathname: string, basePath: string): string {
 // origin so env.ASSETS treats the request as same-origin.
 function fetchPublicAsset(env: Env, request: Request, pathname: string): Promise<Response> {
   const assetUrl = new URL(pathname, request.url);
-  return Promise.resolve(env.ASSETS.fetch(new Request(assetUrl, { headers: request.headers })));
+  return env.ASSETS.fetch(new Request(assetUrl, { headers: request.headers }));
 }
 
 export default {
