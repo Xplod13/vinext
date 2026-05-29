@@ -1,6 +1,81 @@
 import type { UserConfig } from "vite";
 
 /**
+ * Extensions that Next.js routes through webpack's `asset/resource` loader and
+ * emits as hashed files under `_next/static/media/`. Mirrors the media
+ * extensions Vite/webpack treat as "assets" referenced from CSS `url(...)`,
+ * JS imports, etc. — images, fonts, video, audio. Stylesheets (`.css`) are
+ * intentionally excluded so they stay at the top of `assetsDir` where the
+ * client manifest and `<link>` injection expect them.
+ *
+ * @see .nextjs-ref/packages/next/src/build/webpack/config/blocks/css/index.ts
+ *   (the `type: 'asset/resource'` rule for CSS `url()` references)
+ */
+const MEDIA_ASSET_EXTENSIONS = new Set([
+  // images
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "svg",
+  "webp",
+  "avif",
+  "ico",
+  "bmp",
+  // fonts
+  "woff",
+  "woff2",
+  "eot",
+  "ttf",
+  "otf",
+  // media
+  "mp4",
+  "webm",
+  "ogg",
+  "mp3",
+  "wav",
+  "flac",
+  "aac",
+  "mov",
+]);
+
+type AssetInfo = { names?: readonly string[]; name?: string };
+
+/**
+ * Build an `assetFileNames` template function that routes media assets
+ * (images, fonts, video, audio) into a `media/` subdirectory of `assetsDir`,
+ * matching Next.js's `_next/static/media/<name>.<HASH>.<ext>` layout, while
+ * leaving every other asset (notably stylesheets) at the top of `assetsDir`
+ * with Vite's default naming.
+ *
+ * Providing any `assetFileNames` disables Vite's implicit `assetsDir` prefix,
+ * so the returned templates include `assetsDir` explicitly. The default
+ * (non-media) branch reproduces Vite's own `<assetsDir>/[name]-[hash][extname]`
+ * shape so CSS files — and the directory Vite derives for them via
+ * `path.dirname(assetFileNames(...))` — land exactly where they did before.
+ *
+ * Media files use a dotted `[name].[hash][extname]` separator to match the
+ * `dark.<HASH>.svg` shape the Next.js SCSS deploy suites assert against.
+ *
+ * `assetsDir` is the already-resolved `build.assetsDir` (e.g. `_next/static`
+ * or `<prefix>/_next/static`); paths use POSIX separators because emitted
+ * asset references are URLs.
+ */
+export function createAssetFileNames(assetsDir: string): (info: AssetInfo) => string {
+  const base = assetsDir.replace(/\/+$/, "");
+  const mediaDir = base ? `${base}/media` : "media";
+  const flatDir = base ? `${base}` : "";
+  return function assetFileNames(info: AssetInfo): string {
+    const name = info.names?.[0] ?? info.name ?? "";
+    const ext = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1).toLowerCase() : "";
+    if (MEDIA_ASSET_EXTENSIONS.has(ext)) {
+      return `${mediaDir}/[name].[hash][extname]`;
+    }
+    return flatDir ? `${flatDir}/[name]-[hash][extname]` : "[name]-[hash][extname]";
+  };
+}
+
+/**
  * Extract the npm package name from a module ID (file path).
  * Returns null if not in node_modules.
  *
@@ -85,10 +160,14 @@ export function createClientManualChunks(shimsDir: string) {
  * compression efficiency — small files restart the compression dictionary,
  * adding ~5-15% wire overhead vs fewer larger chunks.
  */
-export function createClientOutputConfig(clientManualChunks: (id: string) => string | undefined) {
+export function createClientOutputConfig(
+  clientManualChunks: (id: string) => string | undefined,
+  assetFileNames?: (info: AssetInfo) => string,
+) {
   return {
     manualChunks: clientManualChunks,
     experimentalMinChunkSize: 10_000,
+    ...(assetFileNames ? { assetFileNames } : {}),
   };
 }
 

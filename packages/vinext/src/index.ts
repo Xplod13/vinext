@@ -130,6 +130,7 @@ import {
   createClientManualChunks,
   createClientOutputConfig,
   createClientCodeSplittingConfig,
+  createAssetFileNames,
   getClientTreeshakeConfigForVite,
   getBuildBundlerOptions,
   withBuildBundlerOptions,
@@ -552,11 +553,16 @@ const _reactServerShims = new Map<string, string>([
 ]);
 
 const clientManualChunks = createClientManualChunks(_shimsDir);
-const clientOutputConfig = createClientOutputConfig(clientManualChunks);
 const clientCodeSplittingConfig = createClientCodeSplittingConfig(clientManualChunks);
 
-function getClientOutputConfigForVite(viteMajorVersion: number) {
-  return viteMajorVersion >= 8 ? { codeSplitting: clientCodeSplittingConfig } : clientOutputConfig;
+function getClientOutputConfigForVite(viteMajorVersion: number, assetsDir: string) {
+  // Route media `url(...)` assets into `<assetsDir>/media/` so the emitted
+  // URL/on-disk layout matches Next.js's `_next/static/media/...`. CSS and
+  // other assets keep Vite's default naming (see createAssetFileNames).
+  const assetFileNames = createAssetFileNames(assetsDir);
+  return viteMajorVersion >= 8
+    ? { codeSplitting: clientCodeSplittingConfig, assetFileNames }
+    : createClientOutputConfig(clientManualChunks, assetFileNames);
 }
 
 export type VinextOptions = {
@@ -1454,6 +1460,10 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
         // (on the client env), not globally — otherwise it leaks into RSC/SSR
         // environments where it can cause asset resolution issues.
         const isMultiEnv = hasAppDir || hasCloudflarePlugin || hasNitroPlugin;
+        // Canonical on-disk asset directory (e.g. `_next/static`), threaded
+        // into `build.assetsDir` and the client `assetFileNames` template so
+        // media `url(...)` references land under `<assetsDir>/media/`.
+        const resolvedAssetsDir = resolveAssetsDir(nextConfig.assetPrefix ?? "");
 
         const viteConfig: UserConfig = {
           // Disable Vite's default HTML serving - we handle all routing
@@ -1534,7 +1544,18 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
             // and any static file server can resolve
             // `<assetPrefix?>/_next/static/...` requests directly, and
             // misses naturally fall through as plain-text 404s.
-            assetsDir: resolveAssetsDir(nextConfig.assetPrefix ?? ""),
+            assetsDir: resolvedAssetsDir,
+            // Never inline `url(...)` assets (or imported assets) as `data:`
+            // URIs. Next.js routes every CSS `url(./foo.svg)` reference through
+            // webpack's `asset/resource` loader, which *always* emits a hashed
+            // file under `_next/static/media/` and rewrites the URL — it never
+            // inlines. Vite's default inlines assets below 4096 bytes, which
+            // diverges from Next.js and breaks suites that assert on the
+            // emitted media URL (e.g. app-dir/scss/url-global). Setting the
+            // threshold to 0 forces every asset to be emitted as a file.
+            // See https://github.com/cloudflare/vinext/issues/1450 and
+            // .nextjs-ref/packages/next/src/build/webpack/config/blocks/css/index.ts
+            assetsInlineLimit: 0,
             ...withBuildBundlerOptions(viteMajorVersion, {
               // Suppress "Module level directives cause errors when bundled"
               // warnings for "use client" / "use server" directives. Our shims
@@ -1608,7 +1629,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
               // manualChunks is set per-environment on the client env below
               // to avoid leaking into RSC/SSR environments.
               ...(!isSSR && !isMultiEnv
-                ? { output: getClientOutputConfigForVite(viteMajorVersion) }
+                ? { output: getClientOutputConfigForVite(viteMajorVersion, resolvedAssetsDir) }
                 : {}),
             }),
           },
@@ -1988,7 +2009,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                 ...(hasCloudflarePlugin ? { manifest: true } : {}),
                 ...withBuildBundlerOptions(viteMajorVersion, {
                   input: { index: VIRTUAL_APP_BROWSER_ENTRY },
-                  output: getClientOutputConfigForVite(viteMajorVersion),
+                  output: getClientOutputConfigForVite(viteMajorVersion, resolvedAssetsDir),
                   treeshake: getClientTreeshakeConfigForVite(viteMajorVersion),
                 }),
               },
@@ -2009,7 +2030,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                 ssrManifest: true,
                 ...withBuildBundlerOptions(viteMajorVersion, {
                   input: { index: VIRTUAL_CLIENT_ENTRY },
-                  output: getClientOutputConfigForVite(viteMajorVersion),
+                  output: getClientOutputConfigForVite(viteMajorVersion, resolvedAssetsDir),
                   treeshake: getClientTreeshakeConfigForVite(viteMajorVersion),
                 }),
               },
@@ -2035,7 +2056,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                 ssrManifest: true,
                 ...withBuildBundlerOptions(viteMajorVersion, {
                   input: { index: VIRTUAL_CLIENT_ENTRY },
-                  output: getClientOutputConfigForVite(viteMajorVersion),
+                  output: getClientOutputConfigForVite(viteMajorVersion, resolvedAssetsDir),
                   treeshake: getClientTreeshakeConfigForVite(viteMajorVersion),
                 }),
               },
