@@ -62,7 +62,11 @@ type AssetInfo = { names?: readonly string[]; name?: string };
  * asset references are URLs.
  */
 export function createAssetFileNames(assetsDir: string): (info: AssetInfo) => string {
-  const base = assetsDir.replace(/\/+$/, "");
+  // Strip trailing slashes with an explicit loop instead of `replace(/\/+$/, "")`
+  // so CodeQL doesn't flag the regex as polynomial-time on uncontrolled input
+  // (same rationale as resolveAssetsDir in utils/asset-prefix.ts).
+  let base = assetsDir;
+  while (base.endsWith("/")) base = base.slice(0, -1);
   const mediaDir = base ? `${base}/media` : "media";
   const flatDir = base ? `${base}` : "";
   return function assetFileNames(info: AssetInfo): string {
