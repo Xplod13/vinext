@@ -17,6 +17,7 @@ import {
 } from "../packages/vinext/src/server/artifact-compatibility.js";
 import type { LayoutClassificationOptions } from "../packages/vinext/src/server/app-page-execution.js";
 import { renderAppPageLifecycle } from "../packages/vinext/src/server/app-page-render.js";
+import { VINEXT_DYNAMIC_STALE_TIME_HEADER } from "../packages/vinext/src/server/headers.js";
 import type { CachedAppPageValue } from "../packages/vinext/src/shims/cache.js";
 
 function captureRecord(value: ReactNode | AppOutgoingElements): Record<string, unknown> {
@@ -729,6 +730,79 @@ describe("app page render lifecycle", () => {
     await expect(response.text()).resolves.toBe("<html>page</html>");
     expect(common.waitUntilPromises).toHaveLength(0);
     expect(common.isrSet).not.toHaveBeenCalled();
+  });
+
+  it("emits the dynamic stale time header on RSC responses during dynamic renders", async () => {
+    const common = createCommonOptions();
+    const response = await renderAppPageLifecycle({
+      ...common.options,
+      dynamicStaleTimeSeconds: 60,
+      isRscRequest: true,
+    });
+    expect(response.headers.get(VINEXT_DYNAMIC_STALE_TIME_HEADER)).toBe("60");
+    await expect(response.text()).resolves.toBe("flight-data");
+  });
+
+  it("omits the dynamic stale time header during prerender (isPrerender=true)", async () => {
+    const common = createCommonOptions();
+    const response = await renderAppPageLifecycle({
+      ...common.options,
+      dynamicStaleTimeSeconds: 60,
+      isRscRequest: true,
+      isPrerender: true,
+    });
+    expect(response.headers.get(VINEXT_DYNAMIC_STALE_TIME_HEADER)).toBeNull();
+    await expect(response.text()).resolves.toBe("flight-data");
+  });
+
+  it("omits the dynamic stale time header during force-static renders", async () => {
+    const common = createCommonOptions();
+    const response = await renderAppPageLifecycle({
+      ...common.options,
+      dynamicStaleTimeSeconds: 60,
+      isRscRequest: true,
+      isForceStatic: true,
+    });
+    expect(response.headers.get(VINEXT_DYNAMIC_STALE_TIME_HEADER)).toBeNull();
+    await expect(response.text()).resolves.toBe("flight-data");
+  });
+
+  it("omits the dynamic stale time header on production ISR renders captured into the cache", async () => {
+    // Production ISR (revalidate > 0, not force-static, not a build prerender)
+    // satisfies shouldCaptureRscForCacheMetadata, so the render feeds the ISR
+    // cache. Like Next.js's !workStore.isStaticGeneration guard, the
+    // authoritative per-page stale time must not be emitted on such responses.
+    const common = createCommonOptions();
+    const response = await renderAppPageLifecycle({
+      ...common.options,
+      dynamicStaleTimeSeconds: 60,
+      isProduction: true,
+      isRscRequest: true,
+      revalidateSeconds: 60,
+    });
+    expect(response.headers.get(VINEXT_DYNAMIC_STALE_TIME_HEADER)).toBeNull();
+    await expect(response.text()).resolves.toBe("flight-data");
+  });
+
+  it("omits the dynamic stale time header on production default-config renders that turn dynamic", async () => {
+    // Documents the known over-gating at the cache-capture boundary: a production
+    // default-config route (revalidateSeconds === null, not force-dynamic) that
+    // uses a late dynamic API is genuinely dynamic, but shouldCaptureRscForCacheMetadata
+    // is true (computed from config before the stream runs), so the header is omitted.
+    // Next.js would emit it here (!isStaticGeneration); the value is unknowable until
+    // after the headers are built, so the advisory hint is dropped on this NO_STORE
+    // response. See app-page-render.ts gating comment.
+    const common = createCommonOptions();
+    const response = await renderAppPageLifecycle({
+      ...common.options,
+      consumeDynamicUsage: vi.fn(() => true),
+      dynamicStaleTimeSeconds: 60,
+      isProduction: true,
+      isRscRequest: true,
+      revalidateSeconds: null,
+    });
+    expect(response.headers.get(VINEXT_DYNAMIC_STALE_TIME_HEADER)).toBeNull();
+    await expect(response.text()).resolves.toBe("flight-data");
   });
 });
 
