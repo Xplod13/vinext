@@ -4,7 +4,6 @@ import {
   affectedPackages,
   compareVersions,
   decideGeneration,
-  isReleaseCommit,
   maxBump,
   parseBumpFromSubject,
   renderChangeset,
@@ -137,16 +136,6 @@ describe("decideGeneration (THE CORRECTNESS RULE)", () => {
   it("generates when package.json somehow lags the tag (not a skip case)", () => {
     // Only strictly-greater package version triggers the publish guard.
     expect(decideGeneration("0.0.5", "0.0.55").action).toBe("generate");
-  });
-});
-
-describe("isReleaseCommit", () => {
-  it("recognizes changesets-style release commits", () => {
-    expect(isReleaseCommit("Version Packages")).toBe(true);
-    expect(isReleaseCommit("chore: version packages")).toBe(true);
-  });
-  it("does not flag normal commits", () => {
-    expect(isReleaseCommit("feat: add cache adapter")).toBe(false);
   });
 });
 

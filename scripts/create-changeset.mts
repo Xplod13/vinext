@@ -135,18 +135,6 @@ export function decideGeneration(
   };
 }
 
-/** A version/release bump commit that must never produce a changeset. */
-export function isReleaseCommit(subject: string): boolean {
-  const s = String(subject).trim().toLowerCase();
-  return (
-    s === "version packages" ||
-    s.startsWith("chore: version packages") ||
-    s.startsWith("ci(changesets): version packages") ||
-    s.startsWith("rc:") ||
-    s.startsWith("chore(release):")
-  );
-}
-
 /** Build the combined changeset file (frontmatter + bullet body). Pure. */
 export function renderChangeset(pkgBumps: Record<string, Bump>, summaryLines: string[]): string {
   const front = Object.keys(pkgBumps)
@@ -173,25 +161,22 @@ function git(args: string[], cwd: string = REPO_ROOT): string {
 
 type PackageJson = { name?: string; version?: string; private?: boolean };
 
-/** Publishable workspace packages (non-private, versioned): repo-relative dir → name. */
+/** Publishable packages — non-private entries under `packages/*`: dir → name. */
 export function discoverPublishablePackages(root: string = REPO_ROOT): Record<string, string> {
   const map: Record<string, string> = {};
-  for (const wr of ["packages", "apps", "examples", "benchmarks"]) {
-    const base = join(root, wr);
-    if (!existsSync(base)) continue;
-    for (const entry of readdirSync(base, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
-      const pkgJsonPath = join(base, entry.name, "package.json");
-      if (!existsSync(pkgJsonPath)) continue;
-      let pkg: PackageJson;
-      try {
-        pkg = JSON.parse(readFileSync(pkgJsonPath, "utf8")) as PackageJson;
-      } catch {
-        continue;
-      }
-      if (pkg.private === true || !pkg.name || !pkg.version) continue;
-      map[relative(root, join(base, entry.name)).replace(/\\/g, "/")] = pkg.name;
+  const base = join(root, "packages");
+  if (!existsSync(base)) return map;
+  for (const entry of readdirSync(base, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const pkgJsonPath = join(base, entry.name, "package.json");
+    if (!existsSync(pkgJsonPath)) continue;
+    let pkg: PackageJson;
+    try {
+      pkg = JSON.parse(readFileSync(pkgJsonPath, "utf8")) as PackageJson;
+    } catch {
+      continue;
     }
+    if (pkg.private !== true && pkg.name && pkg.version) map[`packages/${entry.name}`] = pkg.name;
   }
   return map;
 }
@@ -280,9 +265,10 @@ export function collectReleaseCommits(
   name: string,
   packageDirToName: Record<string, string>,
 ): Commit[] {
+  // Non-bumping commits (chore/docs/…, incl. the "chore: version packages"
+  // release commit) are excluded by parseBumpFromSubject returning null.
   return commitsInRange(from).filter(
     (c) =>
-      !isReleaseCommit(c.subject) &&
       parseBumpFromSubject(c.subject, c.body) != null &&
       affectedPackages(c.files, packageDirToName).includes(name),
   );
