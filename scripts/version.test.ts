@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { dedupeSortLogins, insertContributors, newestChangelogVersion } from "./version.mts";
+import { dedupeSortLogins, insertContributors } from "./version.mts";
 
 describe("dedupeSortLogins", () => {
   it("strips @, dedupes case-insensitively, and sorts", () => {
@@ -14,16 +14,6 @@ describe("dedupeSortLogins", () => {
   it("drops empties and non-strings", () => {
     // @ts-expect-error testing runtime robustness
     expect(dedupeSortLogins(["@x", "", "  ", null, undefined, 5])).toEqual(["x"]);
-  });
-});
-
-describe("newestChangelogVersion", () => {
-  it("returns the first version heading", () => {
-    const cl = "# vinext\n\n## 0.1.0\n\n### Minor\n\n## 0.0.55\n";
-    expect(newestChangelogVersion(cl)).toBe("0.1.0");
-  });
-  it("returns null when no version heading exists", () => {
-    expect(newestChangelogVersion("# vinext\n")).toBeNull();
   });
 });
 
