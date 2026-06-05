@@ -9,7 +9,7 @@ import {
   parseBumpFromSubject,
   renderChangeset,
   TYPE_BUMP,
-} from "./create-changeset.mjs";
+} from "./create-changeset.mts";
 
 describe("parseBumpFromSubject", () => {
   it("maps feat → minor", () => {

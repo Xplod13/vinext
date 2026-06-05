@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { dedupeSortLogins, insertContributors, newestChangelogVersion } from "./version.mjs";
+import { dedupeSortLogins, insertContributors, newestChangelogVersion } from "./version.mts";
 
 describe("dedupeSortLogins", () => {
   it("strips @, dedupes case-insensitively, and sorts", () => {

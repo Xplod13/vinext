@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * version.mjs — `changeset version` + bottom `## Contributors` list.
+ * version.mts — `changeset version` + bottom `## Contributors` list.
  *
  * Used as the `version:` command for `changesets/action` in
  * .github/workflows/release.yml. It:
@@ -14,6 +14,9 @@
  *      `## Contributors` block to the END of the newest CHANGELOG.md section
  *      (a hard requirement of the migration).
  *
+ * Run directly on Node (>=24, which strips types natively):
+ *   node scripts/version.mts
+ *
  * The CHANGELOG-rewrite logic (`insertContributors`) is a pure, unit-tested
  * function. The git/gh/network glue around it is impure and only runs in CI.
  *
@@ -25,7 +28,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { discoverPublishablePackages } from "./create-changeset.mjs";
+import { discoverPublishablePackages } from "./create-changeset.mts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..");
@@ -43,11 +46,11 @@ const REPO_ROOT = resolve(__dirname, "..");
  * before the next older `## ` heading (or at EOF if it is the only section).
  * Logins are deduped and sorted; each rendered as `@login` on its own line.
  *
- * @param {string} changelog  full CHANGELOG.md text
- * @param {string[]} logins    contributor logins (with or without leading `@`)
- * @returns {string} the rewritten changelog (unchanged if no section / no logins)
+ * @param changelog full CHANGELOG.md text
+ * @param logins    contributor logins (with or without leading `@`)
+ * @returns the rewritten changelog (unchanged if no section / no logins)
  */
-export function insertContributors(changelog, logins) {
+export function insertContributors(changelog: string, logins: string[]): string {
   const cleaned = dedupeSortLogins(logins);
   if (cleaned.length === 0) return changelog;
 
@@ -98,12 +101,8 @@ export function insertContributors(changelog, logins) {
   return [...before, ...rebuiltSection, ...joinedAfter].join("\n");
 }
 
-/**
- * Remove a `## Contributors` heading and its bullet list from a section's lines.
- * @param {string[]} sectionLines
- * @returns {string[]}
- */
-function stripContributorsBlock(sectionLines) {
+/** Remove a `## Contributors` heading and its bullet list from a section's lines. */
+function stripContributorsBlock(sectionLines: string[]): string[] {
   const idx = sectionLines.findIndex((l) => /^##\s+Contributors\s*$/i.test(l));
   if (idx === -1) return sectionLines;
   // Drop from the heading to the end of the section (Contributors is always last).
@@ -113,12 +112,9 @@ function stripContributorsBlock(sectionLines) {
 /**
  * Normalize, dedupe (case-insensitive) and sort contributor logins.
  * Strips a leading `@`, drops empties.
- * @param {string[]} logins
- * @returns {string[]}
  */
-export function dedupeSortLogins(logins) {
-  /** @type {Map<string, string>} */
-  const byLower = new Map();
+export function dedupeSortLogins(logins: string[]): string[] {
+  const byLower = new Map<string, string>();
   for (const raw of logins ?? []) {
     if (typeof raw !== "string") continue;
     const login = raw.trim().replace(/^@+/, "");
@@ -129,12 +125,8 @@ export function dedupeSortLogins(logins) {
   return [...byLower.values()].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
 }
 
-/**
- * Read the newest version recorded in a CHANGELOG (first `## x.y.z` heading).
- * @param {string} changelog
- * @returns {string | null}
- */
-export function newestChangelogVersion(changelog) {
+/** Read the newest version recorded in a CHANGELOG (first `## x.y.z` heading). */
+export function newestChangelogVersion(changelog: string): string | null {
   for (const line of changelog.split("\n")) {
     const m = line.match(/^##\s+(\d+\.\d+\.\d+[^\s]*)\s*$/);
     if (m) return m[1];
@@ -144,23 +136,23 @@ export function newestChangelogVersion(changelog) {
 
 // ───────────────────────────── impure / CI glue ─────────────────────────────
 
-/** @param {string[]} args @param {string} [cwd] */
-function git(args, cwd = REPO_ROOT) {
+function git(args: string[], cwd: string = REPO_ROOT): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 }
 
 /** Snapshot each package's current version before running `changeset version`. */
-function readVersions(packageDirToName) {
-  /** @type {Record<string, string>} */
-  const out = {};
+function readVersions(packageDirToName: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
   for (const dir of Object.keys(packageDirToName)) {
-    const pkg = JSON.parse(readFileSync(join(REPO_ROOT, dir, "package.json"), "utf8"));
-    out[packageDirToName[dir]] = pkg.version;
+    const pkg = JSON.parse(readFileSync(join(REPO_ROOT, dir, "package.json"), "utf8")) as {
+      version?: string;
+    };
+    out[packageDirToName[dir]] = pkg.version ?? "";
   }
   return out;
 }
 
-function runChangesetVersion() {
+function runChangesetVersion(): void {
   // Use the locally installed @changesets/cli bin via the package manager.
   // `vp dlx` resolves it from the workspace devDependency.
   console.log("[version] Running `changeset version`...");
@@ -172,14 +164,14 @@ function runChangesetVersion() {
 
 /**
  * Resolve unique contributor logins for commits in `from..HEAD`, via the GitHub
- * API. Falls back to the commit author name when
- * the API has no associated GitHub user.
- * @param {string} from git ref (prior tag)
- * @param {string} repository "owner/repo"
- * @returns {string[]}
+ * API. Falls back to the commit author name when the API has no associated
+ * GitHub user.
+ *
+ * @param from       git ref (prior tag)
+ * @param repository "owner/repo"
  */
-function resolveContributors(from, repository) {
-  let shas = [];
+function resolveContributors(from: string, repository: string): string[] {
+  let shas: string[] = [];
   try {
     shas = git(["log", `${from}..HEAD`, "--no-merges", "--format=%H"])
       .split("\n")
@@ -187,8 +179,7 @@ function resolveContributors(from, repository) {
   } catch {
     return [];
   }
-  /** @type {string[]} */
-  const logins = [];
+  const logins: string[] = [];
   for (const sha of shas) {
     try {
       const login = execFileSync(
@@ -209,7 +200,7 @@ function resolveContributors(from, repository) {
   return dedupeSortLogins(logins);
 }
 
-function tagRefFor(pkgName, version) {
+function tagRefFor(pkgName: string, version: string): string {
   const scoped = `${pkgName}@${version}`;
   try {
     git(["rev-parse", "--verify", `${scoped}^{commit}`]);
@@ -219,7 +210,7 @@ function tagRefFor(pkgName, version) {
   }
 }
 
-function main() {
+function main(): void {
   const repository = process.env.GITHUB_REPOSITORY || "";
   const packageDirToName = discoverPublishablePackages();
   const before = readVersions(packageDirToName);
@@ -239,7 +230,7 @@ function main() {
       continue;
     }
 
-    let contributors = [];
+    let contributors: string[] = [];
     if (repository) {
       const from = tagRefFor(name, oldVersion);
       contributors = resolveContributors(from, repository);
