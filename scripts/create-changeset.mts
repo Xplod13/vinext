@@ -117,7 +117,17 @@ export function compareVersions(a: string, b: string): -1 | 0 | 1 {
   return 0;
 }
 
-/** THE CORRECTNESS RULE, as a pure function. See the file header. */
+/**
+ * Decide whether to (re)generate changesets for a package this run.
+ *
+ * Auto-changesets are never committed to `main`, so each run regenerates the
+ * whole unreleased set from the last tag (that's why the bump itself isn't the
+ * deciding factor here — that's done per-commit by parseBumpFromSubject). The
+ * one case to suppress: right after a Version PR merges, `package.json` is
+ * bumped but `changeset publish` hasn't created the tag yet. Regenerating then
+ * would re-pick-up the just-released commits and re-open a Version PR instead of
+ * letting the publish run — so skip while the version is ahead of its tag.
+ */
 export function decideGeneration(
   pkgVersion: string,
   tagVersion: string | null,
