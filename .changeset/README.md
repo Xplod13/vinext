@@ -13,8 +13,8 @@ project in
 ## Auto-generated changesets in CI
 
 In this repo, most changesets are **generated automatically from Conventional
-Commits** by `scripts/create-changeset.mjs` during CI (see
-`.github/workflows/release-pr.yml`). Those auto-generated files are named
+Commits** by `scripts/create-changeset.mts` during CI (see
+`.github/workflows/release.yml`). Those auto-generated files are named
 `auto-*.md`, are written only into the CI working tree, and are **never
 committed to `main`** — they exist just long enough for `changesets/action` to
 consume them into the rolling "Version Packages" PR.

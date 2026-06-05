@@ -1,7 +1,7 @@
 name: Release
 
 # Single release workflow. On every push to `main`:
-#   1. create-changeset.mjs writes auto changesets from Conventional Commits into
+#   1. create-changeset.mts writes auto changesets from Conventional Commits into
 #      the WORKING TREE only (never committed to main). Its version-vs-tag guard
 #      generates nothing right after a Version PR merges.
 #   2. changesets/action does everything else — it maintains the rolling "Version
@@ -9,7 +9,7 @@ name: Release
 #      merged) it publishes via OIDC trusted publishing + provenance and creates
 #      the git tag + GitHub Release.
 #
-# `version:` runs scripts/version.mjs (`changeset version` + the `## Contributors`
+# `version:` runs scripts/version.mts (`changeset version` + the `## Contributors`
 # list). `publish:` is `changeset publish`, which publishes only changed packages.
 
 on:

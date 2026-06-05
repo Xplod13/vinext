@@ -163,10 +163,6 @@ export function dedupeSortLogins(logins: string[]): string[] {
 
 // ───────────────────────────── CI glue ─────────────────────────────
 
-function git(args: string[], cwd: string = REPO_ROOT): string {
-  return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
-}
-
 function readVersions(packageDirToName: Record<string, string>): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [dir, name] of Object.entries(packageDirToName)) {
@@ -178,35 +174,27 @@ function readVersions(packageDirToName: Record<string, string>): Record<string, 
   return out;
 }
 
-/** GitHub contributor logins for `from..HEAD` (bots filtered by dedupeSortLogins). */
+/**
+ * GitHub contributor logins for `from..HEAD` via a single (paginated) compare
+ * call. Bots are dropped by dedupeSortLogins. Returns [] on any failure.
+ */
 function resolveContributors(from: string, repository: string): string[] {
-  let shas: string[] = [];
   try {
-    shas = git(["log", `${from}..HEAD`, "--no-merges", "--format=%H"])
-      .split("\n")
-      .filter(Boolean);
+    const out = execFileSync(
+      "gh",
+      [
+        "api",
+        "--paginate",
+        `repos/${repository}/compare/${from}...HEAD`,
+        "--jq",
+        ".commits[].author.login // .commit.author.name",
+      ],
+      { cwd: REPO_ROOT, encoding: "utf8" },
+    );
+    return dedupeSortLogins(out.split("\n").filter(Boolean));
   } catch {
     return [];
   }
-  const logins: string[] = [];
-  for (const sha of shas) {
-    try {
-      const login = execFileSync(
-        "gh",
-        [
-          "api",
-          `repos/${repository}/commits/${sha}`,
-          "--jq",
-          ".author.login // .commit.author.name",
-        ],
-        { cwd: REPO_ROOT, encoding: "utf8" },
-      ).trim();
-      if (login) logins.push(login);
-    } catch {
-      /* ignore individual failures */
-    }
-  }
-  return dedupeSortLogins(logins);
 }
 
 function main(): void {
