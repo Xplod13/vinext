@@ -42,7 +42,7 @@ const GROUPS: { type: string; heading: string }[] = [
 ];
 
 /** An area (commit scope) needs at least this many items for its own sub-group. */
-const AREA_MIN = 4;
+const AREA_MIN = 3;
 
 /** Special-cased area names that shouldn't be naively title-cased. */
 const AREA_ACRONYMS: Record<string, string> = {
@@ -78,7 +78,7 @@ const itemLine = (p: ConventionalParts): string =>
   p.scope ? `- **${humanizeArea(p.scope)}:** ${p.description}` : `- ${p.description}`;
 
 /**
- * Within a type section, give every area with >3 items its own `#### <Area>`
+ * Within a type section, give every area with 3+ items its own `#### <Area>`
  * sub-group (items listed without the now-redundant scope prefix); everything
  * else goes under `#### Misc`. If no area qualifies, the list stays flat.
  */

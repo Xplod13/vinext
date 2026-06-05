@@ -61,23 +61,25 @@ describe("groupedChangelogBody", () => {
     expect(out).toContain("- top-level feature (#2)");
   });
 
-  it("gives areas with >3 items their own sub-group; the rest go under Other", () => {
+  it("gives areas with 3+ items their own sub-group; the rest go under Misc", () => {
     const out = groupedChangelogBody([
       commit("fix(app-router): a (#1)"),
       commit("fix(app-router): b (#2)"),
       commit("fix(app-router): c (#3)"),
-      commit("fix(app-router): d (#4)"),
-      commit("fix(i18n): sticky locale (#5)"),
-      commit("fix: bare fix (#6)"),
+      commit("fix(i18n): sticky locale (#4)"), // 1 item → Misc
+      commit("fix(link): two (#5)"),
+      commit("fix(link): items (#6)"), // 2 items → Misc
+      commit("fix: bare fix (#7)"),
     ]);
-    // App Router (4 items) → own sub-group, no per-item scope prefix
+    // App Router (3 items) → own sub-group, no per-item scope prefix
     expect(out).toContain("#### App Router");
     expect(out).toContain("- a (#1)");
     expect(out).not.toContain("**App Router:**");
-    // small areas → Other, with humanized bold prefix; bare commit stays plain
+    // areas with <3 items → Misc, humanized bold prefix; bare commit stays plain
     expect(out).toContain("#### Misc");
-    expect(out).toContain("- **i18n:** sticky locale (#5)");
-    expect(out).toContain("- bare fix (#6)");
+    expect(out).toContain("- **i18n:** sticky locale (#4)");
+    expect(out).toContain("- **Link:** two (#5)");
+    expect(out).toContain("- bare fix (#7)");
     expect(out.indexOf("#### App Router")).toBeLessThan(out.indexOf("#### Misc"));
   });
 });
