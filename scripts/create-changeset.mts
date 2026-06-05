@@ -94,8 +94,7 @@ export function affectedPackages(
   for (const path of changedPaths) {
     const norm = path.replace(/\\/g, "/");
     for (const dir of dirs) {
-      const prefix = dir === "." ? "" : `${dir.replace(/\/$/, "")}/`;
-      if (prefix === "" || norm.startsWith(prefix)) {
+      if (norm.startsWith(`${dir}/`)) {
         affected.add(packageDirToName[dir]);
         break;
       }

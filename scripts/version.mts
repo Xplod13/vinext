@@ -203,7 +203,8 @@ function main(): void {
   const before = readVersions(packages);
 
   console.log("[version] Running `changeset version`...");
-  execFileSync("vp", ["dlx", "@changesets/cli", "version"], { cwd: REPO_ROOT, stdio: "inherit" });
+  // `vp exec` runs the pinned, installed @changesets/cli — not a floating `dlx` fetch.
+  execFileSync("vp", ["exec", "changeset", "version"], { cwd: REPO_ROOT, stdio: "inherit" });
 
   const after = readVersions(packages);
 
