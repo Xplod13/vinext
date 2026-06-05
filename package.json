@@ -15,7 +15,6 @@
     "test:e2e": "playwright test",
     "knip": "knip",
     "changeset": "changeset",
-    "release:version": "node scripts/version.mjs",
     "prepare": "vp config",
     "postinstall": "vp run vinext#build"
   },

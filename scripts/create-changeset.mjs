@@ -3,7 +3,7 @@
  * create-changeset.mjs — auto-generate Changesets from Conventional Commits.
  *
  * This is the ONLY bespoke "changeset authoring" surface in the release flow.
- * It runs in CI (see .github/workflows/release-pr.yml) BEFORE `changesets/action`
+ * It runs in CI (see .github/workflows/release.yml) BEFORE `changesets/action`
  * and writes `.changeset/auto-*.md` into the working tree only. Those files are
  * never committed to `main`; the action consumes them into the rolling Version
  * PR and they are discarded.

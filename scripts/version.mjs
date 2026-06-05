@@ -3,16 +3,16 @@
  * version.mjs — `changeset version` + bottom `## Contributors` list.
  *
  * Used as the `version:` command for `changesets/action` in
- * .github/workflows/release-pr.yml. It:
+ * .github/workflows/release.yml. It:
  *
  *   1. Runs `changeset version`, which consumes every changeset (auto + manual),
  *      bumps each package's version, writes/updates its CHANGELOG.md, and
  *      cascades internal-dependency bumps.
  *   2. For each package whose version changed, resolves the unique GitHub
  *      contributor @logins across the release commit range (prior tag..HEAD)
- *      using the same `gh api .../commits/{sha}` resolver as publish.yml, then
- *      appends a `## Contributors` block to the END of the newest CHANGELOG.md
- *      section (a hard requirement of the migration).
+ *      using a `gh api .../commits/{sha}` resolver, then appends a
+ *      `## Contributors` block to the END of the newest CHANGELOG.md section
+ *      (a hard requirement of the migration).
  *
  * The CHANGELOG-rewrite logic (`insertContributors`) is a pure, unit-tested
  * function. The git/gh/network glue around it is impure and only runs in CI.
@@ -172,7 +172,7 @@ function runChangesetVersion() {
 
 /**
  * Resolve unique contributor logins for commits in `from..HEAD`, via the GitHub
- * API (same resolver as publish.yml). Falls back to the commit author name when
+ * API. Falls back to the commit author name when
  * the API has no associated GitHub user.
  * @param {string} from git ref (prior tag)
  * @param {string} repository "owner/repo"
