@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   type Commit,
+  type ConventionalParts,
   collectReleaseCommits,
   conventionalParts,
   discoverPublishablePackages,
@@ -32,7 +33,7 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..");
 
-/** Conventional-commit type → changelog section heading, in render order. */
+/** Conventional-commit type → changelog section heading (### level), in order. */
 const GROUPS: { type: string; heading: string }[] = [
   { type: "feat", heading: "Features" },
   { type: "fix", heading: "Bug Fixes" },
@@ -40,24 +41,80 @@ const GROUPS: { type: string; heading: string }[] = [
   { type: "revert", heading: "Reverts" },
 ];
 
-/** Group release commits into `### <Heading>` sections; scope rendered in bold. */
+/** An area (commit scope) needs at least this many items for its own sub-group. */
+const AREA_MIN = 4;
+
+/** Special-cased area names that shouldn't be naively title-cased. */
+const AREA_ACRONYMS: Record<string, string> = {
+  i18n: "i18n",
+  css: "CSS",
+  ppr: "PPR",
+  rsc: "RSC",
+  cdn: "CDN",
+  ssr: "SSR",
+  api: "API",
+  og: "OG",
+  url: "URL",
+  html: "HTML",
+  cli: "CLI",
+};
+
+/** Turn a commit scope like `app-router` into a human-readable area ("App Router"). */
+export function humanizeArea(scope: string): string {
+  return scope
+    .split(/[-_/]+/)
+    .filter(Boolean)
+    .map((w) => AREA_ACRONYMS[w.toLowerCase()] ?? w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
+function pushTo<T>(map: Map<string, T[]>, key: string, value: T): void {
+  const arr = map.get(key);
+  if (arr) arr.push(value);
+  else map.set(key, [value]);
+}
+
+const itemLine = (p: ConventionalParts): string =>
+  p.scope ? `- **${humanizeArea(p.scope)}:** ${p.description}` : `- ${p.description}`;
+
+/**
+ * Within a type section, give every area with >3 items its own `#### <Area>`
+ * sub-group (items listed without the now-redundant scope prefix); everything
+ * else goes under `#### Other`. If no area qualifies, the list stays flat.
+ */
+function renderAreaGroups(items: ConventionalParts[]): string {
+  const byArea = new Map<string, ConventionalParts[]>();
+  for (const it of items) pushTo(byArea, it.scope ?? "", it);
+
+  const big = [...byArea.entries()]
+    .filter(([scope, v]) => scope !== "" && v.length >= AREA_MIN)
+    .sort((a, b) => humanizeArea(a[0]).localeCompare(humanizeArea(b[0])));
+  if (big.length === 0) return items.map(itemLine).join("\n");
+
+  const bigScopes = new Set(big.map(([scope]) => scope));
+  const sub = big.map(
+    ([scope, v]) =>
+      `#### ${humanizeArea(scope)}\n\n${v.map((p) => `- ${p.description}`).join("\n")}`,
+  );
+  const other = items.filter((it) => !(it.scope && bigScopes.has(it.scope)));
+  if (other.length) sub.push(`#### Other\n\n${other.map(itemLine).join("\n")}`);
+  return sub.join("\n\n");
+}
+
+/**
+ * Group release commits into `### <Heading>` type sections, each sub-grouped by
+ * area. Only the known release types (GROUPS) are rendered; in practice callers
+ * pass collectReleaseCommits output, which is already bump-worthy.
+ */
 export function groupedChangelogBody(commits: Commit[]): string {
-  const buckets = new Map<string, string[]>();
+  const byType = new Map<string, ConventionalParts[]>();
   for (const c of commits) {
     const parts = conventionalParts(c.subject);
-    if (!parts) continue;
-    const line = parts.scope
-      ? `- **${parts.scope}:** ${parts.description}`
-      : `- ${parts.description}`;
-    (buckets.get(parts.type) ?? buckets.set(parts.type, []).get(parts.type) ?? []).push(line);
+    if (parts) pushTo(byType, parts.type, parts);
   }
-  const known = new Set(GROUPS.map((g) => g.type));
-  const sections = GROUPS.filter((g) => buckets.get(g.type)?.length).map(
-    (g) => `### ${g.heading}\n\n${buckets.get(g.type)!.join("\n")}`,
-  );
-  const other = [...buckets].filter(([t]) => !known.has(t)).flatMap(([, l]) => l);
-  if (other.length) sections.push(`### Other Changes\n\n${other.join("\n")}`);
-  return sections.join("\n\n");
+  return GROUPS.filter((g) => byType.get(g.type)?.length)
+    .map((g) => `### ${g.heading}\n\n${renderAreaGroups(byType.get(g.type) ?? [])}`)
+    .join("\n\n");
 }
 
 /**

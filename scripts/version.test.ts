@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import type { Commit } from "./create-changeset.mts";
-import { dedupeSortLogins, groupedChangelogBody, rewriteReleaseSection } from "./version.mts";
+import {
+  dedupeSortLogins,
+  groupedChangelogBody,
+  humanizeArea,
+  rewriteReleaseSection,
+} from "./version.mts";
 
 const commit = (subject: string): Commit => ({ sha: subject, subject, body: "", files: [] });
 
@@ -22,34 +27,58 @@ describe("dedupeSortLogins", () => {
   });
 });
 
-describe("groupedChangelogBody", () => {
-  const commits = [
-    commit("feat(cache): add adapter (#1733)"),
-    commit("fix(link): correct prefetch (#1734)"),
-    commit("feat: top-level feature (#1)"),
-    commit("perf(rsc): faster transport (#2)"),
-    commit("chore: noise"), // non-release type → ignored
-  ];
+describe("humanizeArea", () => {
+  it("title-cases hyphenated scopes and respects acronyms", () => {
+    expect(humanizeArea("app-router")).toBe("App Router");
+    expect(humanizeArea("pages-router")).toBe("Pages Router");
+    expect(humanizeArea("cache")).toBe("Cache");
+    expect(humanizeArea("i18n")).toBe("i18n");
+    expect(humanizeArea("css")).toBe("CSS");
+    expect(humanizeArea("ppr")).toBe("PPR");
+  });
+});
 
-  it("groups by type under conventional headings, in order", () => {
-    const out = groupedChangelogBody(commits);
-    expect(out.indexOf("### Features")).toBeGreaterThanOrEqual(0);
+describe("groupedChangelogBody", () => {
+  it("groups by type under headings, in order, ignoring non-release types", () => {
+    const out = groupedChangelogBody([
+      commit("feat(cache): add adapter (#1)"),
+      commit("fix(link): correct prefetch (#2)"),
+      commit("perf(rsc): faster transport (#3)"),
+      commit("chore: noise"),
+    ]);
     expect(out.indexOf("### Features")).toBeLessThan(out.indexOf("### Bug Fixes"));
     expect(out.indexOf("### Bug Fixes")).toBeLessThan(out.indexOf("### Performance"));
-  });
-
-  it("bolds the scope and drops the type prefix; bare commits have no scope", () => {
-    const out = groupedChangelogBody(commits);
-    expect(out).toContain("- **cache:** add adapter (#1733)");
-    expect(out).toContain("- top-level feature (#1)");
-    expect(out).not.toContain("feat(cache)");
-  });
-
-  it("omits empty sections and chore noise", () => {
-    const out = groupedChangelogBody([commit("fix: only a fix")]);
-    expect(out).toContain("### Bug Fixes");
-    expect(out).not.toContain("### Features");
     expect(out).not.toContain("noise");
+  });
+
+  it("stays flat (humanized scope prefix) when no area has >3 items", () => {
+    const out = groupedChangelogBody([
+      commit("feat(cache): add adapter (#1)"),
+      commit("feat: top-level feature (#2)"),
+    ]);
+    expect(out).not.toContain("####");
+    expect(out).toContain("- **Cache:** add adapter (#1)");
+    expect(out).toContain("- top-level feature (#2)");
+  });
+
+  it("gives areas with >3 items their own sub-group; the rest go under Other", () => {
+    const out = groupedChangelogBody([
+      commit("fix(app-router): a (#1)"),
+      commit("fix(app-router): b (#2)"),
+      commit("fix(app-router): c (#3)"),
+      commit("fix(app-router): d (#4)"),
+      commit("fix(i18n): sticky locale (#5)"),
+      commit("fix: bare fix (#6)"),
+    ]);
+    // App Router (4 items) → own sub-group, no per-item scope prefix
+    expect(out).toContain("#### App Router");
+    expect(out).toContain("- a (#1)");
+    expect(out).not.toContain("**App Router:**");
+    // small areas → Other, with humanized bold prefix; bare commit stays plain
+    expect(out).toContain("#### Other");
+    expect(out).toContain("- **i18n:** sticky locale (#5)");
+    expect(out).toContain("- bare fix (#6)");
+    expect(out.indexOf("#### App Router")).toBeLessThan(out.indexOf("#### Other"));
   });
 });
 
