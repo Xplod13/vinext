@@ -75,10 +75,10 @@ describe("groupedChangelogBody", () => {
     expect(out).toContain("- a (#1)");
     expect(out).not.toContain("**App Router:**");
     // small areas → Other, with humanized bold prefix; bare commit stays plain
-    expect(out).toContain("#### Other");
+    expect(out).toContain("#### Misc");
     expect(out).toContain("- **i18n:** sticky locale (#5)");
     expect(out).toContain("- bare fix (#6)");
-    expect(out.indexOf("#### App Router")).toBeLessThan(out.indexOf("#### Other"));
+    expect(out.indexOf("#### App Router")).toBeLessThan(out.indexOf("#### Misc"));
   });
 });
 

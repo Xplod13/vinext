@@ -80,7 +80,7 @@ const itemLine = (p: ConventionalParts): string =>
 /**
  * Within a type section, give every area with >3 items its own `#### <Area>`
  * sub-group (items listed without the now-redundant scope prefix); everything
- * else goes under `#### Other`. If no area qualifies, the list stays flat.
+ * else goes under `#### Misc`. If no area qualifies, the list stays flat.
  */
 function renderAreaGroups(items: ConventionalParts[]): string {
   const byArea = new Map<string, ConventionalParts[]>();
@@ -97,7 +97,7 @@ function renderAreaGroups(items: ConventionalParts[]): string {
       `#### ${humanizeArea(scope)}\n\n${v.map((p) => `- ${p.description}`).join("\n")}`,
   );
   const other = items.filter((it) => !(it.scope && bigScopes.has(it.scope)));
-  if (other.length) sub.push(`#### Other\n\n${other.map(itemLine).join("\n")}`);
+  if (other.length) sub.push(`#### Misc\n\n${other.map(itemLine).join("\n")}`);
   return sub.join("\n\n");
 }
 
