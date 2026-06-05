@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { dedupeSortLogins, insertContributors } from "./version.mts";
+import type { Commit } from "./create-changeset.mts";
+import { dedupeSortLogins, groupedChangelogBody, rewriteReleaseSection } from "./version.mts";
+
+const commit = (subject: string): Commit => ({ sha: subject, subject, body: "", files: [] });
 
 describe("dedupeSortLogins", () => {
   it("strips @, dedupes case-insensitively, and sorts", () => {
@@ -11,13 +14,46 @@ describe("dedupeSortLogins", () => {
     ]);
   });
 
-  it("drops empties and non-strings", () => {
+  it("drops empties, non-strings, and [bot] accounts", () => {
     // @ts-expect-error testing runtime robustness
-    expect(dedupeSortLogins(["@x", "", "  ", null, undefined, 5])).toEqual(["x"]);
+    expect(dedupeSortLogins(["@x", "", "  ", null, undefined, 5, "dependabot[bot]"])).toEqual([
+      "x",
+    ]);
   });
 });
 
-describe("insertContributors", () => {
+describe("groupedChangelogBody", () => {
+  const commits = [
+    commit("feat(cache): add adapter (#1733)"),
+    commit("fix(link): correct prefetch (#1734)"),
+    commit("feat: top-level feature (#1)"),
+    commit("perf(rsc): faster transport (#2)"),
+    commit("chore: noise"), // non-release type → ignored
+  ];
+
+  it("groups by type under conventional headings, in order", () => {
+    const out = groupedChangelogBody(commits);
+    expect(out.indexOf("### Features")).toBeGreaterThanOrEqual(0);
+    expect(out.indexOf("### Features")).toBeLessThan(out.indexOf("### Bug Fixes"));
+    expect(out.indexOf("### Bug Fixes")).toBeLessThan(out.indexOf("### Performance"));
+  });
+
+  it("bolds the scope and drops the type prefix; bare commits have no scope", () => {
+    const out = groupedChangelogBody(commits);
+    expect(out).toContain("- **cache:** add adapter (#1733)");
+    expect(out).toContain("- top-level feature (#1)");
+    expect(out).not.toContain("feat(cache)");
+  });
+
+  it("omits empty sections and chore noise", () => {
+    const out = groupedChangelogBody([commit("fix: only a fix")]);
+    expect(out).toContain("### Bug Fixes");
+    expect(out).not.toContain("### Features");
+    expect(out).not.toContain("noise");
+  });
+});
+
+describe("rewriteReleaseSection", () => {
   const base = [
     "# vinext",
     "",
@@ -25,7 +61,7 @@ describe("insertContributors", () => {
     "",
     "### Minor Changes",
     "",
-    "- feat: add cache adapter (#1733)",
+    "- - feat: raw changeset dump",
     "",
     "## 0.0.55",
     "",
@@ -35,47 +71,29 @@ describe("insertContributors", () => {
     "",
   ].join("\n");
 
-  it("appends ## Contributors at the END of the newest section only", () => {
-    const out = insertContributors(base, ["@bob", "@alice"]);
-    const newestEnd = out.indexOf("## 0.0.55");
-    const contribIdx = out.indexOf("## Contributors");
-    // The block lands inside the newest section, before the older heading.
-    expect(contribIdx).toBeGreaterThan(0);
-    expect(contribIdx).toBeLessThan(newestEnd);
-    expect(out).toContain("- @alice");
-    expect(out).toContain("- @bob");
-    // alice sorts before bob
-    expect(out.indexOf("- @alice")).toBeLessThan(out.indexOf("- @bob"));
-  });
+  const body = "### Features\n\n- **cache:** add adapter (#1733)";
 
-  it("leaves the older section untouched", () => {
-    const out = insertContributors(base, ["@bob"]);
+  it("replaces the newest section body and appends Contributors, leaving older sections", () => {
+    const out = rewriteReleaseSection(base, body, ["@bob", "@alice"]);
+    expect(out).toContain("### Features");
+    expect(out).not.toContain("Minor Changes"); // raw dump replaced
+    expect(out).toContain("## Contributors");
+    expect(out.indexOf("- @alice")).toBeLessThan(out.indexOf("- @bob"));
+    // older section untouched
     expect(out).toContain("## 0.0.55");
     expect(out).toContain("- fix: earlier bug (#1)");
-    // Only one Contributors heading total.
-    expect(out.match(/## Contributors/g)?.length).toBe(1);
   });
 
-  it("is idempotent — re-running replaces, not stacks, the block", () => {
-    const once = insertContributors(base, ["@bob", "@alice"]);
-    const twice = insertContributors(once, ["@bob", "@alice", "@carol"]);
+  it("is idempotent — only `## <digit>` is a section boundary", () => {
+    const once = rewriteReleaseSection(base, body, ["@bob"]);
+    const twice = rewriteReleaseSection(once, body, ["@bob", "@carol"]);
     expect(twice.match(/## Contributors/g)?.length).toBe(1);
+    expect(twice.match(/## 0\.0\.55/g)?.length).toBe(1);
     expect(twice).toContain("- @carol");
-  });
-
-  it("handles a changelog with only one (newest) section", () => {
-    const single = ["# vinext", "", "## 0.1.0", "", "- feat: x (#9)", ""].join("\n");
-    const out = insertContributors(single, ["@solo"]);
-    expect(out).toContain("## Contributors");
-    expect(out.trimEnd().endsWith("- @solo")).toBe(true);
-  });
-
-  it("returns input unchanged when there are no logins", () => {
-    expect(insertContributors(base, [])).toBe(base);
   });
 
   it("returns input unchanged when there is no version section", () => {
     const noSection = "# vinext\n\nNothing released yet.\n";
-    expect(insertContributors(noSection, ["@bob"])).toBe(noSection);
+    expect(rewriteReleaseSection(noSection, body, ["@bob"])).toBe(noSection);
   });
 });

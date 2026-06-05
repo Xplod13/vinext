@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 /**
- * `changeset version` + a bottom `## Contributors` list. Used as the `version:`
- * command for `changesets/action` (see .github/workflows/release.yml).
+ * `changeset version` + a grouped, conventional-commits changelog with a bottom
+ * `## Contributors` list. Used as the `version:` command for `changesets/action`
+ * (see .github/workflows/release.yml).
  *
- * Runs `changeset version` (consumes changesets, bumps versions, writes
- * CHANGELOGs, cascades internal deps), then for each bumped package appends a
- * deduped `## Contributors` block to the end of its newest CHANGELOG.md section.
- * Changesets has no native hook for an end-of-release contributor list, hence
- * this wrapper. insertContributors is pure + unit-tested; the rest is CI glue.
+ * Changesets' default changelog groups by bump level (Minor/Patch Changes), not
+ * by commit type, and has no end-of-release contributor hook. So after running
+ * `changeset version` we rewrite each bumped package's newest CHANGELOG section:
+ * the release commits are regrouped into `### Features` / `### Bug Fixes` / etc.
+ * and a deduped, bot-filtered `## Contributors` list is appended. The pure
+ * builders (groupedChangelogBody, rewriteReleaseSection, dedupeSortLogins) are
+ * unit-tested; the git/gh glue is CI-only.
  *
  * Runs on Node >=24 via native type stripping: `node scripts/version.mts`.
  * Env: GITHUB_TOKEN (for `gh api`), GITHUB_REPOSITORY ("owner/repo").
@@ -18,25 +21,58 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { discoverPublishablePackages } from "./create-changeset.mts";
+import {
+  type Commit,
+  collectReleaseCommits,
+  conventionalParts,
+  discoverPublishablePackages,
+  tagRefFor,
+} from "./create-changeset.mts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..");
 
+/** Conventional-commit type → changelog section heading, in render order. */
+const GROUPS: { type: string; heading: string }[] = [
+  { type: "feat", heading: "Features" },
+  { type: "fix", heading: "Bug Fixes" },
+  { type: "perf", heading: "Performance" },
+  { type: "revert", heading: "Reverts" },
+];
+
+/** Group release commits into `### <Heading>` sections; scope rendered in bold. */
+export function groupedChangelogBody(commits: Commit[]): string {
+  const buckets = new Map<string, string[]>();
+  for (const c of commits) {
+    const parts = conventionalParts(c.subject);
+    if (!parts) continue;
+    const line = parts.scope
+      ? `- **${parts.scope}:** ${parts.description}`
+      : `- ${parts.description}`;
+    (buckets.get(parts.type) ?? buckets.set(parts.type, []).get(parts.type) ?? []).push(line);
+  }
+  const known = new Set(GROUPS.map((g) => g.type));
+  const sections = GROUPS.filter((g) => buckets.get(g.type)?.length).map(
+    (g) => `### ${g.heading}\n\n${buckets.get(g.type)!.join("\n")}`,
+  );
+  const other = [...buckets].filter(([t]) => !known.has(t)).flatMap(([, l]) => l);
+  if (other.length) sections.push(`### Other Changes\n\n${other.join("\n")}`);
+  return sections.join("\n\n");
+}
+
 /**
- * Append (replacing any existing) a `## Contributors` block at the end of the
- * NEWEST `## <version>` section, leaving older sections untouched. A
- * `## Contributors` heading is not a section boundary, so re-running replaces
- * rather than stacks. Pure; returns input unchanged if no section / no logins.
+ * Replace the body of the newest `## <version>` section with `body`, then append
+ * a `## Contributors` list. Older sections are untouched. Only `## <digit>`
+ * counts as a section boundary, so re-running is idempotent. Pure.
  */
-export function insertContributors(changelog: string, logins: string[]): string {
-  const cleaned = dedupeSortLogins(logins);
-  if (cleaned.length === 0) return changelog;
-
+export function rewriteReleaseSection(
+  changelog: string,
+  body: string,
+  contributors: string[],
+): string {
   const lines = changelog.split("\n");
-  const isVersionHeading = (l: string) => /^##\s+/.test(l) && !/^##\s+Contributors\s*$/i.test(l);
-
-  const start = lines.findIndex((l) => /^##\s+/.test(l));
+  const isVersionHeading = (l: string) => /^##\s+\d/.test(l);
+  const start = lines.findIndex(isVersionHeading);
   if (start === -1) return changelog;
   let end = lines.length;
   for (let i = start + 1; i < lines.length; i++) {
@@ -46,26 +82,24 @@ export function insertContributors(changelog: string, logins: string[]): string 
     }
   }
 
-  // Newest section, with any prior Contributors block stripped and trailing
-  // blanks trimmed, then the fresh block appended.
-  let section = lines.slice(start, end);
-  const contribIdx = section.findIndex((l) => /^##\s+Contributors\s*$/i.test(l));
-  if (contribIdx !== -1) section = section.slice(0, contribIdx);
-  while (section.length > 0 && section[section.length - 1].trim() === "") section.pop();
-  section.push("", "## Contributors", "", ...cleaned.map((l) => `- @${l}`));
+  const block = [lines[start]]; // the `## <version>` heading
+  if (body.trim()) block.push("", body);
+  const logins = dedupeSortLogins(contributors);
+  if (logins.length) block.push("", "## Contributors", "", ...logins.map((l) => `- @${l}`));
+  block.push("");
 
-  const after = lines.slice(end);
-  const joinedAfter = after.length > 0 && after[0].trim() !== "" ? ["", ...after] : after;
-  return [...lines.slice(0, start), ...section, ...joinedAfter].join("\n");
+  const rebuilt = [...lines.slice(0, start), ...block, ...lines.slice(end)].join("\n");
+  return `${rebuilt.replace(/\n{3,}/g, "\n\n").replace(/\s+$/, "")}\n`;
 }
 
-/** Strip leading `@`, drop empties, dedupe case-insensitively, sort. */
+/** Strip leading `@`, drop empties and `[bot]` accounts, dedupe (ci) and sort. */
 export function dedupeSortLogins(logins: string[]): string[] {
   const byLower = new Map<string, string>();
   for (const raw of logins ?? []) {
     if (typeof raw !== "string") continue;
     const login = raw.trim().replace(/^@+/, "");
-    if (login && !byLower.has(login.toLowerCase())) byLower.set(login.toLowerCase(), login);
+    if (!login || /\[bot\]$/i.test(login)) continue;
+    if (!byLower.has(login.toLowerCase())) byLower.set(login.toLowerCase(), login);
   }
   return [...byLower.values()].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
 }
@@ -87,7 +121,7 @@ function readVersions(packageDirToName: Record<string, string>): Record<string, 
   return out;
 }
 
-/** Unique contributor logins for `from..HEAD`, via the GitHub API. */
+/** GitHub contributor logins for `from..HEAD` (bots filtered by dedupeSortLogins). */
 function resolveContributors(from: string, repository: string): string[] {
   let shas: string[] = [];
   try {
@@ -118,17 +152,6 @@ function resolveContributors(from: string, repository: string): string[] {
   return dedupeSortLogins(logins);
 }
 
-/** Prior tag ref for a package: prefer scoped `<name>@<version>`, else `v<version>`. */
-function tagRefFor(pkgName: string, version: string): string {
-  const scoped = `${pkgName}@${version}`;
-  try {
-    git(["rev-parse", "--verify", `${scoped}^{commit}`]);
-    return scoped;
-  } catch {
-    return `v${version}`;
-  }
-}
-
 function main(): void {
   const repository = process.env.GITHUB_REPOSITORY || "";
   const packages = discoverPublishablePackages();
@@ -143,23 +166,19 @@ function main(): void {
     if (!after[name] || after[name] === before[name]) continue; // not bumped
     const changelogPath = join(REPO_ROOT, dir, "CHANGELOG.md");
     if (!existsSync(changelogPath)) {
-      console.warn(`[version] ${name}: bumped but no CHANGELOG.md; skipping contributors.`);
+      console.warn(`[version] ${name}: bumped but no CHANGELOG.md; skipping rewrite.`);
       continue;
     }
-    if (!repository) {
-      console.warn("[version] GITHUB_REPOSITORY unset; skipping contributor resolution.");
-      continue;
-    }
-    const contributors = resolveContributors(tagRefFor(name, before[name]), repository);
-    if (contributors.length === 0) {
-      console.warn(`[version] ${name}: no contributors resolved; leaving CHANGELOG as-is.`);
-      continue;
-    }
+
+    const from = tagRefFor(name, before[name]);
+    const body = groupedChangelogBody(collectReleaseCommits(from, name, packages));
+    const contributors = repository ? resolveContributors(from, repository) : [];
+
     const original = readFileSync(changelogPath, "utf8");
-    const updated = insertContributors(original, contributors);
+    const updated = rewriteReleaseSection(original, body, contributors);
     if (updated !== original) {
       writeFileSync(changelogPath, updated, "utf8");
-      console.log(`[version] ${name}: appended ## Contributors (${contributors.length}).`);
+      console.log(`[version] ${name}: grouped changelog + ${contributors.length} contributors.`);
     }
   }
 }

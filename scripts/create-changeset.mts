@@ -47,16 +47,33 @@ export const TYPE_BUMP: Record<string, Bump | null> = {
 
 const BUMP_ORDER: Bump[] = ["major", "minor", "patch"];
 
+export type ConventionalParts = {
+  type: string;
+  scope: string | null;
+  breaking: boolean;
+  description: string;
+};
+
+/** Split a Conventional-Commit subject into its parts, or null if non-conforming. */
+export function conventionalParts(subject: string): ConventionalParts | null {
+  if (typeof subject !== "string") return null;
+  const m = subject.match(/^([a-zA-Z]+)(?:\(([^)]*)\))?(!)?:\s+(.*)$/);
+  if (!m) return null;
+  return {
+    type: m[1].toLowerCase(),
+    scope: m[2] || null,
+    breaking: m[3] === "!",
+    description: m[4].trim(),
+  };
+}
+
 /** Parse a Conventional-Commit subject (+ body, scanned for BREAKING CHANGE). */
 export function parseBumpFromSubject(subject: string, body = ""): Bump | null {
-  if (typeof subject !== "string") return null;
-  const match = subject.match(/^([a-zA-Z]+)(?:\(([^)]*)\))?(!)?:\s/);
-  if (!match) return null;
-  const type = match[1].toLowerCase();
-  const breaking = match[3] === "!" || /(^|\n)\s*BREAKING[ -]CHANGE[:!]/.test(body);
-  if (breaking) return "major";
-  if (!(type in TYPE_BUMP)) return null;
-  return TYPE_BUMP[type];
+  const parts = conventionalParts(subject);
+  if (!parts) return null;
+  if (parts.breaking || /(^|\n)\s*BREAKING[ -]CHANGE[:!]/.test(body)) return "major";
+  if (!(parts.type in TYPE_BUMP)) return null;
+  return TYPE_BUMP[parts.type];
 }
 
 /** Higher-precedence of two bumps (major > minor > patch); null = no bump. */
@@ -205,7 +222,7 @@ function latestTagVersion(pkgName: string): string | null {
 }
 
 /** Git ref to diff from: prefer the scoped tag, else the global `v<version>`. */
-function tagRefFor(pkgName: string, tagVersion: string): string {
+export function tagRefFor(pkgName: string, tagVersion: string): string {
   const scoped = `${pkgName}@${tagVersion}`;
   try {
     git(["rev-parse", "--verify", `${scoped}^{commit}`]);
@@ -215,10 +232,10 @@ function tagRefFor(pkgName: string, tagVersion: string): string {
   }
 }
 
-type Commit = { sha: string; subject: string; body: string; files: string[] };
+export type Commit = { sha: string; subject: string; body: string; files: string[] };
 
 /** Commits in `from..HEAD` with their changed files. */
-function commitsInRange(from: string): Commit[] {
+export function commitsInRange(from: string): Commit[] {
   const FIELD = "␞";
   const REC = "␟";
   let raw = "";
@@ -253,6 +270,30 @@ function firstCommit(): string {
   }
 }
 
+/**
+ * Release-worthy commits in `from..HEAD` that belong to `name`: conventional,
+ * non-release, touching the package's files. Shared by the changeset generator
+ * (for the bump) and the changelog grouper in version.mts.
+ */
+export function collectReleaseCommits(
+  from: string,
+  name: string,
+  packageDirToName: Record<string, string>,
+): Commit[] {
+  return commitsInRange(from).filter(
+    (c) =>
+      !isReleaseCommit(c.subject) &&
+      parseBumpFromSubject(c.subject, c.body) != null &&
+      affectedPackages(c.files, packageDirToName).includes(name),
+  );
+}
+
+/** Resolve a package's diff range start (last release tag, or first commit). */
+export function releaseRangeStart(name: string): string {
+  const tagVersion = latestTagVersion(name);
+  return tagVersion ? tagRefFor(name, tagVersion) : firstCommit();
+}
+
 /** Compute and write the auto changeset. Returns a summary; never throws on no-op. */
 export function run(): { written: string | null; bumps: Record<string, Bump> } {
   const packageDirToName = discoverPublishablePackages();
@@ -263,30 +304,24 @@ export function run(): { written: string | null; bumps: Record<string, Bump> } {
     const pkg = JSON.parse(
       readFileSync(join(REPO_ROOT, dir, "package.json"), "utf8"),
     ) as PackageJson;
-    const tagVersion = latestTagVersion(name);
-    const decision = decideGeneration(pkg.version ?? "0.0.0", tagVersion);
+    const decision = decideGeneration(pkg.version ?? "0.0.0", latestTagVersion(name));
     console.log(`[create-changeset] ${name}: ${decision.action} — ${decision.reason}`);
-    if (decision.action === "generate") {
-      ranges.set(name, tagVersion ? tagRefFor(name, tagVersion) : firstCommit());
-    }
+    if (decision.action === "generate") ranges.set(name, releaseRangeStart(name));
   }
   if (ranges.size === 0) {
     console.log("[create-changeset] Nothing to generate (guard active for all packages).");
     return { written: null, bumps: {} };
   }
 
-  // Walk each package's range; a commit only counts toward the package it owns.
+  // A commit only counts toward the package whose files it touches.
   const pkgBumps: Record<string, Bump> = {};
   const summaryLines: string[] = [];
   const seen = new Set<string>();
   let rangeLo = "";
   for (const [name, from] of ranges) {
     if (!rangeLo) rangeLo = from;
-    for (const commit of commitsInRange(from)) {
-      if (isReleaseCommit(commit.subject)) continue;
+    for (const commit of collectReleaseCommits(from, name, packageDirToName)) {
       const bump = parseBumpFromSubject(commit.subject, commit.body);
-      if (!bump) continue;
-      if (!affectedPackages(commit.files, packageDirToName).includes(name)) continue;
       const merged = maxBump(pkgBumps[name] ?? null, bump);
       if (merged) pkgBumps[name] = merged;
       if (!seen.has(commit.sha)) {
