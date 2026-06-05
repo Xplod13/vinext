@@ -149,13 +149,18 @@ export function rewriteReleaseSection(
   return `${rebuilt.replace(/\n{3,}/g, "\n\n").replace(/\s+$/, "")}\n`;
 }
 
-/** Strip leading `@`, drop empties and `[bot]` accounts, dedupe (ci) and sort. */
+/**
+ * Strip a leading `@`, keep only valid GitHub login shapes, dedupe (ci) and
+ * sort. The `[a-zA-Z0-9-]` check drops `[bot]` accounts and any non-login
+ * fallback (e.g. a git display name with spaces) that would render a broken
+ * `@`-mention.
+ */
 export function dedupeSortLogins(logins: string[]): string[] {
   const byLower = new Map<string, string>();
   for (const raw of logins ?? []) {
     if (typeof raw !== "string") continue;
     const login = raw.trim().replace(/^@+/, "");
-    if (!login || /\[bot\]$/i.test(login)) continue;
+    if (!/^[a-zA-Z0-9-]+$/.test(login)) continue;
     if (!byLower.has(login.toLowerCase())) byLower.set(login.toLowerCase(), login);
   }
   return [...byLower.values()].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
@@ -186,8 +191,10 @@ function resolveContributors(from: string, repository: string): string[] {
         "api",
         "--paginate",
         `repos/${repository}/compare/${from}...HEAD`,
+        // Only linked GitHub authors; `// empty` drops commits whose author is
+        // an unlinked email (no valid login to @-mention).
         "--jq",
-        ".commits[].author.login // .commit.author.name",
+        ".commits[] | .author.login // empty",
       ],
       { cwd: REPO_ROOT, encoding: "utf8" },
     );

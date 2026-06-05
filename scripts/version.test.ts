@@ -19,11 +19,11 @@ describe("dedupeSortLogins", () => {
     ]);
   });
 
-  it("drops empties, non-strings, and [bot] accounts", () => {
-    // @ts-expect-error testing runtime robustness
-    expect(dedupeSortLogins(["@x", "", "  ", null, undefined, 5, "dependabot[bot]"])).toEqual([
-      "x",
-    ]);
+  it("keeps only valid login shapes — drops empties, bots, and git display names", () => {
+    expect(
+      // @ts-expect-error testing runtime robustness
+      dedupeSortLogins(["@x", "", "  ", null, undefined, 5, "dependabot[bot]", "Full Name"]),
+    ).toEqual(["x"]);
   });
 });
 

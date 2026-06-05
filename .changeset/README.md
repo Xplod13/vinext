@@ -22,5 +22,5 @@ consume them into the rolling "Version Packages" PR.
 You can still author changesets by hand. A human-committed `.changeset/*.md` on
 `main` is honored exactly like normal: it is consumed alongside the
 auto-generated ones when the Version PR is built. Add one with `pnpm changeset`
-(or `vp dlx @changesets/cli`) whenever you want to override or supplement the
+(or `vp exec changeset`) whenever you want to override or supplement the
 commit-driven bump.
