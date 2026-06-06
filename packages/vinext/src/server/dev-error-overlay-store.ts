@@ -113,7 +113,17 @@ export function dismissOverlay(): void {
 export function dismissBuildErrors(): void {
   if (!snapshot.errors.some((error) => error.source === "vite")) return;
   const errors = snapshot.errors.filter((error) => error.source !== "vite");
-  const index = errors.length === 0 ? 0 : Math.min(snapshot.index, errors.length - 1);
+  // Preserve the displayed error by identity, not by slot position: removing a
+  // build error that sits before the selected one would otherwise drift the
+  // selection. Fall back to clamping when the selected error was itself removed.
+  const selectedId = snapshot.errors[snapshot.index]?.id;
+  const preservedIndex = errors.findIndex((error) => error.id === selectedId);
+  const index =
+    errors.length === 0
+      ? 0
+      : preservedIndex >= 0
+        ? preservedIndex
+        : Math.min(snapshot.index, errors.length - 1);
   snapshot = {
     errors,
     index,

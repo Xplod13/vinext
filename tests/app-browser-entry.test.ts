@@ -5696,6 +5696,56 @@ describe("dev overlay store", () => {
     }
   });
 
+  it("dismissBuildErrors preserves the displayed runtime error by identity, not slot", () => {
+    try {
+      // Order: [caught(first), vite, caught(second)]. Select the last runtime
+      // error (index 2). Removing the build error in the middle must keep the
+      // SAME error selected, not drift to the other survivor.
+      reportToOverlay({
+        source: "caught",
+        message: "first runtime error",
+        stack: undefined,
+        ignoredStackFrames: undefined,
+        projectRoot: undefined,
+        codeFrame: undefined,
+        componentStack: undefined,
+      });
+      reportToOverlay({
+        source: "vite",
+        message: "Transform failed with 1 error",
+        stack: undefined,
+        ignoredStackFrames: undefined,
+        projectRoot: undefined,
+        codeFrame: undefined,
+        componentStack: undefined,
+      });
+      reportToOverlay({
+        source: "caught",
+        message: "second runtime error",
+        stack: undefined,
+        ignoredStackFrames: undefined,
+        projectRoot: undefined,
+        codeFrame: undefined,
+        componentStack: undefined,
+      });
+      const before = getOverlaySnapshot();
+      expect(before.index).toBe(2);
+      const selectedId = before.errors[before.index]?.id;
+
+      dismissBuildErrors();
+
+      const after = getOverlaySnapshot();
+      expect(after.errors).toHaveLength(2);
+      expect(after.errors.some((error) => error.source === "vite")).toBe(false);
+      // Index now points at the same error instance it did before the build
+      // error was dropped.
+      expect(after.errors[after.index]?.id).toBe(selectedId);
+      expect(after.errors[after.index]?.message).toBe("second runtime error");
+    } finally {
+      dismissOverlay();
+    }
+  });
+
   it("dismissBuildErrors is a no-op when no vite build error is present", () => {
     const listener = vi.fn();
     const unsubscribe = subscribeOverlay(listener);
