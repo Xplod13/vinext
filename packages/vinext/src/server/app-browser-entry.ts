@@ -136,6 +136,7 @@ import { createClientReuseManifestHeaderFromVisibleAppState } from "./app-browse
 import {
   devOnCaughtError,
   devOnUncaughtError,
+  dismissBuildErrors,
   dismissOverlay,
   installDevErrorOverlay,
   installViteHmrErrorHandler,
@@ -2348,6 +2349,13 @@ function bootstrapHydration(rscStream: ReadableStream<Uint8Array>): void {
 
     import.meta.hot.on("rsc:update", () => {
       const updateId = ++latestRscHmrUpdateId;
+      // An rsc:update only fires once the RSC transform succeeds, so any
+      // lingering "Build Error" overlay from a previously failed transform is
+      // now stale. Clear it eagerly: applyRscHmrUpdate's dismissOverlay only
+      // runs after several readiness guards (updateId races, __next_error__
+      // reloads, torn-down trees), and when one of those bails the stale build
+      // error would otherwise stay on screen.
+      dismissBuildErrors();
       void handleRscUpdate(updateId);
     });
   }

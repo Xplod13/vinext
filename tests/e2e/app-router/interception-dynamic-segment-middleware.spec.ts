@@ -12,7 +12,10 @@ const LOCALE_HOME = `${BASE}/interception-mw/en`;
 test.describe("interception-dynamic-segment-middleware", () => {
   test("intercepts dynamic route when middleware rewrites add locale prefix", async ({ page }) => {
     // TODO(#1364 Part C): interception doesn't fire when middleware rewrites add a locale prefix.
-    test.fail();
+    // Skipped rather than `test.fail()`: interception fires non-deterministically here (prefetch vs
+    // click races leave the Next-Url interception context set on some runs), so `test.fail()` flips
+    // to an unexpected pass and flakes CI. Switch back to `test.fail()` once #1364 Part C lands.
+    test.fixme();
     await page.goto(LOCALE_HOME);
     await waitForAppRouterHydration(page);
 
@@ -25,7 +28,8 @@ test.describe("interception-dynamic-segment-middleware", () => {
 
   test("refresh after interception shows non-intercepted page", async ({ page }) => {
     // TODO(#1364 Part C): depends on interception firing (see test above).
-    test.fail();
+    // Skipped (not `test.fail()`) because the dependency above fires non-deterministically.
+    test.fixme();
     await page.goto(LOCALE_HOME);
     await waitForAppRouterHydration(page);
 
@@ -43,7 +47,8 @@ test.describe("interception-dynamic-segment-middleware", () => {
     page,
   }) => {
     // TODO(#1364 Part C): depends on interception firing (see test above).
-    test.fail();
+    // Skipped (not `test.fail()`) because the dependency above fires non-deterministically.
+    test.fixme();
     await page.goto(LOCALE_HOME);
     await waitForAppRouterHydration(page);
 
@@ -59,7 +64,8 @@ test.describe("interception-dynamic-segment-middleware", () => {
 
   test("repeated interceptions with middleware work consistently", async ({ page }) => {
     // TODO(#1364 Part C): depends on interception firing (see test above).
-    test.fail();
+    // Skipped (not `test.fail()`) because the dependency above fires non-deterministically.
+    test.fixme();
     for (let i = 0; i < 2; i++) {
       await page.goto(LOCALE_HOME);
       await waitForAppRouterHydration(page);

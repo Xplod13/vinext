@@ -105,6 +105,23 @@ export function dismissOverlay(): void {
   emit();
 }
 
+// Drop only Vite build/transform ("vite" source) errors. A successful HMR
+// signal (rsc:update / vite:afterUpdate) means the transform that produced the
+// build error now compiles, so the "Build Error" overlay is stale. Runtime
+// errors are left intact — those are reconciled by the re-render (which clears
+// and lets failing components repopulate the overlay).
+export function dismissBuildErrors(): void {
+  if (!snapshot.errors.some((error) => error.source === "vite")) return;
+  const errors = snapshot.errors.filter((error) => error.source !== "vite");
+  const index = errors.length === 0 ? 0 : Math.min(snapshot.index, errors.length - 1);
+  snapshot = {
+    errors,
+    index,
+    minimized: errors.length === 0 ? false : snapshot.minimized,
+  };
+  emit();
+}
+
 export function setOverlayIndex(index: number): void {
   if (index < 0 || index >= snapshot.errors.length) return;
   snapshot = { ...snapshot, index };

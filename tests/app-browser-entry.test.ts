@@ -42,7 +42,9 @@ import {
   normalizeViteHmrError,
 } from "../packages/vinext/src/server/dev-error-overlay.js";
 import {
+  dismissBuildErrors,
   dismissOverlay,
+  getOverlaySnapshot,
   reportToOverlay,
   subscribeOverlay,
 } from "../packages/vinext/src/server/dev-error-overlay-store.js";
@@ -5655,6 +5657,63 @@ describe("dev overlay store", () => {
 
       dismissOverlay();
       expect(listener).toHaveBeenCalledTimes(2);
+    } finally {
+      unsubscribe();
+      dismissOverlay();
+    }
+  });
+
+  it("dismissBuildErrors clears only vite build errors and leaves runtime errors", () => {
+    try {
+      reportToOverlay({
+        source: "caught",
+        message: "runtime boom",
+        stack: undefined,
+        ignoredStackFrames: undefined,
+        projectRoot: undefined,
+        codeFrame: undefined,
+        componentStack: undefined,
+      });
+      reportToOverlay({
+        source: "vite",
+        message: "Transform failed with 1 error",
+        stack: undefined,
+        ignoredStackFrames: undefined,
+        projectRoot: undefined,
+        codeFrame: undefined,
+        componentStack: undefined,
+      });
+      expect(getOverlaySnapshot().errors).toHaveLength(2);
+
+      dismissBuildErrors();
+
+      const snapshot = getOverlaySnapshot();
+      expect(snapshot.errors).toHaveLength(1);
+      expect(snapshot.errors[0]?.source).toBe("caught");
+      expect(snapshot.index).toBe(0);
+    } finally {
+      dismissOverlay();
+    }
+  });
+
+  it("dismissBuildErrors is a no-op when no vite build error is present", () => {
+    const listener = vi.fn();
+    const unsubscribe = subscribeOverlay(listener);
+    try {
+      reportToOverlay({
+        source: "caught",
+        message: "runtime boom",
+        stack: undefined,
+        ignoredStackFrames: undefined,
+        projectRoot: undefined,
+        codeFrame: undefined,
+        componentStack: undefined,
+      });
+      listener.mockClear();
+
+      dismissBuildErrors();
+      expect(listener).not.toHaveBeenCalled();
+      expect(getOverlaySnapshot().errors).toHaveLength(1);
     } finally {
       unsubscribe();
       dismissOverlay();

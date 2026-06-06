@@ -20,6 +20,7 @@ import {
   type OverlayCodeFrame,
   type ReportedError,
   type Source,
+  dismissBuildErrors,
   dismissOverlay,
   expandOverlay,
   getOverlaySnapshot,
@@ -33,11 +34,12 @@ import { VINEXT_ORIGINAL_STACK_TRACE_ENDPOINT } from "./dev-stack-sourcemap-endp
 
 // Re-export so callers (e.g. the HMR rsc:update handler) can clear the
 // overlay when a new payload lands.
-export { dismissOverlay } from "./dev-error-overlay-store.js";
+export { dismissOverlay, dismissBuildErrors } from "./dev-error-overlay-store.js";
 
 export const DEV_ERROR_OVERLAY_HOST_ID = "__vinext_dev_error_overlay_root";
 export const DEV_ERROR_OVERLAY_MOUNT_ID = "__vinext_dev_error_overlay_mount";
 const VITE_ERROR_HANDLER_DATA_KEY = "__vinext_vite_error_handler__";
+const VITE_AFTER_UPDATE_HANDLER_DATA_KEY = "__vinext_vite_after_update_handler__";
 const REACT_REFRESH_RECOVERY_RETRY_DELAY_MS = 16;
 
 let reactRoot: Root | null = null;
@@ -201,9 +203,28 @@ export function installViteHmrErrorHandler(hot: unknown): void {
   };
   hot.on("vite:error", handler);
   hot.data[VITE_ERROR_HANDLER_DATA_KEY] = handler;
+
+  // A successful HMR update means the transform that produced a build error now
+  // compiles, so any lingering "Build Error" overlay is stale. Clearing it here
+  // (rather than relying solely on the App Router rsc:update re-render) keeps
+  // recovery deterministic even when the re-render bails on its readiness
+  // guards, and covers client components and the Pages Router too.
+  const previousAfterUpdate = hot.data[VITE_AFTER_UPDATE_HANDLER_DATA_KEY];
+  if (typeof previousAfterUpdate === "function" && hot.off) {
+    hot.off("vite:afterUpdate", previousAfterUpdate as (payload: ViteHmrErrorPayload) => void);
+  }
+  const afterUpdateHandler = (): void => {
+    dismissBuildErrors();
+  };
+  hot.on("vite:afterUpdate", afterUpdateHandler);
+  hot.data[VITE_AFTER_UPDATE_HANDLER_DATA_KEY] = afterUpdateHandler;
+
   hot.dispose?.((data) => {
     if (data[VITE_ERROR_HANDLER_DATA_KEY] === handler) {
       delete data[VITE_ERROR_HANDLER_DATA_KEY];
+    }
+    if (data[VITE_AFTER_UPDATE_HANDLER_DATA_KEY] === afterUpdateHandler) {
+      delete data[VITE_AFTER_UPDATE_HANDLER_DATA_KEY];
     }
   });
 }
