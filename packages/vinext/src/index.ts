@@ -97,6 +97,7 @@ import { buildRequestHeadersFromMiddlewareResponse } from "./server/middleware-r
 import { detectPackageManager } from "./utils/project.js";
 import { isUnknownRecord as isRecord } from "./utils/record.js";
 import { manifestFilesWithBase } from "./utils/manifest-paths.js";
+import { resolveRscModuleUrl } from "./utils/rsc-module-url.js";
 import { hasBasePath } from "./utils/base-path.js";
 import { mergeRewriteQuery } from "./utils/query.js";
 import {
@@ -784,6 +785,11 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
   let hasNitroPlugin = false;
   let rscCompatibilityId: string | undefined;
   const draftModeSecret = randomUUID();
+
+  // App Router source files (rsc environment) that failed to transform on their
+  // last HMR pass. Used to re-emit `rsc:update` once they compile again — see
+  // the "vinext:app-dir-hmr-recovery" plugin below.
+  const rscBuildErrorFiles = new Set<string>();
 
   // Build-time layout classification manifest, captured in the RSC virtual
   // module's load hook and consumed in renderChunk to patch the generated
@@ -2780,6 +2786,57 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
           return { code: result, map: null };
         }
         return null;
+      },
+    },
+    {
+      name: "vinext:app-dir-hmr-recovery",
+
+      // Recover the dev error overlay after an App Router server-component
+      // build/transform error is fixed.
+      //
+      // @vitejs/plugin-rsc's hotUpdate hook only re-emits the `rsc:update`
+      // event (which clears the browser's "Build Error" overlay and re-fetches
+      // the tree) when the changed file still resolves to a module in the rsc
+      // module graph. After a transform error, that module can drop out of the
+      // graph, so the recovery edit produces an empty `ctx.modules`, the RSC
+      // plugin stays silent, and the overlay is stuck until a manual reload.
+      // This was a flaky-in-CI failure of the dev-error-overlay e2e suite.
+      //
+      // We run before the RSC plugin and verify the transform ourselves: track
+      // files that fail to transform, and when a previously-failing file
+      // compiles again, emit `rsc:update` so recovery never depends on the
+      // module surviving in the graph. The browser's rsc:update handler is
+      // idempotent, so an extra event (when the RSC plugin also recovers) is
+      // harmless.
+      async hotUpdate(
+        this: {
+          environment: { name: string; transformRequest(url: string): Promise<unknown> };
+        },
+        ctx: {
+          file: string;
+          server: ViteDevServer;
+          modules: ReadonlyArray<{ url?: string | null }>;
+        },
+      ) {
+        if (this.environment.name !== "rsc" || !hasAppDir) return;
+        const file = ctx.file;
+        if (!file.startsWith(appDir) || !fileMatcher.extensionRegex.test(file)) return;
+
+        const moduleUrl = resolveRscModuleUrl(file, ctx.modules, root);
+        try {
+          await this.environment.transformRequest(moduleUrl);
+          if (rscBuildErrorFiles.delete(file)) {
+            ctx.server.environments.client.hot.send({
+              type: "custom",
+              event: "rsc:update",
+              data: { file },
+            });
+          }
+        } catch {
+          // Still failing to transform — the RSC plugin broadcasts the build
+          // error itself; remember the file so the next clean edit recovers.
+          rscBuildErrorFiles.add(file);
+        }
       },
     },
     {
