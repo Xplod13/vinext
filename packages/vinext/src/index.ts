@@ -109,6 +109,7 @@ import { asyncHooksStubPlugin } from "./plugins/async-hooks-stub.js";
 import { clientReferenceDedupPlugin } from "./plugins/client-reference-dedup.js";
 import { dataUrlCssPlugin } from "./plugins/css-data-url.js";
 import { createRscClientReferenceLoadersPlugin } from "./plugins/rsc-client-reference-loaders.js";
+import { createServerDynamicImportVarsPlugin } from "./plugins/server-dynamic-import-vars.js";
 import { createInstrumentationClientTransformPlugin } from "./plugins/instrumentation-client.js";
 import {
   generateInstrumentationClientInjectModule,
@@ -4929,6 +4930,10 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
   if (rscPluginPromise) {
     plugins.push(rscPluginPromise);
     plugins.push(createRscClientReferenceLoadersPlugin());
+    // Expand variable dynamic imports (`import(`./${x}`)`) in the server
+    // (rsc/ssr) environments, which Vite's built-in dynamic-import-vars plugin
+    // skips. See plugins/server-dynamic-import-vars.ts (issue #1533).
+    plugins.push(createServerDynamicImportVarsPlugin());
   }
 
   return plugins;
