@@ -3,7 +3,8 @@
  *
  * Inlines static/blob assets referenced via `new URL("./asset", import.meta.url)`
  * (or a bare-specifier form like `new URL("my-pkg/data.json", import.meta.url)`)
- * in server/worker environments so they can be fetched at runtime.
+ * in the Cloudflare Workers / Nitro worker build so they can be fetched at
+ * runtime.
  *
  * Why this is needed
  * ------------------
@@ -31,8 +32,16 @@
  *     fixture's `const url = new URL(...); return fetch(url)` pattern that the
  *     `fetch(new URL(...))`-only OG inliner (vinext:og-inline-fetch-assets)
  *     does not cover;
- *   - is fetchable in both workerd and Node, so no asset file needs to be
- *     emitted to (and served from) the worker output.
+ *   - is fetchable in workerd, so no asset file needs to be emitted to (and
+ *     served from) the worker output.
+ *
+ * Scope: only the bundled-worker build (Cloudflare `vite-plugin-cloudflare`
+ * or Nitro), where `import.meta.url` is `"worker"`. In a plain Node SSR build
+ * `import.meta.url` is already a valid `file://` URL, so rewriting to a data
+ * URL there would needlessly change URL semantics — e.g.
+ * `fileURLToPath(new URL(...))` throws on a `data:` URL, and `.pathname`
+ * would no longer be a filesystem path. The Node SSR asset-emit path is
+ * handled separately (cloudflare/vinext#1346).
  *
  * This mirrors the existing `vinext:og-inline-fetch-assets` plugin, which
  * already base64-inlines `fetch(new URL(...))` font/wasm assets for the same
@@ -52,19 +61,22 @@ import path from "node:path";
 import fs from "node:fs";
 import { CONTENT_TYPES } from "../server/static-file-cache.js";
 
-// Matches `new URL("<spec>", import.meta.url)` with a quoted string literal
-// (no template literals) for the spec. Both relative (`./`, `../`) and bare
-// specifiers (`my-pkg/data.json`) are accepted; an optional `.href` /
-// `.pathname` accessor immediately after is preserved by leaving the trailing
-// member access untouched (we only replace the `new URL(...)` expression).
-// Excludes specifiers that already look like an absolute URL (contain `://`)
-// or a protocol-relative/data form — those are runtime URLs, not assets.
-// Intentionally NOT global: this object is reused as a `transform.filter` and
-// for `String.prototype.matchAll`-style scanning below. A global (`/g`) regex
-// is stateful (`lastIndex` persists across `.test()` calls), so the handler
-// builds its own fresh `/g` copy for iteration via `new RegExp(re, "g")`.
+// Matches `new URL("<spec>", import.meta.url)` (and the optional-chained
+// `import.meta?.url` form) with a quoted string literal — no template
+// literals — for the spec. Both relative (`./`, `../`) and bare specifiers
+// (`my-pkg/data.json`) are accepted. Only the `new URL(...)` expression is
+// replaced, so a trailing accessor such as `.href` is left untouched and
+// still works (it reads off the rewritten data URL).
+//
+// Specifiers that already look like an absolute/runtime URL are filtered out
+// in the handler, not the regex.
+//
+// Intentionally NOT global: this object is reused as a `transform.filter`. A
+// global (`/g`) regex is stateful (`lastIndex` persists across `.test()`
+// calls), so the handler builds its own fresh `/g` copy via
+// `new RegExp(re, "g")`.
 const ASSET_IMPORT_META_URL_RE =
-  /\bnew\s+URL\s*\(\s*(['"])([^'"`\n]+)\1\s*,\s*import\.meta\.url\s*(?:,\s*)?\)/;
+  /\bnew\s+URL\s*\(\s*(['"])([^'"`\n]+)\1\s*,\s*import\.meta\??\.url\s*(?:,\s*)?\)/;
 const VITE_IGNORE_RE = /\/\*\s*@vite-ignore\s*\*\//;
 
 // A few common asset extensions that `CONTENT_TYPES` (tuned for the static
@@ -87,11 +99,19 @@ function mimeTypeFor(file: string): string {
 /**
  * Create the `vinext:edge-asset-import-meta-url` Vite plugin.
  *
- * Inlines assets referenced via `new URL("<spec>", import.meta.url)` in
- * server/worker environments as `data:` URLs so they remain fetchable on
- * Cloudflare Workers where `import.meta.url` is not a real URL.
+ * Inlines assets referenced via `new URL("<spec>", import.meta.url)` as
+ * `data:` URLs so they remain fetchable on Cloudflare Workers, where
+ * `import.meta.url` is the literal string `"worker"` (not a real URL).
+ *
+ * @param options.isWorkerTarget - Returns true when the build targets a
+ *   bundled worker runtime (Cloudflare `vite-plugin-cloudflare` or Nitro).
+ *   The flag is resolved during Vite's `config` hook, before
+ *   `applyToEnvironment` runs, so the getter is populated by the time the
+ *   gate is evaluated.
  */
-export function createEdgeAssetImportMetaUrlPlugin(): Plugin {
+export function createEdgeAssetImportMetaUrlPlugin(options: {
+  isWorkerTarget: () => boolean;
+}): Plugin {
   // Build-only cache: absolute resolved path -> data URL string. Dev skips the
   // cache so asset edits are picked up without a restart.
   const cache = new Map<string, string>();
@@ -100,11 +120,12 @@ export function createEdgeAssetImportMetaUrlPlugin(): Plugin {
   return {
     name: "vinext:edge-asset-import-meta-url",
     enforce: "pre",
-    // Run for all non-client environments (App Router RSC, App Router SSR,
-    // Pages Router SSR, Cloudflare worker). Vite's upstream plugin already
-    // covers `client`.
+    // Only the non-client server environments (App Router RSC/SSR, Pages
+    // Router SSR) of a bundled worker build. Vite's upstream plugin already
+    // covers `client`; a plain Node SSR build keeps a real `file://`
+    // `import.meta.url` and must not be rewritten (see the file header).
     applyToEnvironment(environment) {
-      return environment.config.consumer !== "client";
+      return environment.config.consumer !== "client" && options.isWorkerTarget();
     },
     configResolved(config) {
       isBuild = config.command === "build";
@@ -132,7 +153,10 @@ export function createEdgeAssetImportMetaUrlPlugin(): Plugin {
         const toDataUrl = async (spec: string): Promise<string | null> => {
           let file: string | undefined;
           if (spec.startsWith("./") || spec.startsWith("../")) {
-            file = path.resolve(moduleDir, spec);
+            // Strip any `?query`/`#hash` suffix so the path resolves to a real
+            // file on disk (mirrors the bare-specifier branch, which splits on
+            // `?` after resolution).
+            file = path.resolve(moduleDir, spec.split(/[?#]/, 1)[0]!);
           } else {
             // Bare specifier (e.g. `my-pkg/hello/world.json`). Resolve it
             // through the bundler so node_modules assets work.

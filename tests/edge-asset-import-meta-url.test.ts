@@ -10,23 +10,29 @@
  * `edge-compiler-can-import-blob-assets` suite (5 tests) was red.
  *
  * `vinext:edge-asset-import-meta-url` rewrites the expression to an inline
- * `data:` URL so the asset is fetchable in both workerd and Node. This test
- * drives the plugin's `transform` hook directly (mirroring the
- * `edge.js` fixture from the upstream suite) and asserts the rewrite.
+ * `data:` URL so the asset is fetchable on workerd. The unit tests below drive
+ * the plugin's `transform` hook directly (mirroring the `edge.js` fixture from
+ * the upstream suite); the end-to-end block runs a real Pages Router edge-API
+ * build through the full Vite pipeline (filter + applyToEnvironment + the
+ * cross-plugin ordering that is the explicit motivation for the change).
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vite-plus/test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { build as viteBuild } from "vite";
 import vinext from "../packages/vinext/src/index.js";
+import { createEdgeAssetImportMetaUrlPlugin } from "../packages/vinext/src/plugins/edge-asset-import-meta-url.js";
 import type { Plugin } from "vite";
 
-function getPlugin(): Plugin {
-  const plugins = vinext() as Plugin[];
-  const plugin = plugins.find((p) => p.name === "vinext:edge-asset-import-meta-url");
-  if (!plugin) throw new Error("vinext:edge-asset-import-meta-url plugin not found");
-  return plugin;
+const ROOT_NODE_MODULES = path.resolve(import.meta.dirname, "../node_modules");
+
+// Build the plugin directly so the test controls the worker-target gate.
+// Defaults to a worker target since that is the environment the plugin is
+// scoped to.
+function getPlugin(isWorkerTarget = true): Plugin {
+  return createEdgeAssetImportMetaUrlPlugin({ isWorkerTarget: () => isWorkerTarget });
 }
 
 function transformHandler(plugin: Plugin): (...args: any[]) => any {
@@ -143,10 +149,112 @@ describe("vinext:edge-asset-import-meta-url", () => {
     expect(result).toBeNull();
   });
 
-  it("does not run in the client environment", () => {
+  it("matches the optional-chained `import.meta?.url` form", async () => {
     const plugin = getPlugin();
-    const applyToEnvironment = plugin.applyToEnvironment as (env: any) => boolean;
-    expect(applyToEnvironment({ config: { consumer: "client" } })).toBe(false);
-    expect(applyToEnvironment({ config: { consumer: "server" } })).toBe(true);
+    const code = "const url = new URL('../../src/text-file.txt', import.meta?.url)";
+    const result = await transformHandler(plugin).call(makeCtx(), code, routePath);
+    expect(result, "expected import.meta?.url to be rewritten").not.toBeNull();
+    const expected =
+      "data:text/plain;base64," + Buffer.from("Hello, from text-file.txt!").toString("base64");
+    expect(result.code).toContain(`new URL(${JSON.stringify(expected)})`);
   });
+
+  it("strips ?query/#hash from relative specifiers before resolving", async () => {
+    const plugin = getPlugin();
+    const code = "const url = new URL('../../src/text-file.txt?raw', import.meta.url)";
+    const result = await transformHandler(plugin).call(makeCtx(), code, routePath);
+    expect(result, "expected query-suffixed specifier to resolve").not.toBeNull();
+    const expected =
+      "data:text/plain;base64," + Buffer.from("Hello, from text-file.txt!").toString("base64");
+    expect(result.code).toContain(`new URL(${JSON.stringify(expected)})`);
+  });
+
+  it("only runs in non-client environments of a worker-target build", () => {
+    const workerPlugin = getPlugin(true);
+    const applyWorker = workerPlugin.applyToEnvironment as (env: any) => boolean;
+    expect(applyWorker({ config: { consumer: "client" } })).toBe(false);
+    expect(applyWorker({ config: { consumer: "server" } })).toBe(true);
+
+    // Plain Node SSR build (no Cloudflare/Nitro plugin): never runs, because
+    // `import.meta.url` there is already a valid file:// URL.
+    const nodePlugin = getPlugin(false);
+    const applyNode = nodePlugin.applyToEnvironment as (env: any) => boolean;
+    expect(applyNode({ config: { consumer: "server" } })).toBe(false);
+    expect(applyNode({ config: { consumer: "client" } })).toBe(false);
+  });
+});
+
+// End-to-end: build a real Pages Router edge-API route through the full Vite
+// pipeline and assert the worker server bundle inlines the asset. Exercises
+// the filter, applyToEnvironment gate, and plugin ordering — not just the
+// transform handler in isolation. A stub plugin named `vite-plugin-cloudflare`
+// flips vinext's worker-target detection (the gate only checks the plugin
+// name), so the plugin runs without pulling in @cloudflare/vite-plugin.
+describe("vinext:edge-asset-import-meta-url (end-to-end build)", () => {
+  async function buildEdgeRoute(opts: { workerTarget: boolean }): Promise<string> {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "vinext-edge-e2e-"));
+    const outDir = await fs.mkdtemp(path.join(os.tmpdir(), "vinext-edge-e2e-out-"));
+    try {
+      await fs.symlink(ROOT_NODE_MODULES, path.join(tmpDir, "node_modules"), "junction");
+      const apiDir = path.join(tmpDir, "pages", "api");
+      const assetDir = path.join(tmpDir, "src");
+      await fs.mkdir(apiDir, { recursive: true });
+      await fs.mkdir(assetDir, { recursive: true });
+      await fs.writeFile(path.join(assetDir, "text-file.txt"), "Hello, from text-file.txt!");
+      await fs.writeFile(
+        path.join(apiDir, "edge.js"),
+        `export const config = { runtime: 'edge' }\n` +
+          `export default async function handler() {\n` +
+          `  const url = new URL('../../src/text-file.txt', import.meta.url)\n` +
+          `  return fetch(url)\n` +
+          `}\n`,
+      );
+      await fs.writeFile(
+        path.join(tmpDir, "pages", "index.tsx"),
+        "export default function Home() {\n  return <div>Hi</div>;\n}\n",
+      );
+
+      const stubCloudflarePlugin: Plugin = { name: "vite-plugin-cloudflare" };
+      await viteBuild({
+        root: tmpDir,
+        configFile: false,
+        plugins: [
+          ...(opts.workerTarget ? [stubCloudflarePlugin] : []),
+          vinext({ disableAppRouter: true }),
+        ],
+        logLevel: "silent",
+        build: {
+          outDir,
+          emptyOutDir: false,
+          ssr: "virtual:vinext-server-entry",
+          rollupOptions: { output: { entryFileNames: "entry.js" } },
+        },
+      });
+
+      return await fs.readFile(path.join(outDir, "entry.js"), "utf8");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+      await fs.rm(outDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  it("inlines the asset as a data: URL in the worker server bundle", async () => {
+    const entry = await buildEdgeRoute({ workerTarget: true });
+    const expected =
+      "data:text/plain;base64," + Buffer.from("Hello, from text-file.txt!").toString("base64");
+    expect(
+      entry.includes(expected),
+      `expected the edge route's new URL(...) to be inlined as a data: URL`,
+    ).toBe(true);
+    // The rewritten expression no longer references import.meta.url, which is
+    // the literal string "worker" at runtime and would throw on `new URL(...)`.
+    expect(entry).not.toContain("text-file.txt");
+  }, 180_000);
+
+  it("leaves the expression untouched in a plain Node SSR build", async () => {
+    const entry = await buildEdgeRoute({ workerTarget: false });
+    // No Cloudflare/Nitro plugin → the edge-asset plugin must not run, so no
+    // data: URL is emitted for this asset.
+    expect(entry).not.toContain("data:text/plain;base64");
+  }, 180_000);
 });

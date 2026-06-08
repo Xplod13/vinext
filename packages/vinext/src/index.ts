@@ -4303,8 +4303,11 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
     // see src/plugins/og-assets.ts
     createOgInlineFetchAssetsPlugin(),
     // Inline assets referenced via `new URL("./asset", import.meta.url)` in
-    // server/worker environments as `data:` URLs so edge routes can fetch
-    // them — see src/plugins/edge-asset-import-meta-url.ts and #1824.
+    // the bundled worker build as `data:` URLs so edge routes can fetch them —
+    // see src/plugins/edge-asset-import-meta-url.ts and #1824. Scoped to the
+    // Cloudflare/Nitro worker target (where import.meta.url is "worker"); the
+    // getter reads the flags set in the `config` hook above, which runs before
+    // the plugin's `applyToEnvironment` gate.
     //
     // MUST run AFTER `vinext:og-inline-fetch-assets`: that plugin matches the
     // verbatim `fetch(new URL(...)).then(r => r.arrayBuffer())` pattern. If we
@@ -4312,7 +4315,9 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
     // would no longer match and @vercel/og font inlining would silently
     // change shape. Both plugins are `enforce: "pre"`, so array order here is
     // what sequences them.
-    createEdgeAssetImportMetaUrlPlugin(),
+    createEdgeAssetImportMetaUrlPlugin({
+      isWorkerTarget: () => hasCloudflarePlugin || hasNitroPlugin,
+    }),
     // Dedupe/copy @vercel/og binary WASM assets in the RSC output — see src/plugins/og-assets.ts
     createOgAssetsPlugin(),
     // Collect SSR/RSC bundle externals and write dist/server/vinext-externals.json.
