@@ -9113,6 +9113,40 @@ describe("isSafeRegex", () => {
     expect(isSafeRegex("(a|a)")).toBe(true);
   });
 
+  // Wrapping an overlapping alternation in a redundant group must NOT let it
+  // slip past the unbounded-quantifier check. These are trivial transforms of
+  // `(a|a)*` and remain exponential (~7s on ~26 chars). Without unwrapping the
+  // sole/nested child group, the top-level split sees a single non-overlapping
+  // branch and rates them safe.
+  it("rejects a wrapped overlapping alternation: ((a|a))*", async () => {
+    const { isSafeRegex } = await import("../packages/vinext/src/config/config-matchers.js");
+    expect(isSafeRegex("((a|a))*")).toBe(false);
+    expect(isSafeRegex("((a|a))+")).toBe(false);
+    expect(isSafeRegex("((a|a)){2,}")).toBe(false);
+    // Multiple redundant wrapper layers and a non-capturing wrapper.
+    expect(isSafeRegex("(((a|a)))*")).toBe(false);
+    expect(isSafeRegex("(?:(?:a|a))*")).toBe(false);
+  });
+
+  it("rejects a nested overlapping alternation branch: ((a|a)|x)* and (x|(a|a))*", async () => {
+    const { isSafeRegex } = await import("../packages/vinext/src/config/config-matchers.js");
+    expect(isSafeRegex("((a|a)|x)*")).toBe(false);
+    expect(isSafeRegex("(x|(a|a))*")).toBe(false);
+    // Prefix-overlap nested in a branch, repeated by +.
+    expect(isSafeRegex("(x|(a|ab)|y)+")).toBe(false);
+  });
+
+  it("keeps disjoint wrapped/nested alternations SAFE (no false positives)", async () => {
+    const { isSafeRegex } = await import("../packages/vinext/src/config/config-matchers.js");
+    // Distinct-token branches are unambiguous even when wrapped or nested.
+    expect(isSafeRegex("(ab|cd)*")).toBe(true);
+    expect(isSafeRegex("((ab|cd))*")).toBe(true);
+    expect(isSafeRegex("((ab|cd)|ef)*")).toBe(true);
+    expect(isSafeRegex("(x|(ab|cd))*")).toBe(true);
+    // A wrapped locale alternation (common in real config) stays safe.
+    expect(isSafeRegex("((en|fr|de))*")).toBe(true);
+  });
+
   it("treats escaped characters as safe", async () => {
     const { isSafeRegex } = await import("../packages/vinext/src/config/config-matchers.js");
     // \\+ is a literal +, not a quantifier

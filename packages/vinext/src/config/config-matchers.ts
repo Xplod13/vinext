@@ -342,6 +342,95 @@ function hasOverlappingAlternatives(branches: readonly string[]): boolean {
 }
 
 /**
+ * If `branch` is, in its entirety, a single parenthesised group (its first
+ * non-space char is `(` whose matching `)` is the last non-space char), return
+ * that group's inner body. Otherwise return null.
+ *
+ * Used to peel a redundant wrapper group off a quantified body so a wrapped
+ * alternation is still analysed. For example the body of `((a|a))*` is the
+ * single branch `(a|a)`; unwrapping it yields `a|a`, which is overlapping.
+ * `?:`/named/lookaround prefixes are normalised via `alternationBodyOf` by the
+ * caller after unwrapping; here we only strip the outer parentheses.
+ */
+function unwrapSoleGroup(branch: string): string | null {
+  const trimmed = branch.trim();
+  if (trimmed.length < 2 || trimmed[0] !== "(" || trimmed[trimmed.length - 1] !== ")") {
+    return null;
+  }
+  // Verify the opening `(` matches the trailing `)` (i.e. it's a single group
+  // spanning the whole branch, not e.g. `(a)(b)` where the first `)` closes
+  // early). Track depth, character classes, and escapes the same way the
+  // tokenisers above do.
+  let depth = 0;
+  let inClass = false;
+  for (let i = 0; i < trimmed.length; i++) {
+    const ch = trimmed[i];
+    if (ch === "\\") {
+      i++;
+      continue;
+    }
+    if (inClass) {
+      if (ch === "]") inClass = false;
+      continue;
+    }
+    if (ch === "[") {
+      inClass = true;
+      continue;
+    }
+    if (ch === "(") depth++;
+    else if (ch === ")") {
+      depth--;
+      // If the group closes before the final char, this is not a sole group.
+      if (depth === 0 && i !== trimmed.length - 1) return null;
+    }
+  }
+  if (depth !== 0) return null;
+  return trimmed.slice(1, -1);
+}
+
+/**
+ * Decide whether a quantified group's body contains an overlapping alternation,
+ * accounting for redundant wrapper groups. The detector that calls this only
+ * inspects the *directly* quantified group, so without unwrapping, trivial
+ * transforms of `(a|a)*` slip through while staying exponential:
+ *
+ *   - `((a|a))*`   — body is the sole group `(a|a)`
+ *   - `((a|a)|x)*` — branch `(a|a)` is a nested overlapping group
+ *   - `(x|(a|a))*` — branch `(a|a)` is a nested overlapping group
+ *
+ * Strategy: split the body into top-level alternatives. If two or more of them
+ * overlap, it's ambiguous. Otherwise, recurse into any branch that is wholly a
+ * single group (peeling the wrapper, then normalising any `?:` prefix) — a
+ * nested ambiguous alternation under the same unbounded quantifier is just as
+ * exponential as a direct one.
+ *
+ * Precision is preserved: disjoint/bounded alternations (`(ab|cd)*`,
+ * `((ab|cd))*`) recurse to non-overlapping branches and stay safe. A bounded
+ * recursion depth caps work on adversarial nesting.
+ */
+function bodyHasOverlappingAlternation(body: string, depth = 0): boolean {
+  // Cap recursion so deeply/adversarially nested wrappers can't blow up the
+  // scan. Real config regexes nest a handful of levels at most.
+  if (depth > 32) return false;
+
+  const branches = splitTopLevelAlternatives(body);
+  if (branches.length >= 2 && hasOverlappingAlternatives(branches)) return true;
+
+  // Recurse into branches that are wholly a single group. This catches the
+  // wrapped (`((a|a))*`) and nested (`(x|(a|a))*`) variants. Note a single
+  // top-level branch that is a sole group (the `((a|a))*` case) is handled here
+  // even though the `>= 2` overlap check above didn't fire.
+  for (const branch of branches) {
+    const inner = unwrapSoleGroup(branch);
+    if (inner === null) continue;
+    const normalised = alternationBodyOf(inner);
+    if (normalised === null) continue;
+    if (bodyHasOverlappingAlternation(normalised, depth + 1)) return true;
+  }
+  return false;
+}
+
+/**
  * Detect an alternation with overlapping branches that is directly repeated by
  * an UNBOUNDED quantifier, e.g. `(a|a)*`, `(a|ab)+`, `(\d|\d\d){2,}`.
  *
@@ -377,8 +466,9 @@ function hasAmbiguousUnboundedAlternation(pattern: string): boolean {
       if (!isUnboundedQuantifierAt(pattern, i + 1)) continue;
       const body = alternationBodyOf(pattern.slice(start, i));
       if (body === null) continue;
-      const branches = splitTopLevelAlternatives(body);
-      if (branches.length >= 2 && hasOverlappingAlternatives(branches)) return true;
+      // Analyse the body recursively so wrapped/nested alternations are caught
+      // too — `((a|a))*`, `((a|a)|x)*`, `(x|(a|a))*` are all exponential.
+      if (bodyHasOverlappingAlternation(body)) return true;
     }
   }
   return false;
