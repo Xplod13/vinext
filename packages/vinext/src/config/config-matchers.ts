@@ -342,29 +342,29 @@ function hasOverlappingAlternatives(branches: readonly string[]): boolean {
 }
 
 /**
- * If `branch` is, in its entirety, a single parenthesised group (its first
- * non-space char is `(` whose matching `)` is the last non-space char), return
- * that group's inner body. Otherwise return null.
+ * Extract the inner body of every TOP-LEVEL (depth-1) parenthesised group that
+ * appears anywhere in `branch`, regardless of what surrounds it. A group that
+ * spans the whole branch (`(a|a)` from the wrapped `((a|a))*`) is returned just
+ * as readily as one concatenated with other tokens — the "concatenated group"
+ * shape — e.g. `(a|a)b`, `b(a|a)`, `b(a|a)c`.
  *
- * Used to peel a redundant wrapper group off a quantified body so a wrapped
- * alternation is still analysed. For example the body of `((a|a))*` is the
- * single branch `(a|a)`; unwrapping it yields `a|a`, which is overlapping.
- * `?:`/named/lookaround prefixes are normalised via `alternationBodyOf` by the
- * caller after unwrapping; here we only strip the outer parentheses.
+ * Such a group is still repeated by the same outer unbounded quantifier, so an
+ * overlapping alternation inside it is just as exponential as a directly
+ * quantified one: `((a|a)b)*` against `"abab…!"` backtracks exponentially even
+ * though `(a|a)` is glued to a literal `b`. Returns each group's inner text
+ * (parentheses stripped); nested deeper groups are reached by the caller's
+ * recursion, not flattened here.
+ *
+ * Escapes and character classes are tracked so `\(` and `[(]` are never treated
+ * as group openers.
  */
-function unwrapSoleGroup(branch: string): string | null {
-  const trimmed = branch.trim();
-  if (trimmed.length < 2 || trimmed[0] !== "(" || trimmed[trimmed.length - 1] !== ")") {
-    return null;
-  }
-  // Verify the opening `(` matches the trailing `)` (i.e. it's a single group
-  // spanning the whole branch, not e.g. `(a)(b)` where the first `)` closes
-  // early). Track depth, character classes, and escapes the same way the
-  // tokenisers above do.
+function topLevelGroupBodies(branch: string): string[] {
+  const bodies: string[] = [];
   let depth = 0;
+  let groupStart = -1;
   let inClass = false;
-  for (let i = 0; i < trimmed.length; i++) {
-    const ch = trimmed[i];
+  for (let i = 0; i < branch.length; i++) {
+    const ch = branch[i];
     if (ch === "\\") {
       i++;
       continue;
@@ -377,36 +377,44 @@ function unwrapSoleGroup(branch: string): string | null {
       inClass = true;
       continue;
     }
-    if (ch === "(") depth++;
-    else if (ch === ")") {
+    if (ch === "(") {
+      if (depth === 0) groupStart = i + 1;
+      depth++;
+    } else if (ch === ")") {
       depth--;
-      // If the group closes before the final char, this is not a sole group.
-      if (depth === 0 && i !== trimmed.length - 1) return null;
+      if (depth === 0 && groupStart !== -1) {
+        bodies.push(branch.slice(groupStart, i));
+        groupStart = -1;
+      }
     }
   }
-  if (depth !== 0) return null;
-  return trimmed.slice(1, -1);
+  return bodies;
 }
 
 /**
  * Decide whether a quantified group's body contains an overlapping alternation,
- * accounting for redundant wrapper groups. The detector that calls this only
- * inspects the *directly* quantified group, so without unwrapping, trivial
- * transforms of `(a|a)*` slip through while staying exponential:
+ * accounting for redundant wrapper groups and concatenated sub-groups. The
+ * detector that calls this only inspects the *directly* quantified group, so
+ * without descending, trivial transforms of `(a|a)*` slip through while staying
+ * exponential:
  *
- *   - `((a|a))*`   — body is the sole group `(a|a)`
- *   - `((a|a)|x)*` — branch `(a|a)` is a nested overlapping group
- *   - `(x|(a|a))*` — branch `(a|a)` is a nested overlapping group
+ *   - `((a|a))*`    — body is the sole group `(a|a)`
+ *   - `((a|a)|x)*`  — branch `(a|a)` is a nested overlapping group
+ *   - `(x|(a|a))*`  — branch `(a|a)` is a nested overlapping group
+ *   - `((a|a)b)*`   — branch `(a|a)b` is a group concatenated with a literal
+ *   - `(b(a|a)c)*`  — overlapping group concatenated on both sides
  *
  * Strategy: split the body into top-level alternatives. If two or more of them
- * overlap, it's ambiguous. Otherwise, recurse into any branch that is wholly a
- * single group (peeling the wrapper, then normalising any `?:` prefix) — a
+ * overlap, it's ambiguous. Otherwise, recurse into every top-level sub-group of
+ * each branch (peeling its parentheses, then normalising any `?:` prefix) — a
  * nested ambiguous alternation under the same unbounded quantifier is just as
- * exponential as a direct one.
+ * exponential as a direct one, whether the sub-group is the whole branch
+ * (`((a|a))*`) or merely concatenated within it (`((a|a)b)*`).
  *
  * Precision is preserved: disjoint/bounded alternations (`(ab|cd)*`,
- * `((ab|cd))*`) recurse to non-overlapping branches and stay safe. A bounded
- * recursion depth caps work on adversarial nesting.
+ * `((ab|cd))*`, `((en|fr|de)x)*`, `(/(en|fr)/foo)*`) recurse to non-overlapping
+ * branches and stay safe — only an *overlapping* inner alternation trips the
+ * guard. A bounded recursion depth caps work on adversarial nesting.
  */
 function bodyHasOverlappingAlternation(body: string, depth = 0): boolean {
   // Cap recursion so deeply/adversarially nested wrappers can't blow up the
@@ -416,16 +424,18 @@ function bodyHasOverlappingAlternation(body: string, depth = 0): boolean {
   const branches = splitTopLevelAlternatives(body);
   if (branches.length >= 2 && hasOverlappingAlternatives(branches)) return true;
 
-  // Recurse into branches that are wholly a single group. This catches the
-  // wrapped (`((a|a))*`) and nested (`(x|(a|a))*`) variants. Note a single
-  // top-level branch that is a sole group (the `((a|a))*` case) is handled here
-  // even though the `>= 2` overlap check above didn't fire.
+  // Recurse into every top-level sub-group of each branch. This catches the
+  // wrapped (`((a|a))*`), nested (`(x|(a|a))*`), and concatenated-group
+  // (`((a|a)b)*`, `(b(a|a)c)*`) variants: each inner group is repeated by the
+  // same outer unbounded quantifier, so an overlapping alternation inside it is
+  // exponential too. `topLevelGroupBodies` returns the body of a sole-group
+  // branch (`(a|a)` from `((a|a))*`) just as readily as a concatenated one.
   for (const branch of branches) {
-    const inner = unwrapSoleGroup(branch);
-    if (inner === null) continue;
-    const normalised = alternationBodyOf(inner);
-    if (normalised === null) continue;
-    if (bodyHasOverlappingAlternation(normalised, depth + 1)) return true;
+    for (const inner of topLevelGroupBodies(branch)) {
+      const normalised = alternationBodyOf(inner);
+      if (normalised === null) continue;
+      if (bodyHasOverlappingAlternation(normalised, depth + 1)) return true;
+    }
   }
   return false;
 }

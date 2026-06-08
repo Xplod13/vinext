@@ -9147,6 +9147,36 @@ describe("isSafeRegex", () => {
     expect(isSafeRegex("((en|fr|de))*")).toBe(true);
   });
 
+  // Concatenating an overlapping alternation group with another token inside the
+  // quantified body keeps it exponential: each inner group is still repeated by
+  // the same outer unbounded quantifier. `((a|a)b)*` against "abab…!" backtracks
+  // exponentially (~30ms at n=22, exponential thereafter) even though the
+  // overlapping `(a|a)` is glued to a literal `b`. A sole-group unwrap misses
+  // these because `(a|a)b` is not wholly a single group.
+  it("rejects a concatenated overlapping-alternation group: ((a|a)b)* and (b(a|a))*", async () => {
+    const { isSafeRegex } = await import("../packages/vinext/src/config/config-matchers.js");
+    expect(isSafeRegex("((a|a)b)*")).toBe(false);
+    expect(isSafeRegex("(b(a|a))*")).toBe(false);
+    expect(isSafeRegex("(b(a|a)c)*")).toBe(false);
+    expect(isSafeRegex("((a|a)b)+")).toBe(false);
+    expect(isSafeRegex("((a|a)b){2,}")).toBe(false);
+    // Wrapped around a concatenated group, and prefix-overlap concatenated.
+    expect(isSafeRegex("(((a|a)b))*")).toBe(false);
+    expect(isSafeRegex("((a|ab)x)+")).toBe(false);
+    // Overlapping group with a bounded inner quantifier is still exponential
+    // under the outer unbounded `*` (the ambiguity per outer repetition remains).
+    expect(isSafeRegex("((a|a){2}b)*")).toBe(false);
+  });
+
+  it("keeps disjoint concatenated-group alternations SAFE (no false positives)", async () => {
+    const { isSafeRegex } = await import("../packages/vinext/src/config/config-matchers.js");
+    // A disjoint locale group concatenated with a literal — common config shape.
+    expect(isSafeRegex("((en|fr|de)x)*")).toBe(true);
+    expect(isSafeRegex("(/(en|fr)/foo)*")).toBe(true);
+    expect(isSafeRegex("(x(ab|cd)y)*")).toBe(true);
+    expect(isSafeRegex("((foo|bar)/(baz|qux))+")).toBe(true);
+  });
+
   it("treats escaped characters as safe", async () => {
     const { isSafeRegex } = await import("../packages/vinext/src/config/config-matchers.js");
     // \\+ is a literal +, not a quantifier
