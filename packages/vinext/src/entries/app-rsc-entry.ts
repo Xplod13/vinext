@@ -959,6 +959,7 @@ export default __createAppRscHandler({
         buildRequestHeaders: __buildRequestHeadersFromMiddlewareResponse,
         decodePathParams: __decodePathParams,
         applyRouteHandlerMiddlewareContext: __applyRouteHandlerMiddlewareContext,
+        getDraftModeCookieHeader,
       }
     );
   },`
