@@ -609,6 +609,55 @@ function hasReactDirective(code: string): boolean {
   return false;
 }
 
+/**
+ * Transform a `.js` file that carries a `// @flow` pragma using @babel/core.
+ *
+ * OXC (used by `vite:oxc` and `transformWithOxc`) does not support Flow type
+ * syntax and throws `PARSE_ERROR: Flow is not supported` on such files. This
+ * function resolves @babel/core from the project root (so the user's installed
+ * version is used) and invokes it with `babelrc: true` so the project's
+ * .babelrc — typically containing @babel/preset-flow — strips the Flow
+ * annotations. JSX in the file is also compiled so vite:oxc does not re-parse
+ * JSX syntax later in the pipeline.
+ *
+ * Returns null when @babel/core cannot be resolved (the file is silently
+ * skipped and will fail later with a more specific error). Throws when Babel
+ * itself rejects the file (e.g. a misconfigured .babelrc).
+ */
+async function transformWithFlowBabel(
+  code: string,
+  filename: string,
+  projectRoot: string,
+  // oxlint-disable-next-line typescript/no-explicit-any
+): Promise<{ code: string; map?: any } | null> {
+  // Resolve @babel/core from the project root so the user's version is used.
+  // Users who have @babel/preset-flow installed always have @babel/core as a
+  // transitive dependency, so this resolve should succeed in valid setups.
+  // oxlint-disable-next-line typescript/no-explicit-any
+  let babelCore: any;
+  try {
+    const req = createRequire(path.join(projectRoot, "package.json"));
+    babelCore = req("@babel/core");
+  } catch {
+    // @babel/core not installed — skip silently. The subsequent vite:oxc pass
+    // will produce a clearer "Flow is not supported" parse error pointing at
+    // the file, which is more actionable than a module-not-found from here.
+    return null;
+  }
+
+  // oxlint-disable-next-line typescript/no-unsafe-call, typescript/no-unsafe-member-access
+  const result = (await babelCore.transformAsync(code, {
+    filename,
+    sourceMaps: true,
+    // Pick up the project's .babelrc / babel.config.* so @babel/preset-flow
+    // (and any other project-local Babel presets) are applied.
+    configFile: true,
+    babelrc: true,
+  })) as { code?: string | null; map?: unknown } | null;
+  if (!result?.code) return null;
+  return { code: result.code, map: result.map ?? undefined };
+}
+
 function generateRootParamsModule(rootParamNames: Iterable<string>): string {
   const names = Array.from(new Set(rootParamNames)).filter(isValidExportIdentifier).sort();
   if (names.length === 0) return "export {};\n";
@@ -1088,6 +1137,15 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                 if (!hasReactDirective(code)) {
                   return;
                 }
+              }
+
+              // OXC does not support Flow type syntax. When a file carries a
+              // `// @flow` pragma, skip OXC and use @babel/core (resolved from
+              // the project root) instead, so the project's .babelrc — which
+              // typically includes @babel/preset-flow — can strip Flow
+              // annotations before Vite continues processing.
+              if (/^\s*\/\/\s*@flow\b/m.test(code)) {
+                return transformWithFlowBabel(code, cleanId, root);
               }
 
               const result = await transformWithOxc(code, id, {
