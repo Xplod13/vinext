@@ -1382,7 +1382,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
         // (`'nodejs'`) is overlaid per-environment in the
         // `vinext:compiler-define-server` configEnvironment hook below, which
         // Vite merges over this base value for server environments only.
-        defines["process.env.NEXT_RUNTIME"] = '""';
+        defines["process.env.NEXT_RUNTIME"] = JSON.stringify("");
         // Next.js version compat — mirrors Next.js' `process.env.__NEXT_VERSION`,
         // which is substituted by their webpack DefinePlugin at build time
         // (see `packages/next/src/client/next.ts` line 5 and
@@ -3851,7 +3851,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
         // the Next.js test fixture at
         // test/e2e/app-dir/next-after-app-deploy/app/path-prefix.js) that uses
         // `process.env.NEXT_RUNTIME` to construct revalidation paths would then
-        // compute `'/nodejs'` correctly instead of `''` (issue #1365).
+        // compute `'/nodejs'` correctly instead of `'/'` (issue #1365).
         serverDefines["process.env.NEXT_RUNTIME"] = JSON.stringify("nodejs");
 
         // On-demand ISR revalidation secret — baked SERVER-ONLY (the `client`
