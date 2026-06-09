@@ -18,16 +18,9 @@ import vinext from "./index.js";
 import { runPrerender } from "./build/run-prerender.js";
 import path from "node:path";
 import fs from "node:fs";
-import { pathToFileURL } from "node:url";
-import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import {
-  detectPackageManager,
-  ensureViteConfigCompatibility,
-  hasAppDir,
-  hasViteConfig,
-} from "./utils/project.js";
+import { detectPackageManager, hasAppDir, hasViteConfig } from "./utils/project.js";
 import { deploy as runDeploy, parseDeployArgs } from "./deploy.js";
 import { runCheck, formatReport } from "./check.js";
 import { init as runInit, getReactUpgradeDeps } from "./init.js";
@@ -43,66 +36,19 @@ import { cleanBuildOutput } from "./build/clean-output.js";
 import { resolveVinextPackageRoot } from "./utils/vinext-root.js";
 import { parseArgs } from "./cli-args.js";
 import {
-  type DevLockfile,
-  formatAlreadyRunningError,
-  tryAcquireLockfile,
-} from "./server/dev-lockfile.js";
+  applyViteConfigCompatibility,
+  buildViteConfig,
+  getViteVersion,
+  loadVite,
+  type ViteModule,
+} from "./cli/runtime.js";
+import { runCommand } from "./cli/command.js";
+import { devCommand } from "./cli/commands/dev.js";
 import { generateRouteTypes } from "./typegen.js";
 
-// ─── Resolve Vite from the project root ────────────────────────────────────────
-//
-// When vinext is installed via `bun link` or `npm link`, Node follows the
-// symlink back to the monorepo and resolves `vite` from the monorepo's
-// node_modules — not the project's. This causes dual Vite instances, dual
-// React copies, and plugin resolution failures.
-//
-// To fix this, we resolve Vite dynamically from `process.cwd()` at runtime
-// using `createRequire`. This ensures we always use the project's Vite.
-
-type ViteModule = {
-  createServer: typeof import("vite").createServer;
-  build: typeof import("vite").build;
-  createBuilder: typeof import("vite").createBuilder;
-  createLogger: typeof import("vite").createLogger;
-  loadConfigFromFile: typeof import("vite").loadConfigFromFile;
-  version: string;
-};
-
-let _viteModule: ViteModule | null = null;
-
-/**
- * Dynamically load Vite from the project root. Falls back to the bundled
- * copy if the project doesn't have its own Vite installation.
- */
-async function loadVite(): Promise<ViteModule> {
-  if (_viteModule) return _viteModule;
-
-  const projectRoot = process.cwd();
-  let vitePath: string;
-
-  try {
-    // Resolve "vite" from the project root, not from vinext's location
-    const require = createRequire(path.join(projectRoot, "package.json"));
-    vitePath = require.resolve("vite");
-  } catch {
-    // Fallback: use the Vite that ships with vinext (works for non-linked installs)
-    vitePath = "vite";
-  }
-
-  // On Windows, absolute paths must be file:// URLs for ESM import().
-  // The fallback ("vite") is a bare specifier and works as-is.
-  const viteUrl = vitePath === "vite" ? vitePath : pathToFileURL(vitePath).href;
-  const vite = (await import(/* @vite-ignore */ viteUrl)) as ViteModule;
-  _viteModule = vite;
-  return vite;
-}
-
-/**
- * Get the Vite version string. Returns "unknown" before loadVite() is called.
- */
-function getViteVersion(): string {
-  return _viteModule?.version ?? "unknown";
-}
+// Vite is resolved from the project root at runtime — see ./cli/runtime.ts for
+// the loadVite()/getViteVersion()/buildViteConfig()/applyViteConfigCompatibility()
+// helpers shared across the dev, build, start, and deploy commands.
 
 const VERSION = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf-8"))
   .version as string;
@@ -229,194 +175,7 @@ async function loadBuildEmptyOutDir(vite: ViteModule, root: string): Promise<boo
   return typeof emptyOutDir === "boolean" ? emptyOutDir : undefined;
 }
 
-/**
- * Build the Vite config automatically. If a vite.config.ts exists in the
- * project, Vite will merge our config with it (theirs takes precedence).
- * If there's no vite.config, this provides everything needed.
- */
-function buildViteConfig(overrides: Record<string, unknown> = {}, logger?: import("vite").Logger) {
-  const hasConfig = hasViteConfig(process.cwd());
-
-  // If a vite.config exists, let Vite load it — only set root and overrides.
-  // The user's config already has vinext() + rsc() plugins configured.
-  // Adding them here too would duplicate the RSC transform (causes
-  // "Identifier has already been declared" errors in production builds).
-  if (hasConfig) {
-    return {
-      root: process.cwd(),
-      ...(logger ? { customLogger: logger } : {}),
-      ...overrides,
-    };
-  }
-
-  // No vite.config — auto-configure everything.
-  // vinext() auto-registers @vitejs/plugin-rsc when app/ is detected,
-  // so we only need vinext() in the plugins array.
-  const config: Record<string, unknown> = {
-    root: process.cwd(),
-    configFile: false,
-    plugins: [vinext()],
-    // Deduplicate React packages to prevent "Invalid hook call" errors
-    // when vinext is symlinked (bun link / npm link) and both vinext's
-    // and the project's node_modules contain React.
-    resolve: {
-      dedupe: ["react", "react-dom", "react/jsx-runtime", "react/jsx-dev-runtime"],
-    },
-    ...(logger ? { customLogger: logger } : {}),
-    ...overrides,
-  };
-
-  return config;
-}
-
-/**
- * Ensure the project's package.json has `"type": "module"` before Vite loads
- * the vite.config.ts. This prevents the esbuild CJS-bundling path that Vite
- * takes for projects without `"type": "module"`, which produces a `.mjs` temp
- * file containing `require()` calls — calls that fail on Node 22 when
- * targeting pure-ESM packages like `@cloudflare/vite-plugin`.
- *
- * This mirrors what `vinext init` does, but is applied lazily at dev/build
- * time for projects that were set up before `vinext init` added the step, or
- * that were migrated manually.
- */
-function applyViteConfigCompatibility(root: string): void {
-  const result = ensureViteConfigCompatibility(root);
-  if (!result) return;
-
-  for (const [oldName, newName] of result.renamed) {
-    console.warn(`  [vinext] Renamed ${oldName} → ${newName} (required for "type": "module")`);
-  }
-  if (result.addedTypeModule) {
-    console.warn(
-      `  [vinext] Added "type": "module" to package.json (required for Vite ESM config loading).\n` +
-        `  Run \`vinext init\` to review all project configuration.`,
-    );
-  }
-}
-
 // ─── Commands ─────────────────────────────────────────────────────────────────
-
-async function dev() {
-  const parsed = parseArgs(rawArgs);
-  if (parsed.help) return printHelp("dev");
-
-  loadDotenv({
-    root: process.cwd(),
-    mode: "development",
-  });
-
-  // Ensure "type": "module" in package.json before Vite loads vite.config.ts.
-  // Without this, Vite bundles the config as CJS and tries require() on pure-ESM
-  // packages like @cloudflare/vite-plugin, which fails on Node 22.
-  applyViteConfigCompatibility(process.cwd());
-
-  const vite = await loadVite();
-
-  const port = parsed.port ?? 3000;
-  const host = parsed.hostname ?? "localhost";
-
-  // Acquire the dev lock file. If another live `vinext dev` is running in this
-  // directory, print an actionable error (PID + URL) and exit. This is
-  // especially useful for AI coding agents, which frequently attempt to start
-  // a dev server without knowing one is already running.
-  //
-  // Disabled when VINEXT_NO_DEV_LOCK is set (escape hatch for unusual setups).
-  let lockfile: DevLockfile | undefined;
-  // Capture the acquisition timestamp so we can preserve it across the
-  // post-listen update(). `startedAt` is meant to reflect when this process
-  // started, not when the URL was resolved.
-  const startedAt = Date.now();
-  if (process.env.VINEXT_NO_DEV_LOCK !== "1") {
-    const root = process.cwd();
-    // Substitute "localhost" for wildcard binds so the URL is actually
-    // clickable when surfaced in the lock file before server.listen() has
-    // had a chance to resolve the real URL.
-    const initialDisplayHost = host === "0.0.0.0" ? "localhost" : host;
-    const acquired = tryAcquireLockfile({
-      root,
-      info: {
-        pid: process.pid,
-        port,
-        hostname: host,
-        appUrl: `http://${initialDisplayHost}:${port}`,
-        startedAt,
-        cwd: root,
-      },
-    });
-    if (!acquired.ok) {
-      console.error(
-        "\n  " +
-          formatAlreadyRunningError({
-            existing: acquired.existing,
-            cwd: root,
-            lockfilePath: acquired.lockfilePath,
-          }).replace(/\n/g, "\n  ") +
-          "\n",
-      );
-      process.exit(1);
-    }
-    lockfile = acquired.lockfile;
-  }
-
-  console.log(`\n  vinext dev  (Vite ${getViteVersion()})\n`);
-
-  const config = buildViteConfig({
-    server: { port, host },
-  });
-
-  // If anything between here and the first successful listen() throws (e.g.
-  // strictPort and the port is taken), release the lock immediately so we
-  // don't leave a misleading "server running" entry behind in the brief
-  // window before the exit handler runs. The exit handler still serves as
-  // a safety net for unexpected exit paths.
-  let server;
-  try {
-    server = await vite.createServer(config);
-    await server.listen();
-  } catch (err) {
-    lockfile?.release();
-    throw err;
-  }
-  server.printUrls();
-
-  // Once the server is actually listening, the port may have changed (e.g.
-  // Vite picked a free port if the requested one was in use). Update the
-  // lock file so other tools see the right port/URL.
-  //
-  // Prefer Vite's resolvedUrls.local[0] because it handles wildcard binds
-  // (e.g. host "0.0.0.0") by substituting "localhost" so the URL is
-  // actually clickable. Fall back to httpServer.address() if Vite didn't
-  // populate resolvedUrls for some reason.
-  if (lockfile) {
-    const resolved = server.resolvedUrls?.local[0];
-    let actualPort = port;
-    let appUrl: string;
-    if (resolved) {
-      appUrl = resolved.replace(/\/$/, "");
-      try {
-        const parsed = new URL(appUrl);
-        actualPort = parsed.port ? Number.parseInt(parsed.port, 10) : actualPort;
-      } catch {
-        // ignore — keep requested port
-      }
-    } else {
-      const address = server.httpServer?.address();
-      actualPort = typeof address === "object" && address ? address.port : port;
-      appUrl = `http://${host === "0.0.0.0" ? "localhost" : host}:${actualPort}`;
-    }
-    lockfile.update({
-      pid: process.pid,
-      port: actualPort,
-      hostname: host,
-      appUrl,
-      // Preserve the original acquire-time startedAt rather than resetting
-      // to "now". startedAt represents when the process started.
-      startedAt,
-      cwd: process.cwd(),
-    });
-  }
-}
 
 async function buildApp() {
   const parsed = parseArgs(rawArgs);
@@ -820,21 +579,6 @@ async function initCommand() {
 // ─── Help ─────────────────────────────────────────────────────────────────────
 
 function printHelp(cmd?: string) {
-  if (cmd === "dev") {
-    console.log(`
-  vinext dev - Start development server
-
-  Usage: vinext dev [options]
-
-  Options:
-    -p, --port <port>        Port to listen on (default: 3000)
-    -H, --hostname <host>    Hostname to bind to (default: localhost)
-    --turbopack              Accepted for compatibility (no-op, Vite is always used)
-    -h, --help               Show this help
-`);
-    return;
-  }
-
   if (cmd === "build") {
     console.log(`
   vinext build - Build for production
@@ -1046,7 +790,7 @@ if (command === "--help" || command === "-h" || !command) {
 
 switch (command) {
   case "dev":
-    dev().catch((e) => {
+    runCommand(devCommand, rawArgs).catch((e) => {
       console.error(e);
       process.exit(1);
     });
