@@ -93,7 +93,7 @@ function coerceValue(raw: string, type: ValueArgType, flag: string): string | nu
  *   flag, or fails type coercion (e.g. a non-integer `--port`).
  */
 export function parseCommand<A extends Record<string, ArgSpec>>(
-  spec: Pick<CommandSpec<A>, "args">,
+  spec: Pick<CommandSpec<A>, "args" | "passthroughUnknown">,
   argv: string[],
 ): ParseResult<A> {
   const args = (spec.args ?? {}) as Record<string, ArgSpec>;
@@ -109,7 +109,7 @@ export function parseCommand<A extends Record<string, ArgSpec>>(
     options[name] = {
       type: arg.type === "boolean" ? "boolean" : "string",
       ...(arg.short ? { short: arg.short } : {}),
-      ...(arg.multiple ? { multiple: true } : {}),
+      ...(arg.type !== "boolean" && arg.multiple ? { multiple: true } : {}),
     };
   }
 
@@ -121,8 +121,9 @@ export function parseCommand<A extends Record<string, ArgSpec>>(
     args: argv,
     options,
     allowPositionals: true,
-    // Lenient: unknown flags are ignored rather than throwing, matching the
-    // drop-in `next` CLI behavior (people pass flags vinext doesn't model).
+    // Keep node:util lenient and enforce our own unknown-flag policy below, so
+    // we can honor each command's `passthroughUnknown` opt-in and raise a
+    // CliUsageError consistent with the rest of the framework.
     strict: false,
     tokens: true,
   });
@@ -136,7 +137,13 @@ export function parseCommand<A extends Record<string, ArgSpec>>(
   for (const token of tokens) {
     if (token.kind !== "option") continue;
     const arg = args[token.name];
-    if (!arg || arg.type === "boolean") continue;
+    if (!arg) {
+      // `help` is always injected and accepted. Any other undeclared flag is a
+      // hard error unless the command opts into pass-through.
+      if (token.name === "help" || spec.passthroughUnknown) continue;
+      throw new CliUsageError(`Unknown option "${token.rawName}".`);
+    }
+    if (arg.type === "boolean") continue;
 
     const label = token.rawName;
     typedAs[token.name] = label;
@@ -159,18 +166,19 @@ export function parseCommand<A extends Record<string, ArgSpec>>(
     const label = typedAs[name] ?? `--${name}`;
 
     if (arg.type === "boolean") {
-      result[name] = raw === true ? true : (arg.default ?? false);
+      // Boolean defaults are always false; a repeated boolean (node returns an
+      // array) still resolves to true.
+      result[name] = raw === true || (Array.isArray(raw) && raw.length > 0);
       continue;
     }
 
     if (arg.multiple) {
       const list = Array.isArray(raw) ? raw : [];
-      result[name] = list.map((v) => coerceValue(String(v), arg.type as ValueArgType, label));
+      result[name] = list.map((v) => coerceValue(String(v), arg.type, label));
       continue;
     }
 
-    result[name] =
-      typeof raw === "string" ? coerceValue(raw, arg.type as ValueArgType, label) : arg.default;
+    result[name] = typeof raw === "string" ? coerceValue(raw, arg.type, label) : arg.default;
   }
 
   return {

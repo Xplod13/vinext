@@ -17,6 +17,9 @@ import { parseCommand, CliUsageError } from "../packages/vinext/src/cli/parse.js
 import { renderCommandHelp } from "../packages/vinext/src/cli/help.js";
 import type { ArgSpec, CommandSpec } from "../packages/vinext/src/cli/types.js";
 import { devCommand } from "../packages/vinext/src/cli/commands/dev.js";
+import { buildCommand } from "../packages/vinext/src/cli/commands/build.js";
+import { startCommand } from "../packages/vinext/src/cli/commands/start.js";
+import { initCommand } from "../packages/vinext/src/cli/commands/init.js";
 
 // A representative spec exercising every value kind.
 const spec = {
@@ -190,15 +193,28 @@ describe("parseCommand — multiple", () => {
   });
 });
 
-describe("parseCommand — unknowns & positionals", () => {
-  it("ignores unknown flags (drop-in next CLI friendliness)", () => {
-    // Unknown flags are dropped entirely; declared-but-absent flags are present
-    // as `undefined` (matching the InferValues contract), never mis-populated.
-    const result = parseCommand(spec, ["--unknown", "value"]);
-    expect(result.values).not.toHaveProperty("unknown");
-    expect(result.values.port).toBeUndefined();
+describe("parseCommand — unknown flags", () => {
+  it("errors on an unknown long flag", () => {
+    expect(() => parseCommand(spec, ["--unknown", "value"])).toThrow('Unknown option "--unknown".');
   });
 
+  it("errors on an unknown short flag", () => {
+    expect(() => parseCommand(spec, ["-z"])).toThrow('Unknown option "-z".');
+  });
+
+  it("throws a CliUsageError for unknown flags", () => {
+    expect(() => parseCommand(spec, ["--nope"])).toThrow(CliUsageError);
+  });
+
+  it("ignores unknown flags when passthroughUnknown is set", () => {
+    const lenient = { ...spec, passthroughUnknown: true };
+    const result = parseCommand(lenient, ["--unknown", "value", "--port", "4000"]);
+    expect(result.values).not.toHaveProperty("unknown");
+    expect(result.values).toMatchObject({ port: 4000 });
+  });
+});
+
+describe("parseCommand — positionals", () => {
   it("collects positionals", () => {
     expect(parseCommand(spec, ["apps/web"]).positionals).toEqual(["apps/web"]);
   });
@@ -269,6 +285,22 @@ describe("renderCommandHelp", () => {
   it("omits a value placeholder for boolean flags", () => {
     expect(help).not.toContain("--flag <");
   });
+
+  it("hides flags marked hidden from the options list", () => {
+    const withHidden: CommandSpec = {
+      name: "demo",
+      summary: "Demo",
+      args: {
+        shown: { type: "boolean", description: "Visible flag" },
+        secret: { type: "boolean", hidden: true, description: "Hidden flag" },
+      },
+      run: () => {},
+    };
+    const rendered = renderCommandHelp(withHidden);
+    expect(rendered).toContain("--shown");
+    expect(rendered).not.toContain("--secret");
+    expect(rendered).not.toContain("Hidden flag");
+  });
 });
 
 // ─── real dev command ─────────────────────────────────────────────────────────
@@ -289,15 +321,93 @@ describe("devCommand", () => {
     });
   });
 
-  it("generates help documenting every flag (parse + help share one spec)", () => {
+  it("accepts the hidden next-compat flags without erroring", () => {
+    expect(() => parseCommand(devCommand, ["--turbopack", "--experimental-https"])).not.toThrow();
+  });
+
+  it("generates help documenting visible flags but hiding compat ones", () => {
     const help = renderCommandHelp(devCommand);
     expect(help).toContain("vinext dev - Start development server");
     expect(help).toContain("-p, --port <port>");
     expect(help).toContain("(default: 3000)");
     expect(help).toContain("-H, --hostname <host>");
     expect(help).toContain("(default: localhost)");
-    expect(help).toContain("--turbopack");
-    expect(help).toContain("Accepted for compatibility");
     expect(help).toContain("-h, --help");
+    // turbopack / experimental-https are hidden no-ops — accepted but not shown.
+    expect(help).not.toContain("--turbopack");
+    expect(help).not.toContain("--experimental-https");
+  });
+});
+
+// ─── build / start / init commands ────────────────────────────────────────────
+
+describe("buildCommand", () => {
+  it("parses build flags", () => {
+    expect(
+      parseCommand(buildCommand, ["--verbose", "--prerender-all", "--prerender-concurrency", "4"])
+        .values,
+    ).toMatchObject({
+      verbose: true,
+      "prerender-all": true,
+      "prerender-concurrency": 4,
+    });
+  });
+
+  it("defaults boolean flags to false", () => {
+    expect(parseCommand(buildCommand, []).values).toMatchObject({
+      verbose: false,
+      "prerender-all": false,
+      precompress: false,
+    });
+  });
+
+  it("validates --prerender-concurrency as a positive integer", () => {
+    expect(() => parseCommand(buildCommand, ["--prerender-concurrency", "0"])).toThrow(
+      "positive integer",
+    );
+  });
+
+  it("generates help from the spec", () => {
+    const help = renderCommandHelp(buildCommand);
+    expect(help).toContain("vinext build - Build for production");
+    expect(help).toContain("--prerender-concurrency <count>");
+    expect(help).toContain("--precompress");
+  });
+});
+
+describe("startCommand", () => {
+  it("parses port/hostname and defaults hostname to 0.0.0.0", () => {
+    expect(parseCommand(startCommand, ["-p", "8080"]).values).toMatchObject({
+      port: 8080,
+      hostname: "0.0.0.0",
+    });
+  });
+
+  it("leaves port undefined when absent (run() applies the PORT-env fallback)", () => {
+    expect(parseCommand(startCommand, []).values.port).toBeUndefined();
+  });
+
+  it("generates help from the spec", () => {
+    const help = renderCommandHelp(startCommand);
+    expect(help).toContain("vinext start - Start production server");
+    expect(help).toContain("-p, --port <port>");
+    expect(help).toContain("(default: 0.0.0.0)");
+  });
+});
+
+describe("initCommand", () => {
+  it("parses flags and defaults port to 3001", () => {
+    expect(parseCommand(initCommand, ["--force", "--skip-check"]).values).toMatchObject({
+      port: 3001,
+      force: true,
+      "skip-check": true,
+    });
+  });
+
+  it("generates help with examples", () => {
+    const help = renderCommandHelp(initCommand);
+    expect(help).toContain("vinext init - Migrate a Next.js project to vinext");
+    expect(help).toContain("--skip-check");
+    expect(help).toContain("Examples:");
   });
 });

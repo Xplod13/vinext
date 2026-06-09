@@ -21,28 +21,53 @@
  */
 export type ArgType = "boolean" | "string" | "int" | "port" | "positiveInt";
 
-/** Declarative description of a single CLI flag. */
-export type ArgSpec = {
-  /** Value kind. Drives both parsing/validation and the help placeholder. */
-  type: ArgType;
+/** Fields shared by every flag kind. */
+type BaseArgSpec = {
   /** Single-letter short alias, without the dash (e.g. `"p"` for `-p`). */
   short?: string;
   /** Human-readable description, shown in the command's `--help` output. */
   description: string;
+  /** Hide this flag from `--help` output. It is still parsed and accepted. */
+  hidden?: boolean;
+};
+
+/**
+ * A boolean flag (`--verbose`). Always present in the parsed values (`false`
+ * when absent). A truthy default is intentionally not representable — there is
+ * no negation (`--no-foo`) path — so only `default: false` is permitted, which
+ * is also the implicit default.
+ */
+export type BooleanArgSpec = BaseArgSpec & {
+  type: "boolean";
+  default?: false;
+};
+
+/** A value-taking flag (`--port 3000`, or `--tag a --tag b` when `multiple`). */
+export type ValueArgSpec = BaseArgSpec & {
+  type: "string" | "int" | "port" | "positiveInt";
   /**
-   * Placeholder shown in help for value-taking flags. Rendered wrapped in
-   * angle brackets, e.g. `valueHint: "port"` → `--port <port>`. Ignored for
-   * `boolean` args. Defaults to the arg's type name when omitted.
+   * Placeholder shown in help, rendered wrapped in angle brackets, e.g.
+   * `valueHint: "port"` → `--port <port>`. Defaults to the type name when
+   * omitted (`port` → `<port>`, `string` → `<value>`, integers → `<n>`).
    */
   valueHint?: string;
   /**
    * Default value applied at runtime when the flag is absent, and shown in
-   * help as `(default: …)`. For `boolean` args the default is always `false`.
+   * help as `(default: …)`.
    */
-  default?: string | number | boolean;
+  default?: string | number;
   /** Allow the flag to be repeated; values are collected into an array. */
   multiple?: boolean;
 };
+
+/**
+ * Declarative description of a single CLI flag.
+ *
+ * Modeled as a discriminated union on `type` so the compiler enforces that
+ * only value flags can declare `multiple`/`valueHint`/a value `default`, and a
+ * boolean flag cannot declare a truthy default.
+ */
+export type ArgSpec = BooleanArgSpec | ValueArgSpec;
 
 /** A named positional argument, used only for help/usage rendering. */
 export type PositionalSpec = {
@@ -62,8 +87,8 @@ export type ExampleSpec = {
   description?: string;
 };
 
-/** Maps a single {@link ArgSpec} to its parsed scalar value type. */
-type ScalarValue<S extends ArgSpec> = S["type"] extends "string" ? string : number;
+/** Maps a value {@link ArgSpec} to its parsed scalar value type. */
+type ScalarValue<S> = S extends { type: "string" } ? string : number;
 
 /**
  * Infers the shape of the parsed `values` object from an args spec.
@@ -72,11 +97,14 @@ type ScalarValue<S extends ArgSpec> = S["type"] extends "string" ? string : numb
  *  - `multiple` flags become arrays.
  *  - flags with a `default` are always present.
  *  - all other value flags are `T | undefined`.
+ *
+ * Uses `extends { … }` rather than indexed access so it distributes correctly
+ * over the {@link ArgSpec} union (boolean specs have no `multiple`/`default`).
  */
 export type InferValues<A extends Record<string, ArgSpec>> = {
-  [K in keyof A]: A[K]["type"] extends "boolean"
+  [K in keyof A]: A[K] extends { type: "boolean" }
     ? boolean
-    : A[K]["multiple"] extends true
+    : A[K] extends { multiple: true }
       ? ScalarValue<A[K]>[]
       : A[K] extends { default: string | number }
         ? ScalarValue<A[K]>
@@ -106,6 +134,12 @@ export type CommandSpec<A extends Record<string, ArgSpec> = Record<string, ArgSp
   usage?: string;
   /** Flag definitions. A `--help`/`-h` flag is always injected automatically. */
   args?: A;
+  /**
+   * Accept (and ignore) flags not declared in `args` instead of erroring.
+   * Off by default: an unknown flag is a hard error. Enable per command for
+   * cases that must tolerate arbitrary pass-through flags.
+   */
+  passthroughUnknown?: boolean;
   /** Positional argument definitions (help/usage only). */
   positionals?: PositionalSpec[];
   /** Example invocations shown under "Examples". */

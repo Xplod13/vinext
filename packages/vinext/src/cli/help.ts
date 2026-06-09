@@ -81,10 +81,12 @@ export function renderCommandHelp<A extends Record<string, ArgSpec>>(spec: Comma
 
   lines.push("");
   lines.push(`${INDENT}${bold("Options:")}`);
-  const optionRows = Object.entries(args).map(([name, arg]) => ({
-    label: optionLabel(name, arg),
-    description: `${arg.description}${defaultSuffix(arg)}`,
-  }));
+  const optionRows = Object.entries(args)
+    .filter(([, arg]) => !arg.hidden)
+    .map(([name, arg]) => ({
+      label: optionLabel(name, arg),
+      description: `${arg.description}${defaultSuffix(arg)}`,
+    }));
   optionRows.push({ label: "-h, --help", description: "Show this help" });
   lines.push(...renderRows(optionRows));
 

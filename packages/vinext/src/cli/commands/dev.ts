@@ -6,7 +6,18 @@
  */
 
 import { defineCommand } from "../command.js";
-import type { DevLockfile } from "../../server/dev-lockfile.js";
+import {
+  applyViteConfigCompatibility,
+  buildViteConfig,
+  getViteVersion,
+  loadVite,
+} from "../runtime.js";
+import { loadDotenv } from "../../config/dotenv.js";
+import {
+  type DevLockfile,
+  formatAlreadyRunningError,
+  tryAcquireLockfile,
+} from "../../server/dev-lockfile.js";
 
 export const devCommand = defineCommand({
   name: "dev",
@@ -29,7 +40,13 @@ export const devCommand = defineCommand({
     },
     turbopack: {
       type: "boolean",
+      hidden: true,
       description: "Accepted for compatibility (no-op, Vite is always used)",
+    },
+    "experimental-https": {
+      type: "boolean",
+      hidden: true,
+      description: "Accepted for `next dev` compatibility (no-op)",
     },
   },
   examples: [
@@ -39,15 +56,6 @@ export const devCommand = defineCommand({
   async run({ values }) {
     const port = values.port;
     const host = values.hostname;
-
-    // Lazy-load the heavy runtime helpers (which pull in the full vinext Vite
-    // plugin) so importing this command module — e.g. for unit-testing its
-    // spec and help output — stays cheap and side-effect-free.
-    const { applyViteConfigCompatibility, buildViteConfig, getViteVersion, loadVite } =
-      await import("../runtime.js");
-    const { loadDotenv } = await import("../../config/dotenv.js");
-    const { formatAlreadyRunningError, tryAcquireLockfile } =
-      await import("../../server/dev-lockfile.js");
 
     loadDotenv({
       root: process.cwd(),
