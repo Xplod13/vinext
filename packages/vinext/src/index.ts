@@ -175,7 +175,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import fs from "node:fs";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import commonjs from "vite-plugin-commonjs";
 import { normalizePathSeparators } from "./utils/path.js";
 
@@ -907,6 +907,10 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
   // resolves to the configured RSC plugin array. Vite's asyncFlatten
   // will resolve this before processing the plugin list.
   let rscPluginPromise: Promise<Plugin[]> | null = null;
+  // Captured in configResolved so the use-cache transform can register hoisted
+  // functions into the plugin-rsc server-reference manifest.
+  // oxlint-disable-next-line typescript/no-explicit-any
+  let rscPluginApi: { manager: any } | null = null;
   if (earlyAppDirExists && autoRsc) {
     if (!resolvedRscPath) {
       throw new Error(
@@ -4069,6 +4073,21 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
     {
       name: "vinext:use-cache",
 
+      configResolved(config) {
+        // Capture the @vitejs/plugin-rsc manager so we can register hoisted
+        // "use cache" functions in the server-reference manifest (build) and
+        // use the correct normalised id for registerServerReference (dev+build).
+        // getPluginApi is defined on the "rsc:minimal" plugin's .api property.
+        if (resolvedRscPath) {
+          // oxlint-disable-next-line typescript/no-explicit-any
+          const api = (config.plugins as any[]).find(
+            // oxlint-disable-next-line typescript/no-explicit-any
+            (p: any) => p && typeof p === "object" && p.name === "rsc:minimal",
+          )?.api;
+          if (api) rscPluginApi = api;
+        }
+      },
+
       transform: {
         // Hook filter: only invoke JS when code contains 'use cache'.
         // The vast majority of files don't use this directive.
@@ -4264,47 +4283,129 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
             // registerServerReference inline at call-site. This keeps the
             // existing hoisting/export behaviour intact — the hoisted function
             // is still exported under its mangled name, and loadServerAction
-            // can resolve it correctly. The registerServerReference call just
-            // adds RSC serialisation metadata ($$typeof, $$id) to the cached
-            // wrapper without changing its runtime behaviour.
+            // can resolve it correctly. The registerServerReference call adds
+            // RSC serialisation metadata ($$typeof, $$id) to the cached wrapper.
+            //
+            // The $$id passed to registerServerReference must match how
+            // @vitejs/plugin-rsc resolves server references:
+            //   - build: hashString(toRelativeId(absoluteId))
+            //   - dev:   URL path relative to root (e.g. "/src/app/page.tsx")
+            //
+            // We also register the hoisted export names in the plugin-rsc
+            // serverReferenceMetaMap so the build-time
+            // virtual:vite-rsc/server-references manifest includes the module.
             const isRscEnv = this.environment?.name === "rsc";
-            // Resolve @vitejs/plugin-rsc/react/rsc once (only needed for RSC env).
-            const rscReactRscUrl = isRscEnv
-              ? (() => {
-                  const p = resolveOptionalDependency(earlyBaseDir, "@vitejs/plugin-rsc/react/rsc");
-                  return p ? pathToFileURL(p).href : "@vitejs/plugin-rsc/react/rsc";
-                })()
-              : "";
 
-            try {
-              const result = transformHoistInlineDirective(code, ast, {
-                directive: /^use cache(:\s*\w+)?$/,
-                runtime: (value: string, name: string, meta: { directiveMatch: string[] }) => {
-                  const directiveMatch = meta.directiveMatch[0];
-                  const variant =
-                    directiveMatch === "use cache"
-                      ? ""
-                      : directiveMatch.replace("use cache:", "").replace("use cache: ", "").trim();
-                  const cachedFnExpr = `(await import(${JSON.stringify(runtimeModuleUrl2)})).registerCachedFunction(${value}, ${JSON.stringify(id + ":" + name)}, ${JSON.stringify(variant)})`;
-                  if (isRscEnv) {
-                    // Wrap with registerServerReference so the cached function
-                    // can be serialised in the RSC payload when passed as a
-                    // prop to a client component (e.g. useActionState / formAction).
-                    return `(await import(${JSON.stringify(rscReactRscUrl)})).registerServerReference(${cachedFnExpr}, ${JSON.stringify(id)}, ${JSON.stringify(name)})`;
+            if (isRscEnv) {
+              // Compute the normalised reference key that matches what
+              // @vitejs/plugin-rsc's "use server" transform writes. Mirror the
+              // logic from vitePluginUseServer's getNormalizedId():
+              //   build → sha256(toRelativeId).hex.slice(0,12)
+              //   dev   → id.slice(root.length)  (URL path under Vite root)
+              const envConfig = this.environment?.config;
+              const projectRoot = envConfig?.root ?? root;
+              const isBuild = this.environment?.mode === "build";
+              const normalizedRefKey = isBuild
+                ? createHash("sha256")
+                    .update(
+                      id.replace(/\\/g, "/").slice(projectRoot.replace(/\\/g, "/").length + 1),
+                    )
+                    .digest()
+                    .toString("hex")
+                    .slice(0, 12)
+                : id.startsWith(projectRoot + "/") || id.startsWith(projectRoot + "\\")
+                  ? id.slice(projectRoot.length)
+                  : id;
+
+              // Resolve @vitejs/plugin-rsc/react/rsc for the registerServerReference call.
+              const rscReactRscUrl = (() => {
+                const p = resolveOptionalDependency(earlyBaseDir, "@vitejs/plugin-rsc/react/rsc");
+                return p ? pathToFileURL(p).href : "@vitejs/plugin-rsc/react/rsc";
+              })();
+
+              try {
+                const result = transformHoistInlineDirective(code, ast, {
+                  directive: /^use cache(:\s*\w+)?$/,
+                  runtime: (value: string, name: string, meta: { directiveMatch: string[] }) => {
+                    const directiveMatch = meta.directiveMatch[0];
+                    const variant =
+                      directiveMatch === "use cache"
+                        ? ""
+                        : directiveMatch
+                            .replace("use cache:", "")
+                            .replace("use cache: ", "")
+                            .trim();
+                    const cachedFnExpr = `(await import(${JSON.stringify(runtimeModuleUrl2)})).registerCachedFunction(${value}, ${JSON.stringify(id + ":" + name)}, ${JSON.stringify(variant)})`;
+                    // Use the normalised key so loadServerAction can resolve the
+                    // module via the server-references manifest (build) or direct
+                    // Vite URL import (dev). Using the raw absolute id here would
+                    // cause "server reference not found" in production.
+                    return `(await import(${JSON.stringify(rscReactRscUrl)})).registerServerReference(${cachedFnExpr}, ${JSON.stringify(normalizedRefKey)}, ${JSON.stringify(name)})`;
+                  },
+                  rejectNonAsyncFunction: false,
+                });
+
+                if (result.names.length > 0) {
+                  // Register hoisted export names in the plugin-rsc manager's
+                  // serverReferenceMetaMap so virtual:vite-rsc/server-references
+                  // includes this module in the production manifest.
+                  if (rscPluginApi?.manager) {
+                    const existing = rscPluginApi.manager.serverReferenceMetaMap[id];
+                    if (existing) {
+                      // Merge: preserve any names already registered (e.g., from
+                      // "use server" — unlikely but safe to handle).
+                      const merged = Array.from(
+                        new Set([...existing.exportNames, ...result.names]),
+                      );
+                      rscPluginApi.manager.serverReferenceMetaMap[id] = {
+                        importId: id,
+                        referenceKey: normalizedRefKey,
+                        exportNames: merged,
+                      };
+                    } else {
+                      rscPluginApi.manager.serverReferenceMetaMap[id] = {
+                        importId: id,
+                        referenceKey: normalizedRefKey,
+                        exportNames: result.names,
+                      };
+                    }
                   }
-                  return cachedFnExpr;
-                },
-                rejectNonAsyncFunction: false,
-              });
-
-              if (result.names.length > 0) {
-                return {
-                  code: result.output.toString(),
-                  map: result.output.generateMap({ hires: "boundary" }),
-                };
+                  return {
+                    code: result.output.toString(),
+                    map: result.output.generateMap({ hires: "boundary" }),
+                  };
+                }
+              } catch {
+                // If hoisting fails (e.g., complex closure), fall through
               }
-            } catch {
-              // If hoisting fails (e.g., complex closure), fall through
+            } else {
+              // Non-RSC env: no server reference wrapping needed.
+              try {
+                const result = transformHoistInlineDirective(code, ast, {
+                  directive: /^use cache(:\s*\w+)?$/,
+                  runtime: (value: string, name: string, meta: { directiveMatch: string[] }) => {
+                    const directiveMatch = meta.directiveMatch[0];
+                    const variant =
+                      directiveMatch === "use cache"
+                        ? ""
+                        : directiveMatch
+                            .replace("use cache:", "")
+                            .replace("use cache: ", "")
+                            .trim();
+                    return `(await import(${JSON.stringify(runtimeModuleUrl2)})).registerCachedFunction(${value}, ${JSON.stringify(id + ":" + name)}, ${JSON.stringify(variant)})`;
+                  },
+                  rejectNonAsyncFunction: false,
+                });
+
+                if (result.names.length > 0) {
+                  return {
+                    code: result.output.toString(),
+                    map: result.output.generateMap({ hires: "boundary" }),
+                  };
+                }
+              } catch {
+                // If hoisting fails (e.g., complex closure), fall through
+              }
             }
           }
 
