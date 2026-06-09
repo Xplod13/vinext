@@ -3826,6 +3826,23 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
 
         const serverDefines: Record<string, string> = { ...nextConfig.compilerDefineServer };
 
+        // Mirror Next.js's compile-time `process.env.NEXT_RUNTIME` constant
+        // (see packages/next/src/build/define-env.ts).  Next.js compiles each
+        // route into its own bundle and stamps the bundle with the runtime it
+        // targets ('edge' or 'nodejs').  Vinext compiles a single RSC bundle
+        // that covers all routes, so we use 'nodejs' for every server
+        // environment — the value that matches what the Workers Node.js
+        // compatibility layer and `vinext start` both provide at runtime.
+        //
+        // Without this define, `process.env.NEXT_RUNTIME` is `undefined` in
+        // the compiled bundle.  User-land code (and the Next.js test fixture at
+        // test/e2e/app-dir/next-after-app-deploy/app/path-prefix.js) that uses
+        // `process.env.NEXT_RUNTIME` to construct revalidation paths would then
+        // compute `'/undefined'` instead of `'/nodejs'`, causing after()
+        // callbacks to call revalidatePath() for the wrong URL and the ISR
+        // cache never being invalidated (issue #1365).
+        serverDefines["process.env.NEXT_RUNTIME"] = JSON.stringify("nodejs");
+
         // On-demand ISR revalidation secret — baked SERVER-ONLY (the `client`
         // early-return above guarantees it never reaches the browser bundle) so
         // every server bundle, and therefore every Workers isolate, shares the
