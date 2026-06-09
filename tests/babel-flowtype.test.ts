@@ -1,14 +1,23 @@
 /**
  * Test: Babel flowtype page compilation (#1506)
  *
- * When a `.js` file carries a `// @flow` pragma, OXC (used by
- * `vinext:jsx-in-js`) rejects it with:
+ * When a `.js` file carries a leading `// @flow` or `/* @flow *\/` pragma,
+ * OXC (used by `vinext:jsx-in-js`) rejects it with:
  *
  *   PARSE_ERROR: Flow is not supported
  *
- * vinext must gracefully route such files through @babel/core (resolved from
- * the project root) so the project's .babelrc — which typically contains
- * @babel/preset-flow — can strip the Flow annotations before Vite continues.
+ * vinext must route such files through @babel/core (resolved from the project
+ * root) so the project's .babelrc — which must contain @babel/preset-flow —
+ * strips the Flow annotations before Vite continues.
+ *
+ * This test suite exercises `hasFlowPragma` — the detection function — in
+ * isolation.  It imports from the small util module, so it never pulls in
+ * `image-size` or other heavy transitive deps from the full index.ts.
+ *
+ * Full e2e verification (Babel stripping Flow types + page rendering) is
+ * covered by the deploy-suite test:
+ *   test/e2e/babel/index.test.ts → "Babel > Should compile a page with
+ *   flowtype correctly"
  *
  * Ported from Next.js:
  *   test/e2e/babel/index.test.ts
@@ -16,11 +25,52 @@
  */
 
 import { describe, expect, it } from "vite-plus/test";
-import vinext from "../packages/vinext/src/index.js";
+import { hasFlowPragma } from "../packages/vinext/src/utils/flow-pragma.js";
 
-const FLOW_COMPONENT_CODE = `\
-// @flow
-import React from 'react'
+describe("hasFlowPragma — leading pragma detection (#1506)", () => {
+  // ── True-positive cases ────────────────────────────────────────────────────
+
+  it("detects `// @flow` as the very first line", () => {
+    expect(hasFlowPragma("// @flow\nimport React from 'react';\n")).toBe(true);
+  });
+
+  it("detects `// @flow` after leading whitespace", () => {
+    expect(hasFlowPragma("\n  // @flow\nimport React from 'react';\n")).toBe(true);
+  });
+
+  it("detects `// @flow strict` (word-boundary after @flow)", () => {
+    expect(hasFlowPragma("// @flow strict\n")).toBe(true);
+  });
+
+  it("detects `// @flow` after a hashbang line", () => {
+    expect(hasFlowPragma("#!/usr/bin/env node\n// @flow\n")).toBe(true);
+  });
+
+  it("detects `/* @flow */` block-comment pragma", () => {
+    expect(hasFlowPragma("/* @flow */\nimport x from 'x';\n")).toBe(true);
+  });
+
+  it("detects `/** @flow */` JSDoc-style block-comment pragma", () => {
+    expect(hasFlowPragma("/** @flow */\nimport x from 'x';\n")).toBe(true);
+  });
+
+  it("detects `/* @flow weak */` block-comment pragma with mode", () => {
+    expect(hasFlowPragma("/* @flow weak */\n")).toBe(true);
+  });
+
+  it("detects `// @flow` after another leading line comment", () => {
+    // Flow allows the pragma anywhere in the leading comment block.
+    expect(hasFlowPragma("// This is a component\n// @flow\n")).toBe(true);
+  });
+
+  it("detects `/* @flow */` after a leading line comment", () => {
+    expect(hasFlowPragma("// Copyright 2025\n/* @flow */\n")).toBe(true);
+  });
+
+  it("detects a real Flow component header (mycomponent.js fixture)", () => {
+    const code = `// @flow
+// This page is written in flowtype to test Babel's functionality
+import { React } from '../namespace-exported-react'
 
 type Props = {}
 
@@ -30,72 +80,80 @@ export default class MyComponent extends React.Component<Props> {
   }
 }
 `;
-
-/**
- * Retrieve the vinext:jsx-in-js plugin and its transform hook from the
- * plugin array returned by vinext().
- */
-function getJsxInJsPlugin(plugins: unknown[]) {
-  // oxlint-disable-next-line typescript/no-explicit-any
-  const flat = (plugins as any[]).flat(Infinity).filter(Boolean);
-  // oxlint-disable-next-line typescript/no-explicit-any
-  return flat.find((p: any) => p?.name === "vinext:jsx-in-js") ?? null;
-}
-
-describe("Babel flowtype compilation (issue #1506)", () => {
-  it("vinext:jsx-in-js does not throw 'Flow is not supported' for // @flow files", async () => {
-    // This test verifies that files annotated with // @flow are routed to
-    // the Babel fallback path rather than OXC. When @babel/core is not
-    // installed in the test environment, transformWithFlowBabel returns null
-    // and the plugin returns null (graceful pass-through). The important thing
-    // is that OXC is never called on the Flow-annotated code, so the
-    // "Flow is not supported" PARSE_ERROR is never thrown here.
-    //
-    // Full e2e verification (including Babel stripping Flow types and the
-    // page rendering) is covered by the deploy-suite test:
-    //   test/e2e/babel/index.test.ts → "Babel > Should compile a page with
-    //   flowtype correctly"
-
-    const plugins = vinext();
-    const jsxInJsPlugin = getJsxInJsPlugin([plugins]);
-    expect(jsxInJsPlugin).not.toBeNull();
-    expect(typeof jsxInJsPlugin.transform).toBe("function");
-
-    // Simulate what vite:oxc would return: "Flow is not supported"
-    // Before the fix, calling transform on a Flow file would delegate to OXC
-    // and throw. After the fix, it delegates to transformWithFlowBabel which
-    // either uses Babel (if available) or returns null (no Babel).
-    // Either way, no "Flow is not supported" error should propagate.
-    const result = await jsxInJsPlugin.transform(
-      FLOW_COMPONENT_CODE,
-      `/some/project/lib/mycomponent.js`,
-    );
-
-    // The result is either:
-    //   - null if @babel/core is not installed in the project root
-    //   - { code, map } if @babel/core is available and transforms the file
-    // We accept both — the key assertion is that no Flow-parse error was thrown.
-    expect(result).toSatisfy(
-      (r: unknown) =>
-        r === null || r === undefined || typeof (r as { code?: unknown }).code === "string",
-    );
+    expect(hasFlowPragma(code)).toBe(true);
   });
 
-  it("vinext:jsx-in-js transforms a non-Flow .js file with JSX normally", async () => {
-    const plugins = vinext();
-    const jsxInJsPlugin = getJsxInJsPlugin([plugins]);
-    expect(jsxInJsPlugin).not.toBeNull();
+  it("detects BOM + `// @flow`", () => {
+    expect(hasFlowPragma("﻿// @flow\n")).toBe(true);
+  });
 
-    const result = await jsxInJsPlugin.transform(
-      `export default function Hello() { return <div>Hi</div>; }`,
-      `/some/project/pages/hello.js`,
-    );
+  // ── False-positive / false-negative cases ──────────────────────────────────
 
-    // Normal JSX compilation should produce output (not null).
-    expect(result).not.toBeNull();
-    expect(result).not.toBeUndefined();
-    expect(typeof result.code).toBe("string");
-    // OXC should have compiled the JSX away — no raw JSX in the output.
-    expect(result.code).not.toContain("<div>");
+  it("does NOT match `// @flow` buried mid-file after an import statement", () => {
+    const code = `import React from 'react';
+
+// @flow
+export default function Foo() { return null; }
+`;
+    expect(hasFlowPragma(code)).toBe(false);
+  });
+
+  it("does NOT match `@flow` inside a template literal", () => {
+    const code = `const x = \`// @flow\`;
+export default x;
+`;
+    expect(hasFlowPragma(code)).toBe(false);
+  });
+
+  it("does NOT match `@flow` inside a string literal", () => {
+    const code = `const pragma = "// @flow";
+export default pragma;
+`;
+    expect(hasFlowPragma(code)).toBe(false);
+  });
+
+  it("does NOT match a file with no @flow pragma", () => {
+    expect(
+      hasFlowPragma(
+        `import React from 'react';\nexport default function Hello() { return <div>Hi</div>; }\n`,
+      ),
+    ).toBe(false);
+  });
+
+  it("does NOT match an empty file", () => {
+    expect(hasFlowPragma("")).toBe(false);
+  });
+
+  it("does NOT match a file with only whitespace", () => {
+    expect(hasFlowPragma("   \n\n  ")).toBe(false);
+  });
+
+  it("does NOT match `// @flow` that appears only after real code", () => {
+    const code = `export const x = 1;
+// @flow
+`;
+    expect(hasFlowPragma(code)).toBe(false);
+  });
+
+  it("does NOT match `// @flowtype` (no word-boundary after 'flow')", () => {
+    // `@flowtype` is not a valid Flow pragma — the regex must use \b.
+    // Note: hasFlowPragma uses `/\b@flow\b/` which matches `@flow` followed by
+    // non-word char.  `@flowtype` has a word char after `flow`, so it must NOT match.
+    expect(hasFlowPragma("// @flowtype\n")).toBe(false);
+  });
+
+  it("does NOT match `/* @flow */` that appears after real code", () => {
+    const code = `const x = 1;\n/* @flow */\n`;
+    expect(hasFlowPragma(code)).toBe(false);
+  });
+
+  // ── Edge cases ─────────────────────────────────────────────────────────────
+
+  it("returns false for an unterminated block comment (malformed file)", () => {
+    expect(hasFlowPragma("/* @flow")).toBe(false);
+  });
+
+  it("returns false for a hashbang-only file with no further content", () => {
+    expect(hasFlowPragma("#!/usr/bin/env node")).toBe(false);
   });
 });

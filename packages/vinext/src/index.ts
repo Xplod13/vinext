@@ -178,6 +178,7 @@ import fs from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
 import commonjs from "vite-plugin-commonjs";
 import { normalizePathSeparators } from "./utils/path.js";
+import { hasFlowPragma } from "./utils/flow-pragma.js";
 
 // Install the process-level peer-disconnect backstop at module load.
 // Vite plugin lifecycle hooks (config / configureServer) proved
@@ -610,19 +611,28 @@ function hasReactDirective(code: string): boolean {
 }
 
 /**
- * Transform a `.js` file that carries a `// @flow` pragma using @babel/core.
+ * Memoized @babel/core resolve cache: projectRoot → resolved module or null.
+ * Avoids repeated `createRequire` + `require.resolve` on every transformed file.
+ */
+const _babelCoreCache = new Map<string, unknown>();
+
+/**
+ * Transform a `.js` file that carries a Flow pragma using @babel/core so that
+ * Flow type annotations are stripped before OXC processes the file.
  *
  * OXC (used by `vite:oxc` and `transformWithOxc`) does not support Flow type
  * syntax and throws `PARSE_ERROR: Flow is not supported` on such files. This
  * function resolves @babel/core from the project root (so the user's installed
  * version is used) and invokes it with `babelrc: true` so the project's
- * .babelrc — typically containing @babel/preset-flow — strips the Flow
- * annotations. JSX in the file is also compiled so vite:oxc does not re-parse
- * JSX syntax later in the pipeline.
+ * .babelrc — which must contain `@babel/preset-flow` — strips the Flow
+ * annotations. Babel only removes Flow types; JSX is left intact in its
+ * output. A subsequent `transformWithOxc` pass (with `lang: "jsx"`) then
+ * compiles the JSX so the Vite pipeline can continue normally.
  *
- * Returns null when @babel/core cannot be resolved (the file is silently
- * skipped and will fail later with a more specific error). Throws when Babel
- * itself rejects the file (e.g. a misconfigured .babelrc).
+ * Returns null when @babel/core cannot be resolved (the file is then handled
+ * by OXC which will produce a clear "Flow is not supported" parse error).
+ * Throws when Babel itself rejects the file (e.g. a misconfigured .babelrc)
+ * or when Babel produces no output (which indicates a silent misconfiguration).
  */
 async function transformWithFlowBabel(
   code: string,
@@ -631,31 +641,50 @@ async function transformWithFlowBabel(
   // oxlint-disable-next-line typescript/no-explicit-any
 ): Promise<{ code: string; map?: any } | null> {
   // Resolve @babel/core from the project root so the user's version is used.
-  // Users who have @babel/preset-flow installed always have @babel/core as a
-  // transitive dependency, so this resolve should succeed in valid setups.
+  // Memoize per projectRoot to avoid repeated `createRequire` calls.
   // oxlint-disable-next-line typescript/no-explicit-any
   let babelCore: any;
-  try {
-    const req = createRequire(path.join(projectRoot, "package.json"));
-    babelCore = req("@babel/core");
-  } catch {
-    // @babel/core not installed — skip silently. The subsequent vite:oxc pass
-    // will produce a clearer "Flow is not supported" parse error pointing at
-    // the file, which is more actionable than a module-not-found from here.
-    return null;
+  if (_babelCoreCache.has(projectRoot)) {
+    babelCore = _babelCoreCache.get(projectRoot);
+    if (babelCore === null) return null;
+  } else {
+    try {
+      const req = createRequire(path.join(projectRoot, "package.json"));
+      babelCore = req("@babel/core");
+      _babelCoreCache.set(projectRoot, babelCore);
+    } catch {
+      // @babel/core not installed in this project. Cache the miss so we don't
+      // re-attempt on every file. OXC will surface "Flow is not supported".
+      _babelCoreCache.set(projectRoot, null);
+      return null;
+    }
   }
 
+  // Use the project's .babelrc / babel.config.* (must include @babel/preset-flow)
+  // to strip Flow type annotations. Babel leaves JSX syntax intact.
   // oxlint-disable-next-line typescript/no-unsafe-call, typescript/no-unsafe-member-access
   const result = (await babelCore.transformAsync(code, {
     filename,
     sourceMaps: true,
-    // Pick up the project's .babelrc / babel.config.* so @babel/preset-flow
-    // (and any other project-local Babel presets) are applied.
     configFile: true,
     babelrc: true,
   })) as { code?: string | null; map?: unknown } | null;
-  if (!result?.code) return null;
-  return { code: result.code, map: result.map ?? undefined };
+
+  if (!result?.code) {
+    throw new Error(
+      `[vinext] Babel produced empty output for Flow file: ${filename}\n` +
+        "Ensure @babel/preset-flow is listed in the project's .babelrc or babel.config.*",
+    );
+  }
+
+  // Babel has stripped Flow types; the output still contains JSX. Run OXC to
+  // compile JSX so the rest of the Vite pipeline receives plain JS.
+  const oxcResult = await transformWithOxc(result.code, filename, {
+    lang: "jsx",
+    jsx: { runtime: "automatic" as const },
+    sourcemap: true,
+  });
+  return { code: oxcResult.code, map: oxcResult.map };
 }
 
 function generateRootParamsModule(rootParamNames: Iterable<string>): string {
@@ -1140,11 +1169,14 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
               }
 
               // OXC does not support Flow type syntax. When a file carries a
-              // `// @flow` pragma, skip OXC and use @babel/core (resolved from
-              // the project root) instead, so the project's .babelrc — which
-              // typically includes @babel/preset-flow — can strip Flow
-              // annotations before Vite continues processing.
-              if (/^\s*\/\/\s*@flow\b/m.test(code)) {
+              // leading `// @flow` or `/* @flow */` pragma, route it through
+              // @babel/core (resolved from the project root) so the project's
+              // .babelrc — which must include @babel/preset-flow — strips Flow
+              // annotations. A subsequent OXC pass then compiles the JSX.
+              // `hasFlowPragma` only matches the leading comment block, so
+              // mid-file occurrences of `@flow` (template literals, comments)
+              // never trigger the Babel fallback.
+              if (hasFlowPragma(code)) {
                 return transformWithFlowBabel(code, cleanId, root);
               }
 
