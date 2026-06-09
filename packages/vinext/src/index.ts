@@ -1370,6 +1370,19 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
         defines["process.env.NEXT_DEPLOYMENT_ID"] = nextConfig.deploymentId
           ? JSON.stringify(nextConfig.deploymentId)
           : "false";
+        // `process.env.NEXT_RUNTIME` — compile-time constant that identifies
+        // the target runtime for the current bundle.  Next.js sets this in
+        // every environment via its webpack DefinePlugin
+        // (see packages/next/src/build/define-env.ts).  Client bundles receive
+        // `''` (empty string); server bundles receive `'nodejs'` or `'edge'`
+        // depending on the route's configured runtime.
+        //
+        // Here we set the client-bundle default to `''` at the top-level Vite
+        // define, matching Next.js's client value.  The server value
+        // (`'nodejs'`) is overlaid per-environment in the
+        // `vinext:compiler-define-server` configEnvironment hook below, which
+        // Vite merges over this base value for server environments only.
+        defines["process.env.NEXT_RUNTIME"] = '""';
         // Next.js version compat — mirrors Next.js' `process.env.__NEXT_VERSION`,
         // which is substituted by their webpack DefinePlugin at build time
         // (see `packages/next/src/client/next.ts` line 5 and
@@ -3800,20 +3813,18 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
         },
       },
     },
-    // Inject `compiler.defineServer` substitutions into server environments
-    // only. The universal `compiler.define` map is already merged into the
-    // top-level Vite `define` config above, so it applies to both client
-    // and server bundles. `defineServer` MUST NOT leak into the browser
-    // bundle (it can contain secrets), so we layer it in via the
-    // per-environment `define` hook, which Vite merges over the top-level
+    // Inject server-environment defines (NEXT_RUNTIME + user `compiler.defineServer`
+    // entries) into non-client environments only.  The universal
+    // `compiler.define` map is already merged into the top-level Vite
+    // `define` config above, so it applies to both client and server bundles.
+    // Server-only defines MUST NOT leak into the browser bundle (they can
+    // contain secrets such as the revalidate secret), so we layer them in via
+    // the per-environment `define` hook, which Vite merges over the top-level
     // value for that environment only.
     //
     // Mirrors Next.js: packages/next/src/build/define-env.ts — the
     // `defineServer` entries are only added to the `nodejs` / `edge`
     // serialized define environments, never to `client`.
-    //
-    // Returning `null`/`undefined` means "no change"; the explicit empty
-    // check keeps the hook a no-op when the user never configured it.
     {
       name: "vinext:compiler-define-server",
       configEnvironment(name) {
@@ -3825,6 +3836,23 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
         if (name === "client") return null;
 
         const serverDefines: Record<string, string> = { ...nextConfig.compilerDefineServer };
+
+        // Mirror Next.js's compile-time `process.env.NEXT_RUNTIME` constant
+        // (see packages/next/src/build/define-env.ts).  This is a build-time
+        // define — it is inlined at compile time and has no runtime equivalent.
+        // Next.js compiles each route into its own bundle and stamps the bundle
+        // with the runtime it targets ('edge' or 'nodejs').  Vinext compiles a
+        // single RSC bundle that covers all routes, so we use 'nodejs' for
+        // every server environment — the value that matches Vinext's Workers
+        // Node.js compatibility target.
+        //
+        // Without this define, `process.env.NEXT_RUNTIME` falls back to the
+        // top-level `''` value set for the client bundle.  User-land code (and
+        // the Next.js test fixture at
+        // test/e2e/app-dir/next-after-app-deploy/app/path-prefix.js) that uses
+        // `process.env.NEXT_RUNTIME` to construct revalidation paths would then
+        // compute `'/nodejs'` correctly instead of `''` (issue #1365).
+        serverDefines["process.env.NEXT_RUNTIME"] = JSON.stringify("nodejs");
 
         // On-demand ISR revalidation secret — baked SERVER-ONLY (the `client`
         // early-return above guarantees it never reaches the browser bundle) so
@@ -3843,7 +3871,6 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
             JSON.stringify(sharedRevalidateSecret);
         }
 
-        if (Object.keys(serverDefines).length === 0) return null;
         return { define: serverDefines };
       },
     },
