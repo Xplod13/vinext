@@ -30,6 +30,11 @@ import {
   type VinextCacheConfig,
 } from "./cache/cache-adapters-virtual.js";
 import {
+  VIRTUAL_IMAGE_ADAPTERS,
+  generateImageAdaptersModule,
+  type VinextImageConfig,
+} from "./image/image-adapters-virtual.js";
+import {
   generateBrowserEntry,
   isLinkPrefetchRoute,
   toLinkPrefetchRoute,
@@ -531,6 +536,8 @@ const VIRTUAL_ROOT_PARAMS = "virtual:vinext-root-params";
 const RESOLVED_ROOT_PARAMS = "\0" + VIRTUAL_ROOT_PARAMS;
 /** Virtual module that registers config-driven cache adapters (see VinextOptions.cache). */
 const RESOLVED_CACHE_ADAPTERS = "\0" + VIRTUAL_CACHE_ADAPTERS;
+/** Virtual module that registers the config-driven image optimizer (see VinextOptions.images). */
+const RESOLVED_IMAGE_ADAPTERS = "\0" + VIRTUAL_IMAGE_ADAPTERS;
 /** Virtual module for composed instrumentation-client bootstrap. */
 const VIRTUAL_INSTRUMENTATION_CLIENT = "private-next-instrumentation-client";
 const RESOLVED_INSTRUMENTATION_CLIENT = `\0${VIRTUAL_INSTRUMENTATION_CLIENT}.mjs`;
@@ -746,6 +753,28 @@ export type VinextOptions = {
    * })
    */
   cache?: VinextCacheConfig;
+  /**
+   * Configure the server-side image optimizer declaratively, so you don't need a
+   * custom worker entry that wires `env.IMAGES` into `handleImageOptimization`.
+   * The `optimizer` slot is a `{ adapter, options }` descriptor pointing at an
+   * adapter module whose default export is a factory; the plugin registers it
+   * automatically on the first request, passing the host `env` (Worker bindings)
+   * so the adapter can read its transform binding.
+   *
+   * This is complementary to the `images` field in `next.config.js`, which
+   * configures the standard Next.js options (`remotePatterns`, `deviceSizes`,
+   * `dangerouslyAllowSVG`, etc.) — those are still read from next.config. When no
+   * optimizer is configured (or its binding is unavailable, e.g. on Node.js/dev),
+   * `/_next/image` falls back to serving the original asset unoptimized.
+   *
+   * @example
+   * import { imageAdapter } from "@vinext/cloudflare/image/image-adapter";
+   *
+   * vinext({
+   *   images: { optimizer: imageAdapter() },
+   * })
+   */
+  images?: VinextImageConfig;
   /**
    * Experimental vinext-only feature flags.
    */
@@ -2450,6 +2479,13 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
           ) {
             return RESOLVED_CACHE_ADAPTERS;
           }
+          if (
+            cleanId === VIRTUAL_IMAGE_ADAPTERS ||
+            cleanId.endsWith("/" + VIRTUAL_IMAGE_ADAPTERS) ||
+            cleanId.endsWith("\\" + VIRTUAL_IMAGE_ADAPTERS)
+          ) {
+            return RESOLVED_IMAGE_ADAPTERS;
+          }
           if (cleanId.startsWith(VIRTUAL_GOOGLE_FONTS + "?")) {
             return RESOLVED_VIRTUAL_GOOGLE_FONTS + cleanId.slice(VIRTUAL_GOOGLE_FONTS.length);
           }
@@ -2549,6 +2585,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
               cacheMaxMemorySize: nextConfig?.cacheMaxMemorySize,
               inlineCss: nextConfig?.inlineCss,
               i18n: nextConfig?.i18n,
+              images: nextConfig?.images,
               hasPagesDir,
               publicFiles: scanPublicFileRoutes(root),
               globalNotFoundPath,
@@ -2565,6 +2602,9 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
         }
         if (id === RESOLVED_CACHE_ADAPTERS) {
           return generateCacheAdaptersModule(options.cache);
+        }
+        if (id === RESOLVED_IMAGE_ADAPTERS) {
+          return generateImageAdaptersModule(options.images);
         }
         if (id === RESOLVED_APP_SSR_ENTRY && hasAppDir) {
           return generateSsrEntry(hasPagesDir);

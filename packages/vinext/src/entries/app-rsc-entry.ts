@@ -21,6 +21,7 @@ import type { AppRoute } from "../routing/app-router.js";
 import { generateDevOriginCheckCode } from "../server/dev-origin-check.js";
 import type { MetadataFileRoute } from "../server/metadata-routes.js";
 import { isProxyFile } from "../server/middleware.js";
+import { DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "../server/image-optimization.js";
 
 const DEFAULT_EXPIRE_TIME = 31_536_000;
 const DEFAULT_REACT_MAX_HEADERS_LENGTH = 6000;
@@ -150,6 +151,21 @@ type AppRouterConfig = {
   /** Internationalization routing config for middleware matcher locale handling. */
   i18n?: NextI18nConfig | null;
   /**
+   * Resolved `images` config from next.config. Embedded in the generated entry
+   * (as `__imageAllowedWidths` + `__imageConfig` exports) so the Cloudflare
+   * worker entry can run `/_next/image` optimization with the configured allowed
+   * widths and security headers — mirroring how the Pages Router entry exposes
+   * `vinextConfig.images`.
+   */
+  images?: {
+    deviceSizes?: number[];
+    imageSizes?: number[];
+    dangerouslyAllowSVG?: boolean;
+    dangerouslyAllowLocalIP?: boolean;
+    contentDispositionType?: "inline" | "attachment";
+    contentSecurityPolicy?: string;
+  };
+  /**
    * Absolute path to `app/global-not-found.{tsx,ts,js,jsx}` when present.
    * When provided, route-miss 404s render this module standalone (it owns its
    * own `<html>` and `<body>`) instead of wrapping the regular `not-found.tsx`
@@ -210,6 +226,19 @@ export function generateRscEntry(
   const hasPagesDir = config?.hasPagesDir ?? false;
   const publicFiles = config?.publicFiles ?? [];
   const draftModeSecret = config?.draftModeSecret ?? randomUUID();
+  // Allowed image-optimization widths (union of deviceSizes + imageSizes, matching
+  // Next.js) and the security/header config, both inlined so the Cloudflare worker
+  // entry can call handleImageOptimization without a sidecar or custom worker.
+  const imageAllowedWidths = [
+    ...(config?.images?.deviceSizes ?? DEFAULT_DEVICE_SIZES),
+    ...(config?.images?.imageSizes ?? DEFAULT_IMAGE_SIZES),
+  ];
+  const imageConfig = {
+    dangerouslyAllowSVG: config?.images?.dangerouslyAllowSVG,
+    dangerouslyAllowLocalIP: config?.images?.dangerouslyAllowLocalIP,
+    contentDispositionType: config?.images?.contentDispositionType,
+    contentSecurityPolicy: config?.images?.contentSecurityPolicy,
+  };
   const manifestCode = buildAppRscManifestCode({
     routes,
     metadataRoutes,
@@ -542,6 +571,11 @@ const __reactMaxHeadersLength = ${JSON.stringify(reactMaxHeadersLength)};
 export const __assetPrefix = ${JSON.stringify(assetPrefix)};
 export const __inlineCss = ${JSON.stringify(inlineCss)};
 export const __hasPagesDir = ${JSON.stringify(hasPagesDir)};
+// Image-optimization config inlined from next.config \`images\`. Consumed by the
+// Cloudflare worker entry (app-router-entry.ts) to run \`/_next/image\` through
+// the configured optimizer with the right allowed widths + security headers.
+export const __imageAllowedWidths = ${JSON.stringify(imageAllowedWidths)};
+export const __imageConfig = ${JSON.stringify(imageConfig)};
 
 export function seedMemoryCacheFromPrerender(serverDir) {
   return __seedMemoryCacheFromPrerender(serverDir, {

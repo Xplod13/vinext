@@ -5,7 +5,6 @@ import os from "node:os";
 import {
   detectProject,
   generateWranglerConfig,
-  generateAppRouterWorkerEntry,
   generatePagesRouterWorkerEntry,
   generateAppRouterViteConfig,
   generatePagesRouterViteConfig,
@@ -489,13 +488,21 @@ describe("generateWranglerConfig", () => {
 
     expect(parsed.name).toBe(info.projectName);
     expect(parsed.compatibility_flags).toContain("nodejs_compat");
-    expect(parsed.main).toBe("./worker/index.ts");
+    // App Router points main at the default entry (no custom worker needed).
+    expect(parsed.main).toBe("vinext/server/app-router-entry");
     expect(parsed.assets).toEqual({
       directory: "dist/client",
       not_found_handling: "none",
       binding: "ASSETS",
     });
     expect(parsed.$schema).toBe("node_modules/wrangler/config-schema.json");
+  });
+
+  it("points main at a generated worker for Pages Router", () => {
+    mkdir(tmpDir, "pages");
+    const info = detectProject(tmpDir);
+    const parsed = JSON.parse(generateWranglerConfig(info));
+    expect(parsed.main).toBe("./worker/index.ts");
   });
 
   it("sets compatibility_date to today", () => {
@@ -557,56 +564,10 @@ describe("generateWranglerConfig", () => {
 
 // ─── Worker Entry Generation ─────────────────────────────────────────────────
 
-describe("generateAppRouterWorkerEntry", () => {
-  it("generates valid TypeScript", () => {
-    const content = generateAppRouterWorkerEntry();
-    expect(content).toContain("export default");
-    expect(content).toContain("async fetch(request: Request, env: Env, ctx: ExecutionContext)");
-    expect(content).toContain("Promise<Response>");
-  });
-
-  it("includes image optimization handler", () => {
-    const content = generateAppRouterWorkerEntry();
-    expect(content).toContain("isImageOptimizationPath");
-    expect(content).toContain("handleImageOptimization");
-  });
-
-  it("declares Env interface with IMAGES binding", () => {
-    const content = generateAppRouterWorkerEntry();
-    expect(content).toContain("interface Env");
-    expect(content).toContain("IMAGES");
-    expect(content).toContain("ASSETS");
-  });
-
-  it("declares ExecutionContext interface", () => {
-    const content = generateAppRouterWorkerEntry();
-    expect(content).toContain("interface ExecutionContext");
-    expect(content).toContain("waitUntil");
-  });
-
-  it("passes image handlers inline to handleImageOptimization", () => {
-    const content = generateAppRouterWorkerEntry();
-    expect(content).toContain("fetchAsset:");
-    expect(content).toContain("transformImage:");
-    expect(content).toContain("env.ASSETS.fetch");
-    expect(content).toContain("env.IMAGES");
-  });
-
-  it("never wires a cache handler into the Worker entry", () => {
-    // Cache backends are configured declaratively via vinext({ cache }) in
-    // vite.config; the Worker entry must not scaffold setDataCacheHandler.
-    const content = generateAppRouterWorkerEntry();
-    expect(content).not.toContain("KVCacheHandler");
-    expect(content).not.toContain("setDataCacheHandler");
-    expect(content).not.toContain("setCdnCacheAdapter");
-    expect(content).not.toContain("VINEXT_KV_CACHE");
-  });
-
-  it("points users to the declarative cache config", () => {
-    const content = generateAppRouterWorkerEntry();
-    expect(content).toContain("vinext({ cache })");
-  });
-});
+// App Router no longer generates a custom worker entry: `vinext deploy` points
+// wrangler `main` at vinext/server/app-router-entry, which handles routing AND
+// image optimization (via the configured images.optimizer). See the
+// generateWranglerConfig + getFilesToGenerate suites for that wiring.
 
 describe("viteConfigHasCacheAdapter", () => {
   it("detects a data field assigned an adapter", () => {
@@ -887,14 +848,22 @@ describe("generatePagesRouterWorkerEntry", () => {
   it("includes image optimization handler", () => {
     const content = generatePagesRouterWorkerEntry();
     expect(content).toContain("isImageOptimizationPath");
-    expect(content).toContain("handleImageOptimization");
+    expect(content).toContain("handleConfiguredImageOptimization");
   });
 
-  it("declares Env interface with IMAGES binding", () => {
+  it("declares Env interface with the ASSETS binding (image source)", () => {
     const content = generatePagesRouterWorkerEntry();
     expect(content).toContain("interface Env");
-    expect(content).toContain("IMAGES");
     expect(content).toContain("ASSETS");
+  });
+
+  it("registers the configured image optimizer instead of wiring env.IMAGES inline", () => {
+    const content = generatePagesRouterWorkerEntry();
+    expect(content).toContain('from "virtual:vinext-image-adapters"');
+    expect(content).toContain("registerConfiguredImageOptimizer(env)");
+    // The transform backend is the configured optimizer, not a hardcoded binding.
+    expect(content).not.toContain("env.IMAGES");
+    expect(content).not.toContain("transformImage:");
   });
 
   it("includes an open-redirect guard that rejects encoded backslash and slash", () => {
@@ -904,20 +873,15 @@ describe("generatePagesRouterWorkerEntry", () => {
     expect(content).toContain("isOpenRedirectShaped(pathname)");
   });
 
-  it("passes image handlers inline to handleImageOptimization", () => {
+  it("passes a fetchAsset reader to handleConfiguredImageOptimization", () => {
     const content = generatePagesRouterWorkerEntry();
-    expect(content).toContain("fetchAsset:");
-    expect(content).toContain("transformImage:");
+    expect(content).toContain("handleConfiguredImageOptimization(");
     expect(content).toContain("env.ASSETS.fetch");
-    expect(content).toContain("env.IMAGES");
   });
 
   it("exports every vinext subpath imported by generated worker entries", () => {
     const exportsMap = readVinextPackageExports();
-    const generatedImports = [
-      ...extractVinextImportSubpaths(generateAppRouterWorkerEntry()),
-      ...extractVinextImportSubpaths(generatePagesRouterWorkerEntry()),
-    ];
+    const generatedImports = [...extractVinextImportSubpaths(generatePagesRouterWorkerEntry())];
     const uniqueGeneratedImports = [...new Set(generatedImports)].sort();
 
     expect(uniqueGeneratedImports.length).toBeGreaterThan(0);
@@ -1371,16 +1335,18 @@ describe("isPackageResolvable", () => {
 // ─── getFilesToGenerate ──────────────────────────────────────────────────────
 
 describe("getFilesToGenerate", () => {
-  it("generates all three files when nothing exists (App Router)", () => {
+  it("generates wrangler + vite config (no worker) for App Router", () => {
+    // App Router uses the default entry directly (main points at
+    // vinext/server/app-router-entry), so no custom worker is generated.
     mkdir(tmpDir, "app");
     const info = detectProject(tmpDir);
     const files = getFilesToGenerate(info);
 
-    expect(files).toHaveLength(3);
+    expect(files).toHaveLength(2);
     const descriptions = files.map((f) => f.description);
     expect(descriptions).toContain("wrangler.jsonc");
-    expect(descriptions).toContain("worker/index.ts");
     expect(descriptions).toContain("vite.config.ts");
+    expect(descriptions).not.toContain("worker/index.ts");
   });
 
   it("generates all three files when nothing exists (Pages Router)", () => {
@@ -1399,11 +1365,12 @@ describe("getFilesToGenerate", () => {
 
     const descriptions = files.map((f) => f.description);
     expect(descriptions).not.toContain("wrangler.jsonc");
-    expect(files).toHaveLength(2);
+    // App Router generates only vite.config.ts now (no worker, wrangler skipped).
+    expect(files).toHaveLength(1);
   });
 
-  it("skips worker/index.ts when it already exists", () => {
-    mkdir(tmpDir, "app");
+  it("skips worker/index.ts when it already exists (Pages Router)", () => {
+    mkdir(tmpDir, "pages");
     writeFile(tmpDir, "worker/index.ts", "export default {}");
     const info = detectProject(tmpDir);
     const files = getFilesToGenerate(info);
@@ -1433,15 +1400,13 @@ describe("getFilesToGenerate", () => {
     expect(files).toHaveLength(0);
   });
 
-  it("generates App Router worker entry for App Router project", () => {
+  it("does not generate a worker entry for App Router project", () => {
     mkdir(tmpDir, "app");
     const info = detectProject(tmpDir);
     const files = getFilesToGenerate(info);
 
     const workerFile = files.find((f) => f.description === "worker/index.ts");
-    expect(workerFile).toBeDefined();
-    expect(workerFile!.content).toContain("vinext/server/app-router-entry");
-    expect(workerFile!.content).not.toContain("virtual:vinext-server-entry");
+    expect(workerFile).toBeUndefined();
   });
 
   it("generates Pages Router worker entry for Pages Router project", () => {
@@ -1833,15 +1798,12 @@ describe("detectProject — src/ directory convention", () => {
     const info = detectProject(tmpDir);
     const files = getFilesToGenerate(info);
 
-    expect(files).toHaveLength(3);
+    // App Router needs no custom worker — main points at the default entry.
+    expect(files).toHaveLength(2);
     const descriptions = files.map((f) => f.description);
     expect(descriptions).toContain("wrangler.jsonc");
-    expect(descriptions).toContain("worker/index.ts");
     expect(descriptions).toContain("vite.config.ts");
-
-    // Should generate App Router worker entry
-    const workerFile = files.find((f) => f.description === "worker/index.ts");
-    expect(workerFile!.content).toContain("vinext/server/app-router-entry");
+    expect(descriptions).not.toContain("worker/index.ts");
   });
 
   it("generates correct files for src/pages/ project", () => {

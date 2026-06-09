@@ -11,10 +11,7 @@
  * Issue: https://github.com/cloudflare/vinext/issues/1365
  */
 import { describe, expect, it } from "vite-plus/test";
-import {
-  generateAppRouterWorkerEntry,
-  generatePagesRouterWorkerEntry,
-} from "../packages/vinext/src/deploy.js";
+import { generatePagesRouterWorkerEntry } from "../packages/vinext/src/deploy.js";
 
 type ExecutionContextLike = {
   waitUntil(promise: Promise<unknown>): void;
@@ -153,12 +150,10 @@ describe("after() in deploy mode — Pages Router worker entry", () => {
   });
 });
 
-describe("after() in deploy mode — App Router worker entry", () => {
-  it("delegates to handler.fetch with ctx so vinext/server/app-router-entry can wrap with runWithExecutionContext", () => {
-    const content = generateAppRouterWorkerEntry();
-    expect(content).toContain("handler.fetch(request, env, ctx)");
-  });
-});
+// App Router needs no generated worker entry: `vinext deploy` points wrangler
+// `main` at vinext/server/app-router-entry, whose fetch handler already wraps
+// requests with runWithExecutionContext(ctx) so after() works. (Covered by the
+// app-router-entry source + the app-rsc-handler after() tests.)
 
 describe("after() in deploy mode — Pages Router API handler", () => {
   it("handlePagesApiRoute wraps the user handler in runWithExecutionContext when ctx is provided", async () => {

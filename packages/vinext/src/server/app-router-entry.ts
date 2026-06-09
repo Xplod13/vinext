@@ -22,10 +22,19 @@ import "./server-globals.js";
 import rscHandler, {
   __assetPrefix as __rscAssetPrefix,
   __basePath as __rscBasePath,
+  __imageAllowedWidths as __rscImageAllowedWidths,
+  __imageConfig as __rscImageConfig,
 } from "virtual:vinext-rsc-entry";
 import { runWithExecutionContext, type ExecutionContextLike } from "vinext/shims/request-context";
 // @ts-expect-error -- virtual module resolved by vinext at build time
 import { registerConfiguredCacheAdapters } from "virtual:vinext-cache-adapters";
+// @ts-expect-error -- virtual module resolved by vinext at build time
+import { registerConfiguredImageOptimizer } from "virtual:vinext-image-adapters";
+import {
+  getImageOptimizer,
+  handleConfiguredImageOptimization,
+  isImageOptimizationPath,
+} from "./image-optimization.js";
 import { resolveStaticAssetSignal } from "./worker-utils.js";
 import {
   cloneRequestWithHeaders,
@@ -70,8 +79,29 @@ async function handleRequest(
 ): Promise<Response> {
   // Register config-driven cache adapters before any rendering touches the cache.
   registerConfiguredCacheAdapters(env as Record<string, unknown> | undefined);
+  // Register the config-driven image optimizer (images.optimizer in vite.config)
+  // so /_next/image can transform via the configured backend (e.g. Cloudflare
+  // Images). A no-op when nothing is configured.
+  registerConfiguredImageOptimizer(env as Record<string, unknown> | undefined);
 
   const url = new URL(request.url);
+
+  // Image optimization. When an optimizer is configured AND the ASSETS binding is
+  // available to read source images, handle /_next/image here using the
+  // configured transform backend — no custom worker entry needed. Without a
+  // configured optimizer, fall through to the RSC handler, which 302-redirects to
+  // the original asset (unoptimized passthrough). The allowed widths and security
+  // headers come from next.config `images`, inlined into the RSC entry.
+  if (isImageOptimizationPath(url.pathname) && env?.ASSETS && getImageOptimizer()) {
+    const assetFetcher = env.ASSETS;
+    return handleConfiguredImageOptimization(
+      request,
+      (assetPath) =>
+        Promise.resolve(assetFetcher.fetch(new Request(new URL(assetPath, request.url)))),
+      __rscImageAllowedWidths,
+      __rscImageConfig,
+    );
+  }
 
   // Block protocol-relative URL open redirects (//evil.com/, /\evil.com/,
   // /%5Cevil.com/, /%2F/evil.com/). Check BEFORE decode so both literal and
