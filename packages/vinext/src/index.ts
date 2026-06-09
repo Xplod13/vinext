@@ -679,11 +679,16 @@ async function transformWithFlowBabel(
 
   // Babel has stripped Flow types; the output still contains JSX. Run OXC to
   // compile JSX so the rest of the Vite pipeline receives plain JS.
-  const oxcResult = await transformWithOxc(result.code, filename, {
-    lang: "jsx",
-    jsx: { runtime: "automatic" as const },
-    sourcemap: true,
-  });
+  // Pass Babel's output map as `inMap` so OXC composes it into the final map,
+  // making the returned sourcemap trace back to the original Flow source rather
+  // than to Babel's intermediate output.
+  const babelMap = result.map as object | undefined;
+  const oxcResult = await transformWithOxc(
+    result.code,
+    filename,
+    { lang: "jsx", jsx: { runtime: "automatic" as const }, sourcemap: true },
+    babelMap,
+  );
   return { code: oxcResult.code, map: oxcResult.map };
 }
 

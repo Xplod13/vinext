@@ -13,7 +13,7 @@
  *   2. Skip hashbang (`#!...`).
  *   3. Loop: skip whitespace and leading comments (both `//` and `/* ... *\/`).
  *      For each comment, check whether it contains `@flow` as a word-boundary
- *      token (`\b@flow\b`).  If found → return true.
+ *      token (`/@flow\b/`).  If found → return true.
  *   4. Once the first non-comment, non-whitespace token is reached → return false.
  *
  * This guarantees that `@flow` in mid-file comments, template literals, or

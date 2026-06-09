@@ -137,7 +137,7 @@ export default pragma;
 
   it("does NOT match `// @flowtype` (no word-boundary after 'flow')", () => {
     // `@flowtype` is not a valid Flow pragma — the regex must use \b.
-    // Note: hasFlowPragma uses `/\b@flow\b/` which matches `@flow` followed by
+    // Note: hasFlowPragma uses `/@flow\b/` which matches `@flow` followed by
     // non-word char.  `@flowtype` has a word char after `flow`, so it must NOT match.
     expect(hasFlowPragma("// @flowtype\n")).toBe(false);
   });
