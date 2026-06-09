@@ -4253,21 +4253,84 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
               resolveShimModulePath(shimsDir, "cache-runtime"),
             ).href;
 
+            // In the RSC environment, inline "use cache" functions that are
+            // passed as props to client components must also be registered as
+            // server references. Without this, the RSC serializer cannot
+            // include them in the RSC payload (they're plain async functions
+            // with no server-reference metadata), so `useActionState` and
+            // `formAction` props fail to serialize.
+            //
+            // Strategy:
+            //  - noExport: true — suppress the automatic `export` on the
+            //    hoisted raw function so we can export the cached wrapper
+            //    instead (needed for loadServerAction to find the right fn).
+            //  - runtime: return `${name}_$$vcf` — a reference to the
+            //    module-level const created in the appended code below.
+            //  - Append per-name module-level code that:
+            //      1. Creates the cached wrapper via registerCachedFunction
+            //      2. Registers it as a server reference via
+            //         registerServerReference so RSC can serialize it
+            //      3. Exports it under the original hoisted name so that
+            //         loadServerAction("fileId#name") resolves correctly
+            const isRscEnv = this.environment?.name === "rsc";
+            const hoistedVariants = new Map<string, string>();
+
             try {
               const result = transformHoistInlineDirective(code, ast, {
                 directive: /^use cache(:\s*\w+)?$/,
+                noExport: isRscEnv,
                 runtime: (value: string, name: string, meta: { directiveMatch: string[] }) => {
                   const directiveMatch = meta.directiveMatch[0];
                   const variant =
                     directiveMatch === "use cache"
                       ? ""
                       : directiveMatch.replace("use cache:", "").replace("use cache: ", "").trim();
+                  if (isRscEnv) {
+                    // Store variant for module-level code generation below.
+                    hoistedVariants.set(name, variant);
+                    // The inline position references the module-level cached
+                    // wrapper, which is defined before the component function
+                    // runs (module-level consts execute at import time).
+                    return `${name}_$$vcf`;
+                  }
                   return `(await import(${JSON.stringify(runtimeModuleUrl2)})).registerCachedFunction(${value}, ${JSON.stringify(id + ":" + name)}, ${JSON.stringify(variant)})`;
                 },
                 rejectNonAsyncFunction: false,
               });
 
               if (result.names.length > 0) {
+                if (isRscEnv) {
+                  // Resolve @vitejs/plugin-rsc/react/rsc for registerServerReference.
+                  // This module is always present in the RSC environment.
+                  const resolvedRscReactRscPath = resolveOptionalDependency(
+                    earlyBaseDir,
+                    "@vitejs/plugin-rsc/react/rsc",
+                  );
+                  const rscReactRscUrl = resolvedRscReactRscPath
+                    ? pathToFileURL(resolvedRscReactRscPath).href
+                    : "@vitejs/plugin-rsc/react/rsc";
+
+                  // For each hoisted name, append module-level code that:
+                  //  - creates the cached wrapper (registerCachedFunction)
+                  //  - registers it as a server reference (registerServerReference)
+                  //    so RSC can serialize it as a prop to client components
+                  //  - exports it under the original hoisted name so that
+                  //    loadServerAction(fileId + "#" + name) returns the
+                  //    cached wrapper (not the raw function)
+                  const moduleExports = result.names
+                    .map((name: string) => {
+                      const variant = hoistedVariants.get(name) ?? "";
+                      return (
+                        `\nconst ${name}_$$vcf = /* #__PURE__ */ (await import(${JSON.stringify(runtimeModuleUrl2)})).registerCachedFunction(${name}, ${JSON.stringify(id + ":" + name)}, ${JSON.stringify(variant)});` +
+                        `\n(await import(${JSON.stringify(rscReactRscUrl)})).registerServerReference(${name}_$$vcf, ${JSON.stringify(id)}, ${JSON.stringify(name + "_$$vcf")});` +
+                        `\nexport { ${name}_$$vcf as ${name} };`
+                      );
+                    })
+                    .join("\n");
+
+                  result.output.append(moduleExports);
+                }
+
                 return {
                   code: result.output.toString(),
                   map: result.output.generateMap({ hires: "boundary" }),
