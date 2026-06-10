@@ -10,7 +10,9 @@
  *     value-taking flags error on missing/empty values and reject a following
  *     token that "looks like another flag" (e.g. `--port --hostname`).
  *   - Per-command defaults applied to the returned values.
- *   - Graceful pass-through of unknown flags (drop-in `next` CLI friendliness).
+ *   - A strict-by-default unknown-flag policy: undeclared flags raise a
+ *     {@link CliUsageError}, with a per-command `passthroughUnknown` opt-in
+ *     for commands that must tolerate arbitrary pass-through flags.
  *
  * Parsing errors throw a {@link CliUsageError} so the caller can render them
  * cleanly without a stack trace.
@@ -143,7 +145,19 @@ export function parseCommand<A extends Record<string, ArgSpec>>(
       if (token.name === "help" || spec.passthroughUnknown) continue;
       throw new CliUsageError(`Unknown option "${token.rawName}".`);
     }
-    if (arg.type === "boolean") continue;
+    if (arg.type === "boolean") {
+      // With `strict: false`, node:util accepts an inline value on a boolean
+      // flag and stores it as a *string* (`--verbose=true` → "true"), which
+      // would otherwise silently resolve to `false` below. Reject it instead —
+      // silently flipping an explicitly-passed value is exactly the kind of
+      // trap the strict-by-default policy is meant to prevent.
+      if (token.value !== undefined) {
+        throw new CliUsageError(
+          `${token.rawName} does not take a value, but got "${token.value}".`,
+        );
+      }
+      continue;
+    }
 
     const label = token.rawName;
     typedAs[token.name] = label;

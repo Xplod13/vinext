@@ -157,6 +157,16 @@ describe("parseCommand — booleans", () => {
     expect(parseCommand(spec, ["--verbose"]).values).toMatchObject({ verbose: true });
     expect(parseCommand(spec, []).values).toMatchObject({ verbose: false });
   });
+
+  it("rejects an inline value on a boolean flag instead of silently dropping it", () => {
+    // node:util (strict: false) stores `--verbose=true` as the *string* "true",
+    // which would otherwise resolve to `false` — the opposite of what was typed.
+    expect(() => parseCommand(spec, ["--verbose=true"])).toThrow(
+      '--verbose does not take a value, but got "true".',
+    );
+    expect(() => parseCommand(spec, ["--verbose=false"])).toThrow("does not take a value");
+    expect(() => parseCommand(spec, ["--verbose="])).toThrow("does not take a value");
+  });
 });
 
 describe("parseCommand — defaults", () => {
