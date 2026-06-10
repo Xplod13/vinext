@@ -46,7 +46,12 @@ async function CachedForm() {
       }}
       getMessage={async () => {
         "use cache";
-        return `message:${capturedScopeValue}`;
+        // The Math.random() suffix makes cache hits on the closure-BOUND path
+        // observable: only a cache hit can repeat the suffix, so the
+        // production-server test can assert that two invocations with the
+        // same bound arg return the identical cached value (and that a
+        // different bound arg misses instead of reusing the entry).
+        return `message:${capturedScopeValue}:${Math.random()}`;
       }}
     />
   );

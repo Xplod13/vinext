@@ -134,11 +134,13 @@ test.describe('"use cache" nested cache functions as props', () => {
     // $$bound serialized into the RSC payload → encodeReply on click →
     // decode + prepend on the server. Note the bound arg travels unencrypted —
     // a documented divergence from Next.js, pinned by the production-server
-    // test's plaintext-payload assertion.
+    // test's plaintext-payload assertion. The trailing numeric suffix is the
+    // fixture's Math.random() marker, which the production-server test uses
+    // to pin cached-invoke semantics for the bound path.
     await expect(async () => {
       await page.locator("#submit-button-message").click();
       await expect(page.locator("#message")).toHaveText(
-        "message:closure-captured-bound-arg-vinext",
+        /^message:closure-captured-bound-arg-vinext:[0-9.e+-]+$/,
         { timeout: 2000 },
       );
     }).toPass({ timeout: 15_000 });

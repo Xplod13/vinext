@@ -966,8 +966,33 @@ describe("App Router Production server (startProdServer)", () => {
     // hoisted function's leading parameter is the closure-captured value, so
     // passing it as the first arg replicates what the flight client sends,
     // and the result must observe the captured value.
-    const messageText = await invokeAction(getMessageRefId, [capturedScopeValue]);
-    expect(messageText).toContain(`message:${capturedScopeValue}`);
+    const messageRegExpFor = (boundArg: string): RegExp =>
+      new RegExp(`message:${boundArg}:[0-9.e+-]+`);
+    const message1 = (await invokeAction(getMessageRefId, [capturedScopeValue])).match(
+      messageRegExpFor(capturedScopeValue),
+    )?.[0];
+    expect(message1).toBeDefined();
+
+    // Cached-invoke semantics for the closure-BOUND path, mirroring the
+    // getDate assertion above so caching is pinned across both paths
+    // (unbound getDate AND bound getMessage): the fixture appends a
+    // Math.random() suffix, so a second invocation with the same bound arg
+    // can only return the identical value if the bound arg produced the same
+    // cache key and the entry was hit (a recompute would change the suffix).
+    const message2 = (await invokeAction(getMessageRefId, [capturedScopeValue])).match(
+      messageRegExpFor(capturedScopeValue),
+    )?.[0];
+    expect(message2).toBe(message1);
+
+    // ...and the bound arg PARTICIPATES in the cache key: invoking with a
+    // different bound arg must miss (fresh value observing the new arg), not
+    // serve the entry cached above.
+    const otherBoundArg = "other-bound-arg-vinext";
+    const otherMessage = (await invokeAction(getMessageRefId, [otherBoundArg])).match(
+      messageRegExpFor(otherBoundArg),
+    )?.[0];
+    expect(otherMessage).toBeDefined();
+    expect(otherMessage).not.toBe(message1);
   });
 
   it("middleware request header overrides still apply after middleware calls headers() first", async () => {
