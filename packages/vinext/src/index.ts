@@ -919,19 +919,6 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
   // whose code does not contain "use server", so writing the entry from the
   // vinext:use-cache transform directly would be wiped out a moment later.
   const useCacheServerRefMeta = new Map<string, { referenceKey: string; exportNames: string[] }>();
-  // Resolved file URL of @vitejs/plugin-rsc/react/rsc for generated
-  // registerServerReference imports. Invariant per process — resolved once.
-  // This resolves to the same file as the bare "@vitejs/plugin-rsc/react/rsc"
-  // import inside the cache-runtime shim (Vite normalises file:// URLs to the
-  // same module id), so the RSC environment does not load two module copies.
-  let cachedRscReactRscUrl: string | undefined;
-  const getRscReactRscUrl = (): string => {
-    if (cachedRscReactRscUrl === undefined) {
-      const p = resolveOptionalDependency(earlyBaseDir, "@vitejs/plugin-rsc/react/rsc");
-      cachedRscReactRscUrl = p ? pathToFileURL(p).href : "@vitejs/plugin-rsc/react/rsc";
-    }
-    return cachedRscReactRscUrl;
-  };
   if (earlyAppDirExists && autoRsc) {
     if (!resolvedRscPath) {
       throw new Error(
@@ -4435,9 +4422,22 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                   // copy the binding value at evaluation time), render-time
                   // call sites, and the server-references manifest import on
                   // action POST — observes the wrapped function.
+                  //
+                  // registerServerReference is imported via the vinext
+                  // cache-server-reference shim rather than from
+                  // @vitejs/plugin-rsc/react/rsc directly: the shim re-exports
+                  // it through the same bare specifier the cache runtime uses,
+                  // so the RSC environment shares one react/rsc module
+                  // instance by construction instead of relying on Vite
+                  // normalising a file:// URL of the package entry to the same
+                  // module id as the bare import (see the shim's header
+                  // comment).
+                  const serverRefShimUrl = pathToFileURL(
+                    resolveShimModulePath(shimsDir, "cache-server-reference"),
+                  ).href;
                   const lines: string[] = [
                     `import { registerCachedFunction as __vinext_registerCachedFunction } from ${JSON.stringify(runtimeModuleUrl2)};`,
-                    `import { registerServerReference as __vinext_registerServerReference } from ${JSON.stringify(getRscReactRscUrl())};`,
+                    `import { registerServerReference as __vinext_registerServerReference } from ${JSON.stringify(serverRefShimUrl)};`,
                   ];
                   for (const { name, variant } of hoisted) {
                     lines.push(

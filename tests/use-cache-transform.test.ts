@@ -130,6 +130,18 @@ describe("vinext:use-cache inline transform (RSC server references)", () => {
       .slice(0, 12);
     expect(result!.code).toContain("__vinext_registerServerReference");
     expect(result!.code).toContain(JSON.stringify(expectedKey));
+
+    // registerServerReference must be imported via the vinext
+    // cache-server-reference shim (which re-exports it through the same bare
+    // "@vitejs/plugin-rsc/react/rsc" specifier the cache runtime uses), NOT
+    // via a file:// URL of the plugin-rsc package entry — the latter would
+    // couple correctness to Vite normalising the file:// URL and the bare
+    // import to a single module id.
+    const importSpecifiers = [...result!.code.matchAll(/from "([^"]+)"/g)].map((m) => m[1]);
+    expect(importSpecifiers).toContainEqual(
+      expect.stringContaining("/shims/cache-server-reference"),
+    );
+    expect(importSpecifiers).not.toContainEqual(expect.stringContaining("@vitejs/plugin-rsc"));
   });
 
   it("emits closure-captured variables as plain (unencrypted) bound args", async () => {
