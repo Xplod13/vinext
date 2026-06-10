@@ -916,19 +916,30 @@ describe("App Router Production server (startProdServer)", () => {
     // The flight payload embeds each cached function prop as a server
     // reference whose id is "<12-hex normalised key>#<hoisted export name>".
     // Serialization order follows the props order: getDate first, getRandom
-    // second.
+    // second, getMessage third.
     const refIds = [...new Set(html.match(/[0-9a-f]{12}#\$\$hoist_\d+_[A-Za-z0-9_$]+/g) ?? [])];
-    expect(refIds.length).toBe(2);
-    const [getDateRefId, getRandomRefId] = refIds;
+    expect(refIds.length).toBe(3);
+    const [getDateRefId, getRandomRefId, getMessageRefId] = refIds;
 
-    const invokeAction = async (actionId: string): Promise<string> => {
+    // Pin the documented divergence from Next.js: closure-captured variables
+    // are hoisted into `.bind(null, ...)` bound args and serialized into the
+    // RSC payload UNENCRYPTED (Next.js encrypts bound args by default). The
+    // fixture's getMessage closes over this string inside the cached
+    // component, and it must appear verbatim (plaintext) in the page payload.
+    // If bound-arg encryption is ever implemented, this assertion should be
+    // inverted and the "Known limitation" notes in packages/vinext/src/index.ts
+    // and the README removed.
+    const capturedScopeValue = "closure-captured-bound-arg-vinext";
+    expect(html).toContain(capturedScopeValue);
+
+    const invokeAction = async (actionId: string, args: unknown[] = []): Promise<string> => {
       const actionRes = await fetch(`${baseUrl}/use-cache-nested-fn-props.rsc`, {
         method: "POST",
         headers: {
           "Content-Type": "text/plain",
           "x-rsc-action": actionId,
         },
-        body: JSON.stringify([]),
+        body: JSON.stringify(args),
       });
       expect(actionRes.status).toBe(200);
       expect(actionRes.headers.get("x-nextjs-action-not-found")).toBeNull();
@@ -949,6 +960,14 @@ describe("App Router Production server (startProdServer)", () => {
 
     const randomText = await invokeAction(getRandomRefId);
     expect(randomText).toMatch(/\d+\.\d+/);
+
+    // Closure round-trip: the client invokes a bound server reference by
+    // sending the bound args ahead of the call args in the POST body. The
+    // hoisted function's leading parameter is the closure-captured value, so
+    // passing it as the first arg replicates what the flight client sends,
+    // and the result must observe the captured value.
+    const messageText = await invokeAction(getMessageRefId, [capturedScopeValue]);
+    expect(messageText).toContain(`message:${capturedScopeValue}`);
   });
 
   it("middleware request header overrides still apply after middleware calls headers() first", async () => {

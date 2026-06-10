@@ -126,6 +126,22 @@ test.describe('"use cache" nested cache functions as props', () => {
       await page.locator("#submit-button-random").click();
       await expect(page.locator("#random")).toHaveText(randomRegExp, { timeout: 2000 });
     }).toPass({ timeout: 15_000 });
+
+    // Closure-captured bound args: getMessage closes over a value from the
+    // cached component's scope, which the hoist transform turns into a
+    // `.bind(null, ...)` bound arg on the server reference. Invoking it from
+    // the client exercises the full flight round-trip for bound args:
+    // $$bound serialized into the RSC payload → encodeReply on click →
+    // decode + prepend on the server. Note the bound arg travels unencrypted —
+    // a documented divergence from Next.js, pinned by the production-server
+    // test's plaintext-payload assertion.
+    await expect(async () => {
+      await page.locator("#submit-button-message").click();
+      await expect(page.locator("#message")).toHaveText(
+        "message:closure-captured-bound-arg-vinext",
+        { timeout: 2000 },
+      );
+    }).toPass({ timeout: 15_000 });
   });
 });
 

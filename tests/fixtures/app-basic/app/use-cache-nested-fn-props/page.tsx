@@ -24,6 +24,16 @@ export default function UseCacheNestedFnPropsPage() {
 async function CachedForm() {
   "use cache";
 
+  // Closure-captured by getMessage below. The hoist transform lifts the
+  // capture into a `.bind(null, capturedScopeValue)` bound argument on the
+  // server reference, which is serialized into the RSC payload UNENCRYPTED —
+  // a deliberate, documented divergence from Next.js (which encrypts bound
+  // args by default). The production-server test asserts this value appears
+  // in plaintext in the flight payload to pin the behavior; see the "Known
+  // limitation" note on the vinext:use-cache transform in
+  // packages/vinext/src/index.ts and the README "Known limitations" section.
+  const capturedScopeValue = "closure-captured-bound-arg-vinext";
+
   return (
     <Form
       getDate={async () => {
@@ -33,6 +43,10 @@ async function CachedForm() {
       getRandom={async function getRandom() {
         "use cache";
         return Math.random();
+      }}
+      getMessage={async () => {
+        "use cache";
+        return `message:${capturedScopeValue}`;
       }}
     />
   );
