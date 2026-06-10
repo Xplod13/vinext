@@ -19,7 +19,7 @@
  *  - `port`        — an integer in the valid TCP port range (0–65535).
  *  - `positiveInt` — an integer greater than zero.
  */
-export type ArgType = "boolean" | "string" | "int" | "port" | "positiveInt";
+type ArgType = "boolean" | "string" | "int" | "port" | "positiveInt";
 
 /** Fields shared by every flag kind. */
 type BaseArgSpec = {
@@ -37,14 +37,14 @@ type BaseArgSpec = {
  * no negation (`--no-foo`) path — so only `default: false` is permitted, which
  * is also the implicit default.
  */
-export type BooleanArgSpec = BaseArgSpec & {
+type BooleanArgSpec = BaseArgSpec & {
   type: "boolean";
   default?: false;
 };
 
 /** A value-taking flag (`--port 3000`, or `--tag a --tag b` when `multiple`). */
-export type ValueArgSpec = BaseArgSpec & {
-  type: "string" | "int" | "port" | "positiveInt";
+type ValueArgSpec = BaseArgSpec & {
+  type: Exclude<ArgType, "boolean">;
   /**
    * Placeholder shown in help, rendered wrapped in angle brackets, e.g.
    * `valueHint: "port"` → `--port <port>`. Defaults to the type name when
@@ -70,7 +70,7 @@ export type ValueArgSpec = BaseArgSpec & {
 export type ArgSpec = BooleanArgSpec | ValueArgSpec;
 
 /** A named positional argument, used only for help/usage rendering. */
-export type PositionalSpec = {
+type PositionalSpec = {
   /** Display name, e.g. `"directory"`. Rendered as `[directory]` in usage. */
   name: string;
   /** Description shown under the "Arguments" help section. */
@@ -80,7 +80,7 @@ export type PositionalSpec = {
 };
 
 /** An example invocation shown under the "Examples" help section. */
-export type ExampleSpec = {
+type ExampleSpec = {
   /** The full command line, e.g. `"vinext dev -p 4000"`. */
   command: string;
   /** Optional explanation rendered alongside the command. */
@@ -112,7 +112,7 @@ export type InferValues<A extends Record<string, ArgSpec>> = {
 };
 
 /** The parsed, typed context handed to a command's `run` callback. */
-export type CommandContext<A extends Record<string, ArgSpec>> = {
+type CommandContext<A extends Record<string, ArgSpec>> = {
   /** Parsed and coerced flag values, keyed by arg name. */
   values: InferValues<A>;
   /** Positional arguments, in order, with consumed flag values removed. */

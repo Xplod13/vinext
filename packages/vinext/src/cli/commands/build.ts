@@ -175,6 +175,11 @@ export const buildCommand = defineCommand({
       type: "boolean",
       description: "Precompress static assets at build time (.br, .gz, .zst)",
     },
+    turbopack: {
+      type: "boolean",
+      hidden: true,
+      description: "Accepted for `next build` compatibility (no-op, Vite is always used)",
+    },
   },
   async run({ values }) {
     if (values.precompress) {

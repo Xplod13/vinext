@@ -4,10 +4,12 @@
  * Covers the spec-driven CLI framework under packages/vinext/src/cli/:
  *  - parseCommand: typed coercion (port/int/positiveInt/string/boolean),
  *    value validation (missing/empty/looks-like-a-flag), defaults, multiple,
- *    unknown-flag pass-through, positionals, and the auto-injected --help flag.
+ *    unknown-flag errors (and the per-command passthroughUnknown opt-in),
+ *    positionals, and the auto-injected --help flag.
  *  - renderCommandHelp: help text generated from the same spec that drives
  *    parsing (single source of truth — no drift).
- *  - The real `dev` command spec: parsing + help, end to end.
+ *  - The real `dev`, `build`, `start`, and `init` command specs: parsing +
+ *    help, end to end.
  *
  * These mirror the legacy tests/cli-args.test.ts cases so the new engine keeps
  * the same validation guarantees while sourcing help from the spec.
@@ -367,11 +369,17 @@ describe("buildCommand", () => {
     );
   });
 
+  it("accepts the hidden --turbopack next-compat flag without erroring", () => {
+    expect(() => parseCommand(buildCommand, ["--turbopack"])).not.toThrow();
+  });
+
   it("generates help from the spec", () => {
     const help = renderCommandHelp(buildCommand);
     expect(help).toContain("vinext build - Build for production");
     expect(help).toContain("--prerender-concurrency <count>");
     expect(help).toContain("--precompress");
+    // turbopack is a hidden no-op — accepted but not shown.
+    expect(help).not.toContain("--turbopack");
   });
 });
 
