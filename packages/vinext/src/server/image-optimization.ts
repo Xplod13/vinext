@@ -402,7 +402,14 @@ export function handleConfiguredImageOptimization(
   const optimizer = getImageOptimizer();
   return handleImageOptimization(
     request,
-    { fetchAsset, transformImage: optimizer?.transformImage },
+    {
+      fetchAsset,
+      // Wrap rather than detach the method so an optimizer implemented as a
+      // class instance keeps its `this` binding.
+      transformImage: optimizer
+        ? (body, options) => optimizer.transformImage(body, options)
+        : undefined,
+    },
     allowedWidths,
     imageConfig,
   );

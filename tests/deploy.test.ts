@@ -19,10 +19,12 @@ import {
   isPackageResolvable,
   viteConfigHasCloudflarePlugin,
   viteConfigHasCacheAdapter,
+  viteConfigHasImageAdapter,
   workerEntryHasCacheHandler,
   hasWranglerConfig,
   formatMissingCloudflarePluginError,
   formatMissingCacheAdapterError,
+  formatImageOptimizationHint,
 } from "../packages/vinext/src/deploy.js";
 import {
   detectPackageManager,
@@ -624,6 +626,52 @@ describe("viteConfigHasCacheAdapter", () => {
   });
 });
 
+describe("viteConfigHasImageAdapter", () => {
+  it("detects an optimizer field assigned an adapter builder", () => {
+    writeFile(
+      tmpDir,
+      "vite.config.ts",
+      `import { imageAdapter } from "@vinext/cloudflare/image/image-adapter";
+       export default { plugins: [vinext({ images: { optimizer: imageAdapter() } })] };`,
+    );
+    expect(viteConfigHasImageAdapter(tmpDir)).toBe(true);
+  });
+
+  it("detects a hand-written descriptor object on the optimizer field", () => {
+    writeFile(
+      tmpDir,
+      "vite.config.ts",
+      `export default {
+         plugins: [vinext({ images: { optimizer: { adapter: "./x.js", options: {} } } })],
+       };`,
+    );
+    expect(viteConfigHasImageAdapter(tmpDir)).toBe(true);
+  });
+
+  it("returns false when the images object is empty", () => {
+    writeFile(tmpDir, "vite.config.ts", `export default { plugins: [vinext({ images: {} })] };`);
+    expect(viteConfigHasImageAdapter(tmpDir)).toBe(false);
+  });
+
+  it("returns false when the optimizer is explicitly undefined", () => {
+    writeFile(
+      tmpDir,
+      "vite.config.ts",
+      `export default { plugins: [vinext({ images: { optimizer: undefined } })] };`,
+    );
+    expect(viteConfigHasImageAdapter(tmpDir)).toBe(false);
+  });
+
+  it("returns false when there is no images config at all", () => {
+    writeFile(tmpDir, "vite.config.ts", `export default { plugins: [vinext()] };`);
+    expect(viteConfigHasImageAdapter(tmpDir)).toBe(false);
+  });
+
+  it("returns true (does not nag) when there is no Vite config to inspect", () => {
+    expect(viteConfigHasImageAdapter(tmpDir)).toBe(true);
+  });
+});
+
 describe("workerEntryHasCacheHandler", () => {
   it("detects a setCacheHandler call in worker/index.ts", () => {
     writeFile(
@@ -686,6 +734,21 @@ describe("formatMissingCacheAdapterError", () => {
     const msg = formatMissingCacheAdapterError({});
     expect(msg).not.toContain("cdnAdapter");
     expect(msg).not.toContain("cdn-adapter");
+  });
+});
+
+describe("formatImageOptimizationHint", () => {
+  it("names the imageAdapter builder and the vinext({ images }) option", () => {
+    const msg = formatImageOptimizationHint();
+    expect(msg).toContain("served unoptimized");
+    expect(msg).toContain('from "@vinext/cloudflare/image/image-adapter"');
+    expect(msg).toContain("vinext({ images: { optimizer: imageAdapter() } })");
+  });
+
+  it("reads as a hint, not an error", () => {
+    const msg = formatImageOptimizationHint();
+    expect(msg).not.toMatch(/error/i);
+    expect(msg).toContain("The IMAGES binding is already in wrangler.jsonc.");
   });
 });
 
