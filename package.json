@@ -38,6 +38,7 @@
     "playwright": "catalog:",
     "react": "catalog:",
     "react-dom": "catalog:",
+    "sass": "1.100.0",
     "typescript": "catalog:",
     "vite": "catalog:",
     "vite-plus": "catalog:",

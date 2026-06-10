@@ -1,4 +1,11 @@
-import type { Plugin, PluginOption, UserConfig, ViteDevServer } from "vite";
+import type {
+  CSSModulesOptions,
+  Plugin,
+  PluginOption,
+  SassPreprocessorOptions,
+  UserConfig,
+  ViteDevServer,
+} from "vite";
 import { loadEnv, parseAst, transformWithOxc } from "vite";
 import {
   pagesRouter,
@@ -1672,6 +1679,24 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                 overlay: false,
               };
 
+        // Override the default postcss-modules FileSystemLoader so that
+        // .scss/.sass files referenced via `composes: from` are preprocessed
+        // through Sass before PostCSS scoping runs (spread into `css` below).
+        // The `Loader` field is a postcss-modules option not reflected in
+        // Vite's `CSSModulesOptions` type definition, hence the cast.
+        //
+        // Plugin `config` returns are merged *over* the user config, and
+        // Vite's `mergeConfigRecursively` lets an object override a `false`
+        // value — so injecting unconditionally would silently re-enable
+        // CSS Modules for a user who set `css.modules: false`, and would
+        // clobber a user-provided custom `Loader`. Skip injection in both
+        // cases.
+        const cssModulesOverride: { modules?: CSSModulesOptions } =
+          config.css?.modules === false ||
+          (typeof config.css?.modules === "object" && "Loader" in config.css.modules)
+            ? {}
+            : { modules: { Loader: SassAwareFileSystemLoader } as CSSModulesOptions };
+
         const viteConfig: UserConfig = {
           // Disable Vite's default HTML serving - we handle all routing
           appType: "custom",
@@ -1984,8 +2009,9 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
           // imports that Next.js (sass-loader) supports out of the box.
           // See: test/e2e/app-dir/scss/npm-import-tilde and #1825.
           //
-          // The `SassAwareFileSystemLoader` is always injected as
-          // `css.modules.Loader` so that SCSS files referenced by
+          // The `SassAwareFileSystemLoader` is injected as
+          // `css.modules.Loader` (via `cssModulesOverride` above) so that
+          // SCSS files referenced by
           // `composes: className from './other.module.scss'` are compiled
           // through Sass before CSS-module class scoping runs.  Without this,
           // raw SCSS variables (`$var: red;`) end up in the PostCSS output and
@@ -2002,16 +2028,23 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
               const tildeImporter = createSassTildeImporter(root);
 
               // Base options shared by both .scss and .sass preprocessors.
-              const baseOpts = {
+              const baseOpts: SassPreprocessorOptions = {
                 ...sassPreprocessorOptions,
                 // Merge user-supplied importers (from sassOptions) with the
                 // tilde importer. Tilde goes first so it gets first crack at
                 // ~ prefixed URLs; other importers follow; Vite's own internal
                 // importer is appended last by the vite:css plugin.
+                //
+                // Cast: the tilde importer implements the modern Sass
+                // `FileImporter` shape structurally and user importers are
+                // forwarded as-is. Vite's `importers` type resolves to the
+                // concrete `sass` package types only when `sass` is
+                // installed (it is `any` otherwise), so the array needs an
+                // explicit cast to typecheck in both situations.
                 importers: [
                   tildeImporter,
                   ...((sassPreprocessorOptions?.importers as unknown[]) ?? []),
-                ],
+                ] as SassPreprocessorOptions["importers"],
               };
 
               return {
@@ -2022,15 +2055,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                 sass: baseOpts,
               };
             })(),
-            // Override the default FileSystemLoader so that .scss/.sass
-            // files referenced via `composes: from` are preprocessed
-            // through Sass before PostCSS scoping runs.  The `Loader`
-            // field is a postcss-modules option not reflected in Vite's
-            // `CSSModulesOptions` type definition, hence the cast.
-            modules: {
-              Loader: SassAwareFileSystemLoader,
-              // oxlint-disable-next-line typescript/no-explicit-any
-            } as any,
+            ...cssModulesOverride,
           },
         };
 

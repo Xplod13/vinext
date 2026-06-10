@@ -26,7 +26,7 @@ import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import type { ResolvedConfig } from "vite";
+import { preprocessCSS, type PreprocessCSSResult, type ResolvedConfig } from "vite";
 
 type AdditionalData = string | ((source: string, filename: string) => string | Promise<string>);
 
@@ -220,25 +220,19 @@ function traceKeySorter(a: string, b: string): number {
   return a < b ? -1 : 1;
 }
 
-type PreprocessCSS = (code: string, filename: string, config: ResolvedConfig) => Promise<unknown>;
-
-/** Lazily resolved reference to Vite's `preprocessCSS` export. */
-let _preprocessCSS: PreprocessCSS | null | undefined; // undefined = not yet loaded
-
-async function getPreprocessCSS(): Promise<PreprocessCSS | null> {
-  if (_preprocessCSS !== undefined) return _preprocessCSS;
-  try {
-    const vite = await import("vite");
-    const viteExports = vite as Record<string, unknown>;
-    _preprocessCSS =
-      typeof viteExports["preprocessCSS"] === "function"
-        ? (viteExports["preprocessCSS"] as PreprocessCSS)
-        : null;
-  } catch {
-    _preprocessCSS = null;
-  }
-  return _preprocessCSS;
-}
+/**
+ * Mirrors Vite's internal `cssModuleRE` (`/\.module\.(css|less|sass|scss|…)/`).
+ *
+ * postcss-modules treats *every* `composes: x from './file'` dependency as a
+ * CSS module regardless of its filename, but Vite's pipeline only applies
+ * CSS-module scoping to `*.module.*` files. When a dependency is not named
+ * `*.module.*` (e.g. `composes: x from './plain.css'`), we hand
+ * `preprocessCSS` a virtual `*.module.*` filename (same directory, so Sass
+ * imports and relative resolution are unaffected) so the dependency's classes
+ * are scoped and its export tokens extracted — matching what postcss-modules'
+ * built-in `FileSystemLoader` did.
+ */
+const CSS_MODULE_RE = /\.module\.\w+$/;
 
 /**
  * Sass-aware replacement for postcss-modules' `FileSystemLoader`.
@@ -253,10 +247,10 @@ async function getPreprocessCSS(): Promise<PreprocessCSS | null> {
  * - `.module.css` and `.module.scss` files have their class names scoped and
  *   export tokens extracted in exactly the same way as the top-level file.
  *
- * When `preprocessCSS` is unavailable or the resolved config has not been set
- * yet, the Loader silently falls back to returning an empty token map so the
- * build continues without crashing (class composition may be incomplete but
- * the build succeeds).
+ * When preprocessing fails (or the resolved config has not been provided),
+ * the Loader logs a warning and falls back to returning an empty token map so
+ * the build continues without crashing (class composition will be incomplete
+ * but the build succeeds).
  */
 export class SassAwareFileSystemLoader {
   readonly root: string;
@@ -329,49 +323,57 @@ export class SassAwareFileSystemLoader {
     if (cached) return cached;
 
     const config = _resolvedConfig;
-    const preprocessCSS = await getPreprocessCSS();
+    // Reading the file up front (rather than inside the try below) preserves
+    // the original FileSystemLoader contract: a missing/unreadable dependency
+    // rejects and fails the build.
+    const rawSource = await fs.promises.readFile(fileRelativePath, "utf-8");
 
-    if (preprocessCSS && config) {
+    if (config) {
       try {
-        const rawSource = await fs.promises.readFile(fileRelativePath, "utf-8");
-        // `preprocessCSS` handles Sass compilation (for .scss/.sass) AND
-        // postcss-modules scoping (for .module.* files) in one shot, using
-        // the same resolved config as the main Vite build so hashes and
-        // scoped-name generation are consistent.
-        const resultRaw = await preprocessCSS(rawSource, fileRelativePath, config);
-        const result = resultRaw as Record<string, unknown>;
-        const injectableSource: string = typeof result["code"] === "string" ? result["code"] : "";
-        const rawModules = result["modules"];
-        const exportTokens: Record<string, string> =
-          rawModules != null && typeof rawModules === "object"
-            ? (rawModules as Record<string, string>)
-            : {};
+        // postcss-modules scopes every `composes` dependency, but Vite's
+        // pipeline only scopes `*.module.*` filenames — virtually rename
+        // other deps (e.g. `composes: x from './plain.css'`) so they are
+        // scoped too. See `CSS_MODULE_RE` above.
+        const ext = path.extname(fileRelativePath);
+        const preprocessFilename =
+          CSS_MODULE_RE.test(fileRelativePath) || ext === ""
+            ? fileRelativePath
+            : `${fileRelativePath.slice(0, -ext.length)}.module${ext}`;
 
-        this.sources[fileRelativePath] = injectableSource;
+        // `preprocessCSS` handles Sass compilation (for .scss/.sass) AND
+        // postcss-modules scoping in one shot, using the same resolved
+        // config as the main Vite build so hashes and scoped-name
+        // generation are consistent.
+        const result: PreprocessCSSResult = await preprocessCSS(
+          rawSource,
+          preprocessFilename,
+          config,
+        );
+        const exportTokens: Record<string, string> = result.modules ?? {};
+
+        this.sources[fileRelativePath] = result.code;
         this.traces[trace] = fileRelativePath;
         this.tokensByFile[fileRelativePath] = exportTokens;
         return exportTokens;
-      } catch {
-        // Preprocessing failed (e.g. Sass not installed, file unreadable).
-        // Return an empty token map so the build continues.
+      } catch (error) {
+        // Preprocessing failed (e.g. Sass not installed, syntax error in the
+        // dependency). Warn so the failure is observable — the composed
+        // classes will otherwise be silently missing from the output.
+        config.logger.warn(
+          `[vinext] Failed to preprocess \`composes\` dependency ${fileRelativePath}: ` +
+            `${error instanceof Error ? error.message : String(error)}. ` +
+            `Classes composed from this file will be missing from the build output.`,
+        );
       }
     }
 
-    // Fallback when preprocessCSS is unavailable or config not yet resolved.
-    // Read the raw file and return empty tokens; class composition will be
-    // incomplete but the build will not crash.
-    return new Promise<Record<string, string>>((resolve, reject) => {
-      fs.readFile(fileRelativePath, "utf-8", (err) => {
-        if (err) {
-          reject(err);
-          return;
-        }
-        this.sources[fileRelativePath] = "";
-        this.traces[trace] = fileRelativePath;
-        this.tokensByFile[fileRelativePath] = {};
-        resolve({});
-      });
-    });
+    // Fallback when preprocessing failed or the resolved config has not been
+    // provided. Record empty source/tokens; class composition will be
+    // incomplete (warned above) but the build will not crash.
+    this.sources[fileRelativePath] = "";
+    this.traces[trace] = fileRelativePath;
+    this.tokensByFile[fileRelativePath] = {};
+    return {};
   }
 
   get finalSource(): string {
