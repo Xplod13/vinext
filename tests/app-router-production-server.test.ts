@@ -897,6 +897,60 @@ describe("App Router Production server (startProdServer)", () => {
     expect(body3.timestamp).not.toBe(body1.timestamp);
   });
 
+  // Ported from Next.js: test/e2e/app-dir/use-cache-with-server-function-props
+  // ("should be able to use nested cache functions as props").
+  // https://github.com/vercel/next.js/blob/canary/test/e2e/app-dir/use-cache-with-server-function-props/use-cache-with-server-function-props.test.ts
+  //
+  // Inline "use cache" functions defined inside a cached component and passed
+  // as props to a client component must (a) serialize as server references in
+  // the RSC payload and (b) resolve back through the production
+  // server-references manifest on the action POST. (b) can only fail in
+  // production builds — the manifest is keyed by the plugin-rsc normalised
+  // reference key and generated from serverReferenceMetaMap — so this test
+  // must run against the built output, not the dev server.
+  it("resolves nested 'use cache' functions passed as props when invoked as actions", async () => {
+    const res = await fetch(`${baseUrl}/use-cache-nested-fn-props`);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+
+    // The flight payload embeds each cached function prop as a server
+    // reference whose id is "<12-hex normalised key>#<hoisted export name>".
+    // Serialization order follows the props order: getDate first, getRandom
+    // second.
+    const refIds = [...new Set(html.match(/[0-9a-f]{12}#\$\$hoist_\d+_[A-Za-z0-9_$]+/g) ?? [])];
+    expect(refIds.length).toBe(2);
+    const [getDateRefId, getRandomRefId] = refIds;
+
+    const invokeAction = async (actionId: string): Promise<string> => {
+      const actionRes = await fetch(`${baseUrl}/use-cache-nested-fn-props.rsc`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "text/plain",
+          "x-rsc-action": actionId,
+        },
+        body: JSON.stringify([]),
+      });
+      expect(actionRes.status).toBe(200);
+      expect(actionRes.headers.get("x-nextjs-action-not-found")).toBeNull();
+      const text = await actionRes.text();
+      expect(text).not.toContain("Server action not found");
+      return text;
+    };
+
+    const isoDateRegExp = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/;
+    const date1 = (await invokeAction(getDateRefId)).match(isoDateRegExp)?.[0];
+    expect(date1).toBeDefined();
+
+    // The resolved server reference is the cached wrapper (Next.js parity:
+    // the exported cached binding IS the server reference), so a second
+    // invocation with identical arguments returns the cached value.
+    const date2 = (await invokeAction(getDateRefId)).match(isoDateRegExp)?.[0];
+    expect(date2).toBe(date1);
+
+    const randomText = await invokeAction(getRandomRefId);
+    expect(randomText).toMatch(/\d+\.\d+/);
+  });
+
   it("middleware request header overrides still apply after middleware calls headers() first", async () => {
     // Regression for a bug where a middleware that reads `next/headers` →
     // `headers()` *before* returning `NextResponse.next({ request: { headers } })`

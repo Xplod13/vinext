@@ -99,6 +99,36 @@ test.describe('"use cache" function-level directive', () => {
   });
 });
 
+test.describe('"use cache" nested cache functions as props', () => {
+  // Ported from Next.js: test/e2e/app-dir/use-cache-with-server-function-props
+  // https://github.com/vercel/next.js/blob/canary/test/e2e/app-dir/use-cache-with-server-function-props/use-cache-with-server-function-props.test.ts
+  //
+  // Inline "use cache" functions defined inside a cached component are passed
+  // as props to a client component and invoked via useActionState. This is a
+  // full client→server round-trip: the cached functions must serialize as
+  // server references in the RSC payload AND resolve back on the action POST.
+  const isoDateRegExp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+  const randomRegExp = /^\d+\.\d+$/;
+
+  test("should be able to use nested cache functions as props", async ({ page }) => {
+    await page.goto(`${BASE}/use-cache-nested-fn-props`);
+
+    // Click + assert inside a polling loop: a click that lands before
+    // hydration completes falls back to a native form POST (full document
+    // reload) and loses the useActionState output, so retry until the
+    // hydrated client-side round-trip succeeds.
+    await expect(async () => {
+      await page.locator("#submit-button-date").click();
+      await expect(page.locator("#date")).toHaveText(isoDateRegExp, { timeout: 2000 });
+    }).toPass({ timeout: 15_000 });
+
+    await expect(async () => {
+      await page.locator("#submit-button-random").click();
+      await expect(page.locator("#random")).toHaveText(randomRegExp, { timeout: 2000 });
+    }).toPass({ timeout: 15_000 });
+  });
+});
+
 test.describe('"use cache: private"', () => {
   test("allows reading cookies inside private caches", async ({ request }) => {
     // Ported from Next.js: test/e2e/app-dir/use-cache-private/use-cache-private.test.ts
