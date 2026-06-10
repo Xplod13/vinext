@@ -4358,6 +4358,20 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                   .toString("hex")
                   .slice(0, 12);
               } else {
+                // Dev key. plugin-rsc's getNormalizedId() additionally runs
+                // cleanUrl() on node_modules ids and uses an /@fs/-prefixed
+                // URL for ids outside the project root. Those shapes are not
+                // replicated here on purpose: this transform's filter excludes
+                // node_modules entirely, and the extension-anchored id regex
+                // (/\.(tsx?|jsx?|mjs)$/) rejects ids carrying a ?query, so
+                // neither can reach this point. For under-root source files
+                // the plugin's normalisation reduces to exactly this
+                // root-prefix slice. Ids outside the root (e.g. linked
+                // packages) keep the raw absolute path — unlike the plugin's
+                // /@fs/ URL, but still self-consistent: the same key is
+                // registered in serverReferenceMetaMap (which dev validation
+                // checks) and passed to the dev loader's import(id), which
+                // accepts absolute paths.
                 normalizedRefKey =
                   id.startsWith(projectRoot + "/") || id.startsWith(projectRoot + "\\")
                     ? id.slice(projectRoot.length)
