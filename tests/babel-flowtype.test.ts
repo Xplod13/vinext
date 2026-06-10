@@ -37,7 +37,45 @@ import os from "node:os";
 import path from "node:path";
 import { beforeAll, describe, expect, it } from "vite-plus/test";
 import { hasFlowPragma } from "../packages/vinext/src/utils/flow-pragma.js";
-import { transformWithFlowBabel } from "../packages/vinext/src/utils/flow-babel.js";
+import {
+  transformJsxInJs,
+  transformWithFlowBabel,
+} from "../packages/vinext/src/utils/flow-babel.js";
+
+const FIXTURE_ROOT = path.resolve(import.meta.dirname, "./fixtures/babel-flowtype");
+const FIXTURE_FILE = path.join(FIXTURE_ROOT, "pages", "mycomponent.js");
+const fixtureCode = fs.readFileSync(FIXTURE_FILE, "utf8");
+
+/**
+ * Run `fn` with Node's NODE_PATH-derived global module folders neutralized.
+ *
+ * `vp test` launches its workers with NODE_PATH pointing at pnpm's hoisted
+ * `node_modules/.pnpm/node_modules` store. On a fully-installed checkout
+ * that store contains @babel/core, which makes `createRequire(...)` resolve
+ * it from ANY directory — including the "empty project" temp dirs the
+ * babel-missing tests rely on. Clearing NODE_PATH (via the same
+ * `Module._initPaths()` hook Node's REPL uses) makes those tests
+ * deterministic regardless of the installer's hoisting behavior. The
+ * standard per-directory `node_modules` walk-up is unaffected.
+ *
+ * The env mutation is process-global, restored in `finally`. That is safe
+ * here: tests within this file run sequentially (none use `it.concurrent`),
+ * and vitest runs other test files in separate worker processes.
+ */
+async function withoutNodePathFallback<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = process.env.NODE_PATH;
+  process.env.NODE_PATH = "";
+  // oxlint-disable-next-line typescript/no-explicit-any, typescript/no-unsafe-call
+  (Module as any)._initPaths();
+  try {
+    return await fn();
+  } finally {
+    if (prev === undefined) delete process.env.NODE_PATH;
+    else process.env.NODE_PATH = prev;
+    // oxlint-disable-next-line typescript/no-explicit-any, typescript/no-unsafe-call
+    (Module as any)._initPaths();
+  }
+}
 
 describe("hasFlowPragma — leading pragma detection (#1506)", () => {
   // ── True-positive cases ────────────────────────────────────────────────────
@@ -171,10 +209,6 @@ export default pragma;
 });
 
 describe("transformWithFlowBabel — Babel + OXC two-stage transform (#1506)", () => {
-  const FIXTURE_ROOT = path.resolve(import.meta.dirname, "./fixtures/babel-flowtype");
-  const FIXTURE_FILE = path.join(FIXTURE_ROOT, "pages", "mycomponent.js");
-  const fixtureCode = fs.readFileSync(FIXTURE_FILE, "utf8");
-
   beforeAll(() => {
     // `transformWithFlowBabel` returns null when @babel/core cannot be
     // resolved from the fixture root — which would make the tests below fail
@@ -228,33 +262,6 @@ describe("transformWithFlowBabel — Babel + OXC two-stage transform (#1506)", (
     expect(map.sourcesContent?.some((c) => c?.includes("type Props"))).toBe(true);
   });
 
-  /**
-   * Run `fn` with Node's NODE_PATH-derived global module folders neutralized.
-   *
-   * `vp test` launches its workers with NODE_PATH pointing at pnpm's hoisted
-   * `node_modules/.pnpm/node_modules` store. On a fully-installed checkout
-   * that store contains @babel/core, which makes `createRequire(...)` resolve
-   * it from ANY directory — including the "empty project" temp dirs the
-   * babel-missing tests below rely on. Clearing NODE_PATH (via the same
-   * `Module._initPaths()` hook Node's REPL uses) makes those tests
-   * deterministic regardless of the installer's hoisting behavior. The
-   * standard per-directory `node_modules` walk-up is unaffected.
-   */
-  async function withoutNodePathFallback<T>(fn: () => Promise<T>): Promise<T> {
-    const prev = process.env.NODE_PATH;
-    process.env.NODE_PATH = "";
-    // oxlint-disable-next-line typescript/no-explicit-any, typescript/no-unsafe-call
-    (Module as any)._initPaths();
-    try {
-      return await fn();
-    } finally {
-      if (prev === undefined) delete process.env.NODE_PATH;
-      else process.env.NODE_PATH = prev;
-      // oxlint-disable-next-line typescript/no-explicit-any, typescript/no-unsafe-call
-      (Module as any)._initPaths();
-    }
-  }
-
   it("returns null when @babel/core is not resolvable from the project root", async () => {
     const emptyRoot = fs.mkdtempSync(path.join(os.tmpdir(), "vinext-flow-babel-"));
     try {
@@ -298,5 +305,57 @@ describe("transformWithFlowBabel — Babel + OXC two-stage transform (#1506)", (
     } finally {
       fs.rmSync(tmpRoot, { recursive: true, force: true });
     }
+  });
+});
+
+describe("transformJsxInJs — vinext:jsx-in-js transform pipeline (#1506)", () => {
+  it("rethrows OXC's Flow parse failure as an actionable install message when @babel/core is missing", async () => {
+    const emptyRoot = fs.mkdtempSync(path.join(os.tmpdir(), "vinext-jsx-in-js-"));
+    try {
+      await withoutNodePathFallback(async () => {
+        const file = path.join(emptyRoot, "page.js");
+        // The fixture has genuine Flow syntax, so with @babel/core missing
+        // the OXC fallback must fail — and the plugin pipeline must surface
+        // the actionable install message, not OXC's raw parse error.
+        const error = await transformJsxInJs(fixtureCode, file, emptyRoot).then(
+          () => null,
+          (e: unknown) => e as Error,
+        );
+        expect(error).toBeTruthy();
+        expect(error!.message).toMatch(/leading @flow pragma/);
+        expect(error!.message).toMatch(/install @babel\/core and @babel\/preset-flow/);
+        // The original OXC parse error is preserved as `cause`.
+        expect(error!.cause).toBeTruthy();
+      });
+    } finally {
+      fs.rmSync(emptyRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("still compiles plain JS with a pragma-only comment when @babel/core is missing", async () => {
+    const emptyRoot = fs.mkdtempSync(path.join(os.tmpdir(), "vinext-jsx-in-js-"));
+    try {
+      await withoutNodePathFallback(async () => {
+        const file = path.join(emptyRoot, "page.js");
+        // No Flow syntax — only the pragma comment. The OXC fall-through
+        // must compile it (JSX included) rather than erroring.
+        const result = await transformJsxInJs(
+          "// @flow\nexport default function Page() { return <div>ok</div>; }\n",
+          file,
+          emptyRoot,
+        );
+        expect(result.code).toContain("react/jsx-runtime");
+        expect(result.code).not.toContain("<div");
+      });
+    } finally {
+      fs.rmSync(emptyRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("routes Flow files through Babel when @babel/core is installed", async () => {
+    const result = await transformJsxInJs(fixtureCode, FIXTURE_FILE, FIXTURE_ROOT);
+    expect(result.code).not.toContain("type Props");
+    expect(result.code).toContain("react/jsx-runtime");
+    expect(result.code).toContain("Test Babel");
   });
 });

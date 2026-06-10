@@ -1,5 +1,5 @@
 import type { Plugin, PluginOption, UserConfig, ViteDevServer } from "vite";
-import { loadEnv, parseAst, transformWithOxc } from "vite";
+import { loadEnv, parseAst } from "vite";
 import {
   pagesRouter,
   apiRouter,
@@ -178,8 +178,7 @@ import fs from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
 import commonjs from "vite-plugin-commonjs";
 import { normalizePathSeparators } from "./utils/path.js";
-import { hasFlowPragma } from "./utils/flow-pragma.js";
-import { transformWithFlowBabel } from "./utils/flow-babel.js";
+import { transformJsxInJs } from "./utils/flow-babel.js";
 
 // Install the process-level peer-disconnect backstop at module load.
 // Vite plugin lifecycle hooks (config / configureServer) proved
@@ -1092,49 +1091,13 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                 }
               }
 
-              // OXC does not support Flow type syntax. When a file carries a
-              // leading `// @flow` or `/* @flow */` pragma, route it through
-              // @babel/core (resolved from the project root) so the project's
-              // .babelrc — which must include @babel/preset-flow — strips Flow
-              // annotations. A subsequent OXC pass then compiles the JSX.
-              // `hasFlowPragma` only matches the leading comment block, so
-              // mid-file occurrences of `@flow` (template literals, comments)
-              // never trigger the Babel fallback.
-              const isFlowFile = hasFlowPragma(code);
-              if (isFlowFile) {
-                const flowResult = await transformWithFlowBabel(code, cleanId, root);
-                if (flowResult) return flowResult;
-                // @babel/core is not installed in the project: fall through to
-                // the regular OXC pass below. Plain JS that merely mentions
-                // `@flow` in a leading comment still compiles; genuine Flow
-                // syntax fails OXC's parse and is rethrown with an actionable
-                // message instead of a confusing downstream parser error.
-              }
-
-              try {
-                // Pass `cleanId` (query params stripped) so the filename OXC
-                // uses for sourcemaps and parse errors matches the one given
-                // to `transformWithFlowBabel` above.
-                const result = await transformWithOxc(code, cleanId, {
-                  lang: "jsx",
-                  jsx: { runtime: "automatic" as const },
-                  sourcemap: true,
-                });
-                return {
-                  code: result.code,
-                  map: result.map,
-                };
-              } catch (error) {
-                if (isFlowFile) {
-                  throw new Error(
-                    `[vinext] Failed to compile ${cleanId}, which has a leading @flow pragma. ` +
-                      "Flow type syntax requires Babel: install @babel/core and @babel/preset-flow, " +
-                      'and add "@babel/preset-flow" to the project\'s .babelrc or babel.config.*',
-                    { cause: error },
-                  );
-                }
-                throw error;
-              }
+              // Compile JSX with OXC — routing files that carry a leading
+              // `// @flow` or `/* @flow */` pragma through the project's
+              // @babel/core first, since OXC cannot parse Flow type syntax.
+              // See transformJsxInJs in utils/flow-babel.ts for the full
+              // pipeline, including the actionable "install @babel/core"
+              // error when Babel is missing but the file has Flow syntax.
+              return transformJsxInJs(code, cleanId, root);
             },
           } satisfies Plugin,
         ]
