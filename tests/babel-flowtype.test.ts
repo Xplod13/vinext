@@ -32,9 +32,10 @@
  */
 
 import fs from "node:fs";
+import Module, { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vite-plus/test";
+import { beforeAll, describe, expect, it } from "vite-plus/test";
 import { hasFlowPragma } from "../packages/vinext/src/utils/flow-pragma.js";
 import { transformWithFlowBabel } from "../packages/vinext/src/utils/flow-babel.js";
 
@@ -174,6 +175,25 @@ describe("transformWithFlowBabel — Babel + OXC two-stage transform (#1506)", (
   const FIXTURE_FILE = path.join(FIXTURE_ROOT, "pages", "mycomponent.js");
   const fixtureCode = fs.readFileSync(FIXTURE_FILE, "utf8");
 
+  beforeAll(() => {
+    // `transformWithFlowBabel` returns null when @babel/core cannot be
+    // resolved from the fixture root — which would make the tests below fail
+    // with opaque "expected null not to be null" assertions on a checkout
+    // where the fixture workspace's node_modules was never materialized
+    // (e.g. installs run with --no-install or a partial install). Fail loud
+    // and actionable instead.
+    try {
+      createRequire(path.join(FIXTURE_ROOT, "package.json")).resolve("@babel/core");
+    } catch (cause) {
+      throw new Error(
+        `@babel/core is not resolvable from the babel-flowtype fixture (${FIXTURE_ROOT}). ` +
+          "Its node_modules has not been materialized — run `vp install` at the repo root " +
+          "to install the fixture workspace's dependencies, then re-run this test.",
+        { cause },
+      );
+    }
+  });
+
   it("strips Flow type annotations using the fixture project's .babelrc", async () => {
     // Sanity: the fixture really is a Flow file with a leading pragma.
     expect(hasFlowPragma(fixtureCode)).toBe(true);
@@ -208,15 +228,75 @@ describe("transformWithFlowBabel — Babel + OXC two-stage transform (#1506)", (
     expect(map.sourcesContent?.some((c) => c?.includes("type Props"))).toBe(true);
   });
 
+  /**
+   * Run `fn` with Node's NODE_PATH-derived global module folders neutralized.
+   *
+   * `vp test` launches its workers with NODE_PATH pointing at pnpm's hoisted
+   * `node_modules/.pnpm/node_modules` store. On a fully-installed checkout
+   * that store contains @babel/core, which makes `createRequire(...)` resolve
+   * it from ANY directory — including the "empty project" temp dirs the
+   * babel-missing tests below rely on. Clearing NODE_PATH (via the same
+   * `Module._initPaths()` hook Node's REPL uses) makes those tests
+   * deterministic regardless of the installer's hoisting behavior. The
+   * standard per-directory `node_modules` walk-up is unaffected.
+   */
+  async function withoutNodePathFallback<T>(fn: () => Promise<T>): Promise<T> {
+    const prev = process.env.NODE_PATH;
+    process.env.NODE_PATH = "";
+    // oxlint-disable-next-line typescript/no-explicit-any, typescript/no-unsafe-call
+    (Module as any)._initPaths();
+    try {
+      return await fn();
+    } finally {
+      if (prev === undefined) delete process.env.NODE_PATH;
+      else process.env.NODE_PATH = prev;
+      // oxlint-disable-next-line typescript/no-explicit-any, typescript/no-unsafe-call
+      (Module as any)._initPaths();
+    }
+  }
+
   it("returns null when @babel/core is not resolvable from the project root", async () => {
     const emptyRoot = fs.mkdtempSync(path.join(os.tmpdir(), "vinext-flow-babel-"));
     try {
-      const file = path.join(emptyRoot, "page.js");
-      expect(await transformWithFlowBabel(fixtureCode, file, emptyRoot)).toBeNull();
-      // Second call exercises the memoized "not found" path.
-      expect(await transformWithFlowBabel(fixtureCode, file, emptyRoot)).toBeNull();
+      await withoutNodePathFallback(async () => {
+        const file = path.join(emptyRoot, "page.js");
+        expect(await transformWithFlowBabel(fixtureCode, file, emptyRoot)).toBeNull();
+        // Misses are deliberately not cached (so installing @babel/core
+        // mid-session takes effect without a restart) — the second call
+        // re-attempts resolution and must still return null.
+        expect(await transformWithFlowBabel(fixtureCode, file, emptyRoot)).toBeNull();
+      });
     } finally {
       fs.rmSync(emptyRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("picks up @babel/core installed after a prior miss (no restart needed)", async () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "vinext-flow-babel-late-"));
+    try {
+      await withoutNodePathFallback(async () => {
+        const file = path.join(tmpRoot, "page.js");
+        // Plain JS with only a pragma comment, so Babel needs no preset-flow.
+        const plainJs = "// @flow\nexport const x = 1;\n";
+
+        // First call: @babel/core is missing → null (the miss must not stick).
+        expect(await transformWithFlowBabel(plainJs, file, tmpRoot)).toBeNull();
+
+        // "Install" @babel/core mid-session by linking the fixture's copy.
+        fs.mkdirSync(path.join(tmpRoot, "node_modules", "@babel"), { recursive: true });
+        fs.symlinkSync(
+          fs.realpathSync(path.join(FIXTURE_ROOT, "node_modules", "@babel", "core")),
+          path.join(tmpRoot, "node_modules", "@babel", "core"),
+        );
+
+        // Second call re-attempts resolution and now succeeds — proving a
+        // mid-session install takes effect without a dev-server restart.
+        const result = await transformWithFlowBabel(plainJs, file, tmpRoot);
+        expect(result).not.toBeNull();
+        expect(result!.code).toContain("x = 1");
+      });
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
     }
   });
 });

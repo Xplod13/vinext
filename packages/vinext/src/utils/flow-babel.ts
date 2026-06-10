@@ -3,8 +3,16 @@ import { createRequire } from "node:module";
 import { transformWithOxc } from "vite";
 
 /**
- * Memoized @babel/core resolve cache: projectRoot → resolved module or null.
+ * Memoized @babel/core resolve cache: projectRoot → resolved module.
  * Avoids repeated `createRequire` + `require.resolve` on every transformed file.
+ *
+ * Only successful resolutions are cached. Misses are deliberately NOT cached:
+ * caching the not-found result would pin "no Babel" for the process lifetime,
+ * forcing a dev-server restart after installing @babel/core mid-session. The
+ * re-attempt cost is a failed `require.resolve` and only applies to files that
+ * carry a leading `@flow` pragma — and in a project without @babel/core those
+ * either fail the build anyway (genuine Flow syntax) or are rare pragma-only
+ * plain-JS files, so the hot path (Babel installed) always hits the cache.
  */
 const _babelCoreCache = new Map<string, unknown>();
 
@@ -44,21 +52,20 @@ export async function transformWithFlowBabel(
   // oxlint-disable-next-line typescript/no-explicit-any
 ): Promise<{ code: string; map?: any } | null> {
   // Resolve @babel/core from the project root so the user's version is used.
-  // Memoize per projectRoot to avoid repeated `createRequire` calls.
+  // Memoize successful resolutions per projectRoot to avoid repeated
+  // `createRequire` calls on every transformed file.
   // oxlint-disable-next-line typescript/no-explicit-any
-  let babelCore: any;
-  if (_babelCoreCache.has(projectRoot)) {
-    babelCore = _babelCoreCache.get(projectRoot);
-    if (babelCore === null) return null;
-  } else {
+  let babelCore: any = _babelCoreCache.get(projectRoot);
+  if (babelCore === undefined) {
     try {
       const req = createRequire(path.join(projectRoot, "package.json"));
       babelCore = req("@babel/core");
       _babelCoreCache.set(projectRoot, babelCore);
     } catch {
-      // @babel/core not installed in this project. Cache the miss so we don't
-      // re-attempt on every file; the caller falls back to the OXC pass.
-      _babelCoreCache.set(projectRoot, null);
+      // @babel/core not installed in this project: the caller falls back to
+      // the OXC pass. The miss is intentionally not cached (see the cache doc
+      // above) so installing @babel/core mid-session takes effect without a
+      // dev-server restart.
       return null;
     }
   }

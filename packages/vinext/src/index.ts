@@ -1112,7 +1112,10 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
               }
 
               try {
-                const result = await transformWithOxc(code, id, {
+                // Pass `cleanId` (query params stripped) so the filename OXC
+                // uses for sourcemaps and parse errors matches the one given
+                // to `transformWithFlowBabel` above.
+                const result = await transformWithOxc(code, cleanId, {
                   lang: "jsx",
                   jsx: { runtime: "automatic" as const },
                   sourcemap: true,
