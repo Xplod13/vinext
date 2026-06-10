@@ -4340,17 +4340,34 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
             if (isRscEnv) {
               // oxlint-disable-next-line typescript/no-explicit-any
               const manager: any = rscPluginApi?.manager ?? null;
+              // Fail loudly when the plugin-rsc manager is unavailable.
+              // Without it, "vinext:use-cache-server-references" cannot write
+              // the serverReferenceMetaMap entry, so wrapping the hoisted
+              // exports anyway would emit a serializable-but-unresolvable
+              // server reference: the RSC payload serialises fine, but the
+              // action POST 404s because the key is absent from the built
+              // server-references manifest (and fails dev-mode reference
+              // validation). The manager is a structural invariant whenever
+              // the "rsc" environment exists ("rsc:minimal" is always part of
+              // the plugin-rsc set and exposes it via .api), so this throw is
+              // believed unreachable — but a loud transform error beats a
+              // silent production 404 if that invariant ever breaks.
+              if (!manager) {
+                throw new Error(
+                  `vinext: cannot register inline "use cache" function(s) in ${id} as server ` +
+                    `references: the @vitejs/plugin-rsc manager is unavailable (no "rsc:minimal" ` +
+                    `plugin with a manager api was found in the resolved Vite config). Refusing ` +
+                    `to emit a server reference that would serialize but never resolve (it would ` +
+                    `404 on action POST).`,
+                );
+              }
               const projectRoot: string =
-                manager?.config?.root ?? this.environment?.config?.root ?? root;
+                manager.config?.root ?? this.environment?.config?.root ?? root;
               if (this.environment?.mode === "build") {
-                // Prefer the plugin's own toRelativeId so the hash input is
+                // Use the plugin's own toRelativeId so the hash input is
                 // byte-for-byte identical to what plugin-rsc would produce
-                // (path.relative against manager.config.root). The fallback
-                // replicates it for the manager-less case (where the manifest
-                // can't be populated anyway, but the key stays sane).
-                const relativeId: string = manager
-                  ? manager.toRelativeId(id)
-                  : normalizePathSeparators(path.relative(projectRoot, id));
+                // (path.relative against manager.config.root).
+                const relativeId: string = manager.toRelativeId(id);
                 // hashString from plugin-rsc: sha256 → hex → first 12 chars.
                 normalizedRefKey = createHash("sha256")
                   .update(relativeId)
