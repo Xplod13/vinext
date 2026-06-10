@@ -1105,6 +1105,15 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
     typeof rscModule.__basePath === "string" ? rscModule.__basePath : "";
   const appRouterInlineCss = rscModule.__inlineCss === true;
   const appRouterHasPagesDir = rscModule.__hasPagesDir === true;
+  // Allowed image-optimization widths from next.config `images` (deviceSizes +
+  // imageSizes), inlined into the RSC entry as `__imageAllowedWidths` — keeping
+  // `vinext start` in line with the Cloudflare worker entry and the Pages prod
+  // path. Fall back to the Next.js defaults for older builds whose entry
+  // doesn't re-export this constant.
+  const appImageAllowedWidths: number[] =
+    Array.isArray(rscModule.__imageAllowedWidths) && rscModule.__imageAllowedWidths.length > 0
+      ? rscModule.__imageAllowedWidths
+      : [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
   globalThis.__VINEXT_INLINE_CSS__ = appRouterInlineCss
     ? collectInlineCssManifest(clientDir, appRouterAssetPrefix)
     : undefined;
@@ -1221,8 +1230,7 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
     // serves the original file with cache headers and security headers)
     if (isImageOptimizationPath(pathname)) {
       const parsedUrl = new URL(rawUrl, "http://localhost");
-      const defaultAllowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
-      const params = parseImageParams(parsedUrl, defaultAllowedWidths);
+      const params = parseImageParams(parsedUrl, appImageAllowedWidths);
       if (!params) {
         res.writeHead(400);
         res.end("Bad Request");

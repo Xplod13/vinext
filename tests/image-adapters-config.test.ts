@@ -119,6 +119,32 @@ describe("image optimizer registry", () => {
     expect(response.headers.get("Cache-Control")).toContain("immutable");
   });
 
+  it("preserves `this` for an optimizer implemented as a class instance", async () => {
+    class ClassOptimizer implements ImageOptimizer {
+      private readonly label = "from-class";
+      async transformImage(_body: ReadableStream, { format }: { format: string }) {
+        // Reads an instance field: throws if transformImage is ever invoked
+        // detached from the instance (the regression fixed in
+        // handleConfiguredImageOptimization).
+        return new Response(this.label, {
+          status: 200,
+          headers: { "Content-Type": format },
+        });
+      }
+    }
+    setImageOptimizer(new ClassOptimizer());
+
+    const fetchAsset = async () =>
+      new Response("source-bytes", { status: 200, headers: { "Content-Type": "image/png" } });
+    const request = new Request("https://example.com/_next/image?url=%2Ffoo.png&w=640&q=75", {
+      headers: { Accept: "image/webp" },
+    });
+    const response = await handleConfiguredImageOptimization(request, fetchAsset, [640]);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("from-class");
+  });
+
   it("serves the original (passthrough) when no optimizer is registered", async () => {
     setImageOptimizer(null);
     const fetchAsset = async () =>
