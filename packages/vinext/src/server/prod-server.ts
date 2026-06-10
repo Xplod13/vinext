@@ -1069,18 +1069,6 @@ function installPagesClientAssetGlobals(options: {
 async function startAppRouterServer(options: AppRouterServerOptions) {
   const { port, host, clientDir, rscEntryPath, compress, purpose } = options;
 
-  // Load image config written at build time by vinext:image-config plugin.
-  // This provides SVG/security header settings for the image optimization endpoint.
-  let imageConfig: ImageConfig | undefined;
-  const imageConfigPath = path.join(path.dirname(rscEntryPath), "image-config.json");
-  if (fs.existsSync(imageConfigPath)) {
-    try {
-      imageConfig = JSON.parse(fs.readFileSync(imageConfigPath, "utf-8"));
-    } catch {
-      /* ignore parse errors */
-    }
-  }
-
   // Load prerender secret written at build time by vinext:server-manifest plugin.
   // Used to authenticate internal /__vinext/prerender/* HTTP endpoints.
   const prerenderSecret = readPrerenderSecret(path.dirname(rscEntryPath));
@@ -1114,6 +1102,26 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
   const appImageAllowedWidths: number[] = Array.isArray(rscModule.__imageAllowedWidths)
     ? rscModule.__imageAllowedWidths
     : [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
+  // SVG/security header settings for the image optimization endpoint, from
+  // next.config `images`. Read from the `__imageConfig` constant inlined into
+  // the RSC entry — the same source the Cloudflare worker entry uses — so the
+  // App Router has a single config seam across targets. Older builds don't
+  // export it; fall back to the legacy image-config.json sidecar they wrote at
+  // build time.
+  let imageConfig: ImageConfig | undefined =
+    typeof rscModule.__imageConfig === "object" && rscModule.__imageConfig !== null
+      ? (rscModule.__imageConfig as ImageConfig)
+      : undefined;
+  if (imageConfig === undefined) {
+    const imageConfigPath = path.join(path.dirname(rscEntryPath), "image-config.json");
+    if (fs.existsSync(imageConfigPath)) {
+      try {
+        imageConfig = JSON.parse(fs.readFileSync(imageConfigPath, "utf-8"));
+      } catch {
+        /* ignore parse errors */
+      }
+    }
+  }
   globalThis.__VINEXT_INLINE_CSS__ = appRouterInlineCss
     ? collectInlineCssManifest(clientDir, appRouterAssetPrefix)
     : undefined;

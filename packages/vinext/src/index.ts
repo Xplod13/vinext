@@ -4293,34 +4293,13 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
     // standalone/node_modules/ — uses the bundler's own import graph instead of
     // fragile regex scanning of emitted files.
     createServerExternalsManifestPlugin(),
-    // Write image config JSON for the App Router production server.
-    // The App Router RSC entry doesn't export vinextConfig (that's a Pages
-    // Router pattern), so we write a separate JSON file at build time that
-    // prod-server.ts reads at startup for SVG/security header config.
-    {
-      name: "vinext:image-config",
-      apply: "build",
-      enforce: "post",
-      writeBundle: {
-        sequential: true,
-        order: "post",
-        handler(options) {
-          const envName = this.environment?.name;
-          if (envName !== "rsc") return;
-
-          const outDir = options.dir;
-          if (!outDir) return;
-
-          const imageConfig = {
-            dangerouslyAllowSVG: nextConfig?.images?.dangerouslyAllowSVG,
-            contentDispositionType: nextConfig?.images?.contentDispositionType,
-            contentSecurityPolicy: nextConfig?.images?.contentSecurityPolicy,
-          };
-
-          fs.writeFileSync(path.join(outDir, "image-config.json"), JSON.stringify(imageConfig));
-        },
-      },
-    },
+    // NOTE: next.config `images` security/header settings for the App Router
+    // production server are no longer written to a separate image-config.json
+    // sidecar here — they are inlined into the generated RSC entry as the
+    // `__imageConfig` export (see entries/app-rsc-entry.ts), which both the
+    // Cloudflare worker entry and prod-server.ts read. prod-server.ts keeps a
+    // read-side fallback to image-config.json for dist outputs built by older
+    // vinext versions.
     // Write BUILD_ID to dist/server/ so post-build tools (TPR, seed-cache) can
     // read the build identifier without depending on the prerender manifest.
     // Uses writeBundle (not closeBundle) with a one-time write guard so the file
@@ -4330,8 +4309,8 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
     // closeBundle does not fire reliably during the multi-environment
     // createBuilder().buildApp() pipeline used for App Router production builds,
     // so the file was silently never written for pure App Router apps. writeBundle
-    // fires for every emitted bundle (matching the vinext:image-config plugin
-    // above), so the guard captures the first one. The path is always
+    // fires for every emitted bundle, so the guard captures the first one.
+    // The path is always
     // dist/server/BUILD_ID — derived from root, not from the per-environment
     // options.dir — so it works for all router types.
     (() => {
