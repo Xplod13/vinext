@@ -150,8 +150,7 @@ import { resolvePostcssStringPlugins } from "./plugins/postcss.js";
 import {
   buildSassPreprocessorOptions,
   createSassTildeImporter,
-  setSassLoaderResolvedConfig,
-  SassAwareFileSystemLoader,
+  createSassAwareFileSystemLoader,
 } from "./plugins/sass.js";
 import {
   createClientManualChunks,
@@ -806,6 +805,12 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
   let hasNitroPlugin = false;
   let rscCompatibilityId: string | undefined;
   const draftModeSecret = randomUUID();
+
+  // Per-plugin-instance binding of the Sass-aware CSS Modules Loader. The
+  // `config` hook injects `Loader` as `css.modules.Loader` and
+  // `configResolved` binds the resolved config, so multiple vinext builds in
+  // one process never preprocess `composes` deps with another build's config.
+  const sassComposesLoader = createSassAwareFileSystemLoader();
 
   // Build-time layout classification manifest, captured in the RSC virtual
   // module's load hook and consumed in renderChunk to patch the generated
@@ -1695,7 +1700,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
           config.css?.modules === false ||
           (typeof config.css?.modules === "object" && "Loader" in config.css.modules)
             ? {}
-            : { modules: { Loader: SassAwareFileSystemLoader } as CSSModulesOptions };
+            : { modules: { Loader: sassComposesLoader.Loader } as CSSModulesOptions };
 
         const viteConfig: UserConfig = {
           // Disable Vite's default HTML serving - we handle all routing
@@ -2384,7 +2389,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
         // Must be called early in `configResolved` before any CSS transform
         // work begins, but after the config is fully resolved so that Sass
         // preprocessor options and `css.modules` settings are in place.
-        setSassLoaderResolvedConfig(config);
+        sassComposesLoader.setResolvedConfig(config);
 
         // When the user sets `ssr.external: true`, strip React entries from
         // `environments.ssr.resolve.noExternal`. @vitejs/plugin-rsc populates

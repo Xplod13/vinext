@@ -198,17 +198,6 @@ export function buildSassPreprocessorOptions(
 //
 // Reference: https://vite.dev/guide/api-javascript#preprocesscss
 
-/** Module-level resolved config set by `setSassLoaderResolvedConfig`. */
-let _resolvedConfig: ResolvedConfig | null = null;
-
-/**
- * Called from vinext's `configResolved` hook so the custom Loader can use
- * Vite's resolved config when preprocessing CSS module dependencies.
- */
-export function setSassLoaderResolvedConfig(config: ResolvedConfig): void {
-  _resolvedConfig = config;
-}
-
 /**
  * Sort key comparator used by postcss-modules' FileSystemLoader to determine
  * the order in which dependency CSS is prepended to the output.
@@ -251,8 +240,17 @@ const CSS_MODULE_RE = /\.module\.\w+$/;
  * the Loader logs a warning and falls back to returning an empty token map so
  * the build continues without crashing (class composition will be incomplete
  * but the build succeeds).
+ *
+ * Not exported directly: postcss-modules constructs the Loader itself with a
+ * fixed `(root, plugins, fileResolve)` signature, so the resolved Vite config
+ * cannot be a constructor argument. `createSassAwareFileSystemLoader` returns
+ * a subclass with the config bound per factory call (i.e. per vinext plugin
+ * instance) instead of a module-level singleton, so multiple builds in one
+ * process (monorepos, programmatic multi-build runners) each preprocess
+ * `composes` dependencies with their own root/sass options/scoped-name
+ * generator.
  */
-export class SassAwareFileSystemLoader {
+class SassAwareFileSystemLoader {
   readonly root: string;
   private readonly fileResolve:
     | ((newPath: string, relativeTo: string) => Promise<string>)
@@ -281,6 +279,16 @@ export class SassAwareFileSystemLoader {
     this.traces = {};
     this.importNr = 0;
     this.tokensByFile = {};
+  }
+
+  /**
+   * The resolved Vite config used to preprocess `composes` dependencies.
+   * The base implementation has no config (the warn-and-skip fallback in
+   * `fetch` applies); `createSassAwareFileSystemLoader` overrides this with
+   * the config bound to that factory call.
+   */
+  protected getResolvedConfig(): ResolvedConfig | null {
+    return null;
   }
 
   async fetch(
@@ -322,7 +330,7 @@ export class SassAwareFileSystemLoader {
     const cached = this.tokensByFile[fileRelativePath];
     if (cached) return cached;
 
-    const config = _resolvedConfig;
+    const config = this.getResolvedConfig();
     // Reading the file up front (rather than inside the try below) preserves
     // the original FileSystemLoader contract: a missing/unreadable dependency
     // rejects and fails the build.
@@ -333,11 +341,16 @@ export class SassAwareFileSystemLoader {
         // postcss-modules scopes every `composes` dependency, but Vite's
         // pipeline only scopes `*.module.*` filenames — virtually rename
         // other deps (e.g. `composes: x from './plain.css'`) so they are
-        // scoped too. See `CSS_MODULE_RE` above.
+        // scoped too. Extensionless deps (`composes: x from './plain'`)
+        // get a virtual `.module.css` suffix: the built-in FileSystemLoader
+        // piped their raw text through the CSS-module scoping plugins as
+        // CSS, so plain CSS is the parity-preserving interpretation. See
+        // `CSS_MODULE_RE` above.
         const ext = path.extname(fileRelativePath);
-        const preprocessFilename =
-          CSS_MODULE_RE.test(fileRelativePath) || ext === ""
-            ? fileRelativePath
+        const preprocessFilename = CSS_MODULE_RE.test(fileRelativePath)
+          ? fileRelativePath
+          : ext === ""
+            ? `${fileRelativePath}.module.css`
             : `${fileRelativePath.slice(0, -ext.length)}.module${ext}`;
 
         // `preprocessCSS` handles Sass compilation (for .scss/.sass) AND
@@ -389,4 +402,44 @@ export class SassAwareFileSystemLoader {
       })
       .join("");
   }
+}
+
+/**
+ * Create a per-build binding of {@link SassAwareFileSystemLoader}.
+ *
+ * Returns:
+ * - `Loader` — a class to inject as postcss-modules' `css.modules.Loader`
+ *   option. postcss-modules instantiates it with the fixed
+ *   `(root, plugins, fileResolve)` signature, so the resolved Vite config is
+ *   captured in this factory's closure rather than passed to the constructor.
+ * - `setResolvedConfig` — called from vinext's `configResolved` hook to bind
+ *   that build's resolved config.
+ *
+ * One binding is created per vinext plugin instance, so concurrent or
+ * back-to-back builds in a single process never observe another build's
+ * config (root, sass options, `generateScopedName`, logger, …).
+ */
+export function createSassAwareFileSystemLoader(): {
+  Loader: new (
+    root: string,
+    plugins: unknown[],
+    fileResolve?: (newPath: string, relativeTo: string) => Promise<string>,
+  ) => {
+    fetch(newPath: string, relativeTo: string, trace?: string): Promise<Record<string, string>>;
+    readonly finalSource: string;
+  };
+  setResolvedConfig: (config: ResolvedConfig) => void;
+} {
+  let resolvedConfig: ResolvedConfig | null = null;
+
+  return {
+    Loader: class extends SassAwareFileSystemLoader {
+      protected override getResolvedConfig(): ResolvedConfig | null {
+        return resolvedConfig;
+      }
+    },
+    setResolvedConfig(config: ResolvedConfig): void {
+      resolvedConfig = config;
+    },
+  };
 }

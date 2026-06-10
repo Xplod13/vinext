@@ -197,7 +197,7 @@ describe("SCSS CSS-module composes (production build)", () => {
 });
 
 describe("plain CSS-module composes parity (production build)", () => {
-  it("keeps `composes` working for .module.css and non-module .css dependencies", async () => {
+  it("keeps `composes` working for .module.css, non-module .css, and extensionless dependencies", async () => {
     const tmpDir = await makeFixture({
       "pages/index.tsx": [
         'import styles from "../styles/index.module.css";',
@@ -205,6 +205,7 @@ describe("plain CSS-module composes parity (production build)", () => {
         "  return (",
         "    <div className={styles.subClass}>",
         "      <span className={styles.fromPlain}>composes</span>",
+        "      <span className={styles.fromExtless}>extensionless</span>",
         "    </div>",
         "  );",
         "}",
@@ -220,10 +221,28 @@ describe("plain CSS-module composes parity (production build)", () => {
         // regardless of filename; plain `.css` deps must keep working too.
         "  composes: plainClass from './plain.css';",
         "}",
+        ".fromExtless {",
+        // Extensionless deps resolve to a literal file on disk and were
+        // scoped (as CSS) by postcss-modules' built-in FileSystemLoader —
+        // the virtual `*.module.css` rename must cover them too, or their
+        // composed tokens are silently dropped.
+        "  composes: extlessClass from './extless';",
+        "}",
         "",
       ].join("\n"),
-      "styles/other.module.css": ".className {\n  color: green;\n}\n",
+      // url() inside a composed dependency: the custom loader runs Vite's
+      // `preprocessCSS` (where the built-in FileSystemLoader ran only the
+      // scoping plugins). `preprocessCSS` has no plugin context to resolve or
+      // emit assets, so — exactly like the built-in loader (verified against
+      // a vanilla Vite build) — the url() must pass through verbatim, never
+      // mangled into a `__VITE_ASSET__` placeholder or dropped. Pin that
+      // parity here so a pipeline change surfaces as a test failure.
+      "styles/other.module.css":
+        ".className {\n  color: green;\n  background-image: url('./dot.svg');\n}\n",
+      "styles/dot.svg":
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><rect width="1" height="1" fill="green"/></svg>\n',
       "styles/plain.css": ".plainClass {\n  margin: 7px;\n}\n",
+      "styles/extless": ".extlessClass {\n  letter-spacing: 7px;\n}\n",
     });
     try {
       const { css, js } = await buildAndCollect(tmpDir);
@@ -232,9 +251,19 @@ describe("plain CSS-module composes parity (production build)", () => {
       expect(css).toContain("color:green");
       expect(css).toMatch(/_plainClass_[\w-]+/);
       expect(css).toContain("margin:7px");
+      expect(css).toMatch(/_extlessClass_[\w-]+/);
+      expect(css).toContain("letter-spacing:7px");
+
+      // Parity: the url() reference survives verbatim (the built-in loader
+      // behaves identically — composed-dep CSS bypasses Vite's url rewriter,
+      // which only runs with a plugin context). It must not be rewritten,
+      // mangled into an unresolved placeholder, or dropped.
+      expect(css).toMatch(/url\((['"]?)\.\/dot\.svg\1\)/);
+      expect(css).not.toContain("__VITE_ASSET__");
 
       expect(js).toMatch(/_subClass_[\w-]+ _className_[\w-]+/);
       expect(js).toMatch(/_fromPlain_[\w-]+ _plainClass_[\w-]+/);
+      expect(js).toMatch(/_fromExtless_[\w-]+ _extlessClass_[\w-]+/);
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
     }
