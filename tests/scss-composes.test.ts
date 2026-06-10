@@ -194,6 +194,24 @@ describe("SCSS CSS-module composes (production build)", () => {
       await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
     }
   }, 60_000);
+
+  it("fails the build when a composed dependency has a Sass error", async () => {
+    const tmpDir = await makeFixture({
+      "pages/index.tsx": PAGE,
+      "styles/index.module.scss":
+        ".subClass {\n  composes: className from './broken.module.scss';\n}\n",
+      // `$undefined` is never declared — Sass compilation of the composed
+      // dependency must throw, and the loader must propagate it (only a
+      // missing Sass implementation is downgraded to a warning). A green
+      // build with silently-missing classes would be worse than the error.
+      "styles/broken.module.scss": ".className {\n  background: $undefined;\n}\n",
+    });
+    try {
+      await expect(buildAndCollect(tmpDir)).rejects.toThrow(/broken\.module\.scss|Undefined/i);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }, 60_000);
 });
 
 describe("plain CSS-module composes parity (production build)", () => {

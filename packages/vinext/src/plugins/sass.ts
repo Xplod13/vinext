@@ -236,10 +236,13 @@ const CSS_MODULE_RE = /\.module\.\w+$/;
  * - `.module.css` and `.module.scss` files have their class names scoped and
  *   export tokens extracted in exactly the same way as the top-level file.
  *
- * When preprocessing fails (or the resolved config has not been provided),
- * the Loader logs a warning and falls back to returning an empty token map so
- * the build continues without crashing (class composition will be incomplete
- * but the build succeeds).
+ * Failure handling: a missing Sass implementation is downgraded to a logged
+ * warning and an empty token map so the build continues (class composition
+ * will be incomplete); any other preprocessing error (e.g. a syntax error in
+ * the composed dependency) propagates and fails the build, matching the
+ * built-in `FileSystemLoader`. When no resolved config has been bound —
+ * only reachable if the Loader is used outside vinext's `configResolved`
+ * wiring — the Loader silently returns an empty token map.
  *
  * Recursion boundary: nested `composes` chains are handled by delegating to
  * `preprocessCSS`, which re-applies postcss-modules (and therefore this
@@ -298,9 +301,9 @@ class SassAwareFileSystemLoader {
 
   /**
    * The resolved Vite config used to preprocess `composes` dependencies.
-   * The base implementation has no config (the warn-and-skip fallback in
-   * `fetch` applies); `createSassAwareFileSystemLoader` overrides this with
-   * the config bound to that factory call.
+   * The base implementation has no config (`fetch` silently returns empty
+   * tokens); `createSassAwareFileSystemLoader` overrides this with the
+   * config bound to that factory call.
    */
   protected getResolvedConfig(): ResolvedConfig | null {
     return null;
@@ -384,20 +387,29 @@ class SassAwareFileSystemLoader {
         this.tokensByFile[fileRelativePath] = exportTokens;
         return exportTokens;
       } catch (error) {
-        // Preprocessing failed (e.g. Sass not installed, syntax error in the
-        // dependency). Warn so the failure is observable — the composed
-        // classes will otherwise be silently missing from the output.
+        const message = error instanceof Error ? error.message : String(error);
+        // Only downgrade a missing Sass implementation ("Preprocessor
+        // dependency \"sass-embedded\" not found...") to a warning: that is
+        // an environment problem the user can fix without touching their
+        // styles, and crashing would take down builds that never hit the
+        // Sass path at runtime. Anything else (e.g. a syntax error in the
+        // composed dependency) failed the build with postcss-modules'
+        // built-in FileSystemLoader too — keep failing loudly rather than
+        // shipping a green build with silently-missing classes.
+        if (!message.includes("Preprocessor dependency")) throw error;
         config.logger.warn(
           `[vinext] Failed to preprocess \`composes\` dependency ${fileRelativePath}: ` +
-            `${error instanceof Error ? error.message : String(error)}. ` +
+            `${message}. ` +
             `Classes composed from this file will be missing from the build output.`,
         );
       }
     }
 
-    // Fallback when preprocessing failed or the resolved config has not been
-    // provided. Record empty source/tokens; class composition will be
-    // incomplete (warned above) but the build will not crash.
+    // Fallback when a missing Sass implementation was downgraded to a warning
+    // above, or the resolved config has not been provided (only reachable
+    // when the Loader is used outside vinext's `configResolved` wiring).
+    // Record empty source/tokens; class composition will be incomplete but
+    // the build will not crash.
     this.sources[fileRelativePath] = "";
     this.traces[trace] = fileRelativePath;
     this.tokensByFile[fileRelativePath] = {};
