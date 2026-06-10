@@ -241,6 +241,21 @@ const CSS_MODULE_RE = /\.module\.\w+$/;
  * the build continues without crashing (class composition will be incomplete
  * but the build succeeds).
  *
+ * Recursion boundary: nested `composes` chains are handled by delegating to
+ * `preprocessCSS`, which re-applies postcss-modules (and therefore this
+ * Loader) for each dependency — every composed subtree gets its own inner
+ * Loader instance rather than sharing this instance's `tokensByFile`/
+ * `sources` state. Two intentional consequences, versus the built-in
+ * single-loader recursion:
+ * - A dependency reached from two sibling `composes` branches is inlined
+ *   once per subtree; the duplicate identical rules are collapsed by
+ *   LightningCSS during minification (bloat-free in practice, but the
+ *   pre-minification CSS differs from the built-in loader's single pass).
+ * - Circular `composes` chains are not short-circuited across the
+ *   `preprocessCSS` boundary (the built-in loader's shared cache caught
+ *   them). Cycles are invalid CSS-module inputs — webpack/Next.js errors on
+ *   them too — so no cycle bookkeeping is layered on here.
+ *
  * Not exported directly: postcss-modules constructs the Loader itself with a
  * fixed `(root, plugins, fileResolve)` signature, so the resolved Vite config
  * cannot be a constructor argument. `createSassAwareFileSystemLoader` returns
