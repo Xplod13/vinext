@@ -507,6 +507,16 @@ describe("generateWranglerConfig", () => {
     expect(parsed.main).toBe("./worker/index.ts");
   });
 
+  it("keeps main on a user-authored worker entry for App Router", () => {
+    // A custom worker/index.ts without a wrangler.jsonc must not be silently
+    // dropped in favor of the default entry.
+    mkdir(tmpDir, "app");
+    writeFile(tmpDir, "worker/index.ts", "export default { fetch() {} };");
+    const info = detectProject(tmpDir);
+    const parsed = JSON.parse(generateWranglerConfig(info));
+    expect(parsed.main).toBe("./worker/index.ts");
+  });
+
   it("sets compatibility_date to today", () => {
     mkdir(tmpDir, "app");
     const info = detectProject(tmpDir);

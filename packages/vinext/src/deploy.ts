@@ -416,8 +416,13 @@ export function generateWranglerConfig(info: ProjectInfo): string {
     compatibility_flags: ["nodejs_compat"],
     // App Router needs no custom worker — the default entry handles routing AND
     // image optimization (via the configured images.optimizer). Pages Router
-    // still uses a generated worker entry.
-    main: info.isAppRouter ? "vinext/server/app-router-entry" : "./worker/index.ts",
+    // still uses a generated worker entry. A user-authored worker/index.ts
+    // (custom worker without a wrangler config yet) keeps winning for both
+    // routers so it is never silently dropped.
+    main:
+      info.isAppRouter && !info.hasWorkerEntry
+        ? "vinext/server/app-router-entry"
+        : "./worker/index.ts",
     assets: {
       // Wrangler 4.69+ requires `directory` when `assets` is an object.
       // The @cloudflare/vite-plugin always writes static assets to dist/client/.
