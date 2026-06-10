@@ -10,12 +10,19 @@
  * root) so the project's .babelrc — which must contain @babel/preset-flow —
  * strips the Flow annotations before Vite continues.
  *
- * This test suite exercises `hasFlowPragma` — the detection function — in
- * isolation.  It imports from the small util module, so it never pulls in
- * `image-size` or other heavy transitive deps from the full index.ts.
+ * This test suite exercises both halves of the feature:
  *
- * Full e2e verification (Babel stripping Flow types + page rendering) is
- * covered by the deploy-suite test:
+ *   1. `hasFlowPragma` — the detection function — in isolation. It imports
+ *      from the small util module, so it never pulls in `image-size` or other
+ *      heavy transitive deps from the full index.ts.
+ *   2. `transformWithFlowBabel` — the actual two-stage transform (Babel
+ *      strips Flow types via the project's .babelrc, then an OXC re-pass
+ *      compiles the JSX) — driven against the workspace fixture
+ *      `tests/fixtures/babel-flowtype/`, which declares @babel/core +
+ *      @babel/preset-flow as its own deps the way a real user project would.
+ *
+ * Additional e2e verification (full page rendering) is covered by the
+ * deploy-suite test:
  *   test/e2e/babel/index.test.ts → "Babel > Should compile a page with
  *   flowtype correctly"
  *
@@ -24,8 +31,12 @@
  *   https://github.com/vercel/next.js/blob/canary/test/e2e/babel/
  */
 
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 import { hasFlowPragma } from "../packages/vinext/src/utils/flow-pragma.js";
+import { transformWithFlowBabel } from "../packages/vinext/src/utils/flow-babel.js";
 
 describe("hasFlowPragma — leading pragma detection (#1506)", () => {
   // ── True-positive cases ────────────────────────────────────────────────────
@@ -155,5 +166,57 @@ export default pragma;
 
   it("returns false for a hashbang-only file with no further content", () => {
     expect(hasFlowPragma("#!/usr/bin/env node")).toBe(false);
+  });
+});
+
+describe("transformWithFlowBabel — Babel + OXC two-stage transform (#1506)", () => {
+  const FIXTURE_ROOT = path.resolve(import.meta.dirname, "./fixtures/babel-flowtype");
+  const FIXTURE_FILE = path.join(FIXTURE_ROOT, "pages", "mycomponent.js");
+  const fixtureCode = fs.readFileSync(FIXTURE_FILE, "utf8");
+
+  it("strips Flow type annotations using the fixture project's .babelrc", async () => {
+    // Sanity: the fixture really is a Flow file with a leading pragma.
+    expect(hasFlowPragma(fixtureCode)).toBe(true);
+    expect(fixtureCode).toContain("type Props");
+
+    const result = await transformWithFlowBabel(fixtureCode, FIXTURE_FILE, FIXTURE_ROOT);
+    expect(result).not.toBeNull();
+    // Flow-only syntax must be gone from the output.
+    expect(result!.code).not.toContain("type Props");
+    expect(result!.code).not.toContain("Component<Props>");
+    expect(result!.code).not.toContain(": React.Node");
+  });
+
+  it("compiles the JSX left in Babel's output via the OXC re-pass", async () => {
+    const result = await transformWithFlowBabel(fixtureCode, FIXTURE_FILE, FIXTURE_ROOT);
+    expect(result).not.toBeNull();
+    // Raw JSX must be compiled away to automatic-runtime calls.
+    expect(result!.code).not.toContain("<div");
+    expect(result!.code).toContain("react/jsx-runtime");
+    expect(result!.code).toContain("Test Babel");
+  });
+
+  it("returns a sourcemap that traces back to the original Flow source", async () => {
+    const result = await transformWithFlowBabel(fixtureCode, FIXTURE_FILE, FIXTURE_ROOT);
+    expect(result).not.toBeNull();
+    const map = result!.map as { sources?: string[]; sourcesContent?: (string | null)[] };
+    expect(map).toBeTruthy();
+    // The composed map must point at the original file — not at Babel's
+    // intermediate output — proving the Babel map was chained into the OXC
+    // pass rather than discarded.
+    expect(map.sources?.some((s) => s.includes("mycomponent.js"))).toBe(true);
+    expect(map.sourcesContent?.some((c) => c?.includes("type Props"))).toBe(true);
+  });
+
+  it("returns null when @babel/core is not resolvable from the project root", async () => {
+    const emptyRoot = fs.mkdtempSync(path.join(os.tmpdir(), "vinext-flow-babel-"));
+    try {
+      const file = path.join(emptyRoot, "page.js");
+      expect(await transformWithFlowBabel(fixtureCode, file, emptyRoot)).toBeNull();
+      // Second call exercises the memoized "not found" path.
+      expect(await transformWithFlowBabel(fixtureCode, file, emptyRoot)).toBeNull();
+    } finally {
+      fs.rmSync(emptyRoot, { recursive: true, force: true });
+    }
   });
 });

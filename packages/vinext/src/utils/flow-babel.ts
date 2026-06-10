@@ -1,0 +1,99 @@
+import path from "node:path";
+import { createRequire } from "node:module";
+import { transformWithOxc } from "vite";
+
+/**
+ * Memoized @babel/core resolve cache: projectRoot → resolved module or null.
+ * Avoids repeated `createRequire` + `require.resolve` on every transformed file.
+ */
+const _babelCoreCache = new Map<string, unknown>();
+
+/**
+ * Transform a `.js` file that carries a Flow pragma using @babel/core so that
+ * Flow type annotations are stripped before OXC processes the file.
+ *
+ * OXC (used by `vite:oxc` and `transformWithOxc`) does not support Flow type
+ * syntax and throws `PARSE_ERROR: Flow is not supported` on such files. This
+ * function resolves @babel/core from the project root (so the user's installed
+ * version is used) and invokes it with `babelrc: true` so the project's
+ * .babelrc — which must contain `@babel/preset-flow` — strips the Flow
+ * annotations. Note that `@babel/preset-flow` alone cannot *parse* JSX, so a
+ * Flow + JSX project's config necessarily handles JSX one way or another:
+ * either it compiles JSX too (e.g. `next/babel`) or it parses-but-keeps it
+ * (e.g. `@babel/plugin-syntax-jsx`). A subsequent `transformWithOxc` pass
+ * (with `lang: "jsx"`) compiles any JSX still present in Babel's output, so
+ * the Vite pipeline receives plain JS in both cases.
+ *
+ * Babel's `root`/`cwd` are pinned to `projectRoot` so that .babelrc /
+ * babel.config.* resolution is anchored to the project even when the Vite
+ * process was launched from a different directory (e.g. a monorepo root —
+ * Babel's default `babelrcRoots` only honors .babelrc files in its `root`
+ * package, which defaults to `process.cwd()`).
+ *
+ * Returns null when @babel/core cannot be resolved; the caller falls back to
+ * the regular OXC pass, which compiles plain JS normally and rejects genuine
+ * Flow syntax with a parse error (which the caller turns into an actionable
+ * "install @babel/core + @babel/preset-flow" message). Throws when Babel
+ * itself rejects the file (e.g. a misconfigured .babelrc) or when Babel
+ * produces no output (which indicates a silent misconfiguration).
+ */
+export async function transformWithFlowBabel(
+  code: string,
+  filename: string,
+  projectRoot: string,
+  // oxlint-disable-next-line typescript/no-explicit-any
+): Promise<{ code: string; map?: any } | null> {
+  // Resolve @babel/core from the project root so the user's version is used.
+  // Memoize per projectRoot to avoid repeated `createRequire` calls.
+  // oxlint-disable-next-line typescript/no-explicit-any
+  let babelCore: any;
+  if (_babelCoreCache.has(projectRoot)) {
+    babelCore = _babelCoreCache.get(projectRoot);
+    if (babelCore === null) return null;
+  } else {
+    try {
+      const req = createRequire(path.join(projectRoot, "package.json"));
+      babelCore = req("@babel/core");
+      _babelCoreCache.set(projectRoot, babelCore);
+    } catch {
+      // @babel/core not installed in this project. Cache the miss so we don't
+      // re-attempt on every file; the caller falls back to the OXC pass.
+      _babelCoreCache.set(projectRoot, null);
+      return null;
+    }
+  }
+
+  // Use the project's .babelrc / babel.config.* (must include @babel/preset-flow)
+  // to strip Flow type annotations. Babel leaves JSX syntax intact.
+  // oxlint-disable-next-line typescript/no-unsafe-call, typescript/no-unsafe-member-access
+  const result = (await babelCore.transformAsync(code, {
+    filename,
+    sourceMaps: true,
+    configFile: true,
+    babelrc: true,
+    root: projectRoot,
+    cwd: projectRoot,
+  })) as { code?: string | null; map?: unknown } | null;
+
+  if (!result?.code) {
+    throw new Error(
+      `[vinext] Babel produced empty output for Flow file: ${filename}\n` +
+        "Ensure @babel/preset-flow is listed in the project's .babelrc or babel.config.*",
+    );
+  }
+
+  // Babel has stripped Flow types; the output may still contain JSX (when the
+  // project's config only parses it, e.g. @babel/plugin-syntax-jsx). Run OXC
+  // to compile any remaining JSX so the Vite pipeline receives plain JS.
+  // Pass Babel's output map as `inMap` so OXC composes it into the final map,
+  // making the returned sourcemap trace back to the original Flow source rather
+  // than to Babel's intermediate output.
+  const babelMap = result.map as object | undefined;
+  const oxcResult = await transformWithOxc(
+    result.code,
+    filename,
+    { lang: "jsx", jsx: { runtime: "automatic" as const }, sourcemap: true },
+    babelMap,
+  );
+  return { code: oxcResult.code, map: oxcResult.map };
+}
