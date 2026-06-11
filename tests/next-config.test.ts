@@ -1255,6 +1255,20 @@ describe("resolveNextConfig disableOptimizedLoading", () => {
   });
 });
 
+describe("resolveNextConfig scrollRestoration", () => {
+  it("defaults scrollRestoration to false", async () => {
+    const resolved = await resolveNextConfig({});
+    expect(resolved.scrollRestoration).toBe(false);
+  });
+
+  it("reads experimental.scrollRestoration from next.config", async () => {
+    const resolved = await resolveNextConfig({
+      experimental: { scrollRestoration: true },
+    });
+    expect(resolved.scrollRestoration).toBe(true);
+  });
+});
+
 describe("resolveNextConfig prefetchInlining", () => {
   it("reads experimental.prefetchInlining from next.config", async () => {
     const disabled = await resolveNextConfig({});
@@ -1643,6 +1657,7 @@ describe("detectNextIntlConfig", () => {
       sassOptions: null,
       removeConsole: false,
       disableOptimizedLoading: false,
+      scrollRestoration: false,
       compilerDefine: {},
       compilerDefineServer: {},
       instrumentationClientInject: [],

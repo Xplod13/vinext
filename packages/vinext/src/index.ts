@@ -1325,6 +1325,12 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
         defines["process.env.__VINEXT_PREFETCH_INLINING"] = JSON.stringify(
           nextConfig.prefetchInlining ? "true" : "false",
         );
+        // Expose experimental.scrollRestoration to the Pages Router client.
+        // Next.js defines this from config.experimental.scrollRestoration in
+        // packages/next/src/build/define-env.ts.
+        defines["process.env.__NEXT_SCROLL_RESTORATION"] = JSON.stringify(
+          nextConfig.scrollRestoration ? "true" : "false",
+        );
         // Expose trailingSlash to client-side code so <Link> can render hrefs
         // in the canonical form and avoid an unnecessary 308 redirect bounce.
         defines["process.env.__VINEXT_TRAILING_SLASH"] = JSON.stringify(
