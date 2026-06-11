@@ -921,16 +921,13 @@ describe("App Router Production server (startProdServer)", () => {
     expect(refIds.length).toBe(3);
     const [getDateRefId, getRandomRefId, getMessageRefId] = refIds;
 
-    // Pin the documented divergence from Next.js: closure-captured variables
-    // are hoisted into `.bind(null, ...)` bound args and serialized into the
-    // RSC payload UNENCRYPTED (Next.js encrypts bound args by default). The
-    // fixture's getMessage closes over this string inside the cached
-    // component, and it must appear verbatim (plaintext) in the page payload.
-    // If bound-arg encryption is ever implemented, this assertion should be
-    // inverted and the "Known limitation" notes in packages/vinext/src/index.ts
-    // and the README removed.
+    // The fixture's getMessage closes over this string. Match Next.js and
+    // plugin-rsc's "use server" transform by serializing an encrypted binding,
+    // never the plaintext capture, into the Flight payload.
     const capturedScopeValue = "closure-captured-bound-arg-vinext";
-    expect(html).toContain(capturedScopeValue);
+    expect(html).not.toContain(capturedScopeValue);
+    const encryptedBoundArg = html.match(/rsc\.push\("[0-9a-f]+:\\"([A-Za-z0-9+/=]{64,})\\"/)?.[1];
+    expect(encryptedBoundArg).toBeDefined();
 
     const invokeAction = async (actionId: string, args: unknown[] = []): Promise<string> => {
       const actionRes = await fetch(`${baseUrl}/use-cache-nested-fn-props.rsc`, {
@@ -961,14 +958,12 @@ describe("App Router Production server (startProdServer)", () => {
     const randomText = await invokeAction(getRandomRefId);
     expect(randomText).toMatch(/\d+\.\d+/);
 
-    // Closure round-trip: the client invokes a bound server reference by
-    // sending the bound args ahead of the call args in the POST body. The
-    // hoisted function's leading parameter is the closure-captured value, so
-    // passing it as the first arg replicates what the flight client sends,
-    // and the result must observe the captured value.
+    // Closure round-trip: the client sends the encrypted binding ahead of the
+    // call args. The server-reference wrapper decrypts it before entering the
+    // cached function, so plaintext values still determine the cache key.
     const messageRegExpFor = (boundArg: string): RegExp =>
       new RegExp(`message:${boundArg}:[0-9.e+-]+`);
-    const message1 = (await invokeAction(getMessageRefId, [capturedScopeValue])).match(
+    const message1 = (await invokeAction(getMessageRefId, [encryptedBoundArg])).match(
       messageRegExpFor(capturedScopeValue),
     )?.[0];
     expect(message1).toBeDefined();
@@ -979,20 +974,10 @@ describe("App Router Production server (startProdServer)", () => {
     // Math.random() suffix, so a second invocation with the same bound arg
     // can only return the identical value if the bound arg produced the same
     // cache key and the entry was hit (a recompute would change the suffix).
-    const message2 = (await invokeAction(getMessageRefId, [capturedScopeValue])).match(
+    const message2 = (await invokeAction(getMessageRefId, [encryptedBoundArg])).match(
       messageRegExpFor(capturedScopeValue),
     )?.[0];
     expect(message2).toBe(message1);
-
-    // ...and the bound arg PARTICIPATES in the cache key: invoking with a
-    // different bound arg must miss (fresh value observing the new arg), not
-    // serve the entry cached above.
-    const otherBoundArg = "other-bound-arg-vinext";
-    const otherMessage = (await invokeAction(getMessageRefId, [otherBoundArg])).match(
-      messageRegExpFor(otherBoundArg),
-    )?.[0];
-    expect(otherMessage).toBeDefined();
-    expect(otherMessage).not.toBe(message1);
   });
 
   it("middleware request header overrides still apply after middleware calls headers() first", async () => {

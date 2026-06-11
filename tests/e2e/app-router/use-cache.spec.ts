@@ -132,9 +132,7 @@ test.describe('"use cache" nested cache functions as props', () => {
     // `.bind(null, ...)` bound arg on the server reference. Invoking it from
     // the client exercises the full flight round-trip for bound args:
     // $$bound serialized into the RSC payload → encodeReply on click →
-    // decode + prepend on the server. Note the bound arg travels unencrypted —
-    // a documented divergence from Next.js, pinned by the production-server
-    // test's plaintext-payload assertion. The trailing numeric suffix is the
+    // decrypt + prepend on the server. The trailing numeric suffix is the
     // fixture's Math.random() marker, which the production-server test uses
     // to pin cached-invoke semantics for the bound path.
     await expect(async () => {

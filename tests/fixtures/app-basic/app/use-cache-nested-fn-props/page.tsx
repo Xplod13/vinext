@@ -26,12 +26,8 @@ async function CachedForm() {
 
   // Closure-captured by getMessage below. The hoist transform lifts the
   // capture into a `.bind(null, capturedScopeValue)` bound argument on the
-  // server reference, which is serialized into the RSC payload UNENCRYPTED —
-  // a deliberate, documented divergence from Next.js (which encrypts bound
-  // args by default). The production-server test asserts this value appears
-  // in plaintext in the flight payload to pin the behavior; see the "Known
-  // limitation" note on the vinext:use-cache transform in
-  // packages/vinext/src/index.ts and the README "Known limitations" section.
+  // server reference. The binding is encrypted before RSC serialization and
+  // decrypted before the cached wrapper builds its argument-based cache key.
   const capturedScopeValue = "closure-captured-bound-arg-vinext";
 
   return (

@@ -4290,7 +4290,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
             // Strategy (mirrors Next.js' use-cache SWC transform, where the
             // exported $$RSC_SERVER_CACHE_n binding IS the cache wrapper):
             // after hoisting, reassign each hoisted export at module level to
-            // registerServerReference(registerCachedFunction(fn)). Exported
+            // registerCachedServerReference(fn). Exported
             // function declarations are live bindings, so both the original
             // call sites and the server-reference manifest (which imports the
             // module export by name on action POST) observe the wrapped
@@ -4309,13 +4309,6 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
             // build-time virtual:vite-rsc/server-references manifest includes
             // the module and dev-mode reference validation accepts the key.
             //
-            // Known limitation: closure-captured variables (hoisted into
-            // `.bind(null, ...)` args) are serialised to the client
-            // unencrypted when such a function is passed as a prop, unlike
-            // plugin-rsc's "use server" transform which encrypts bound args by
-            // default. Encrypting them here interacts with cache-key
-            // determinism (AES-GCM ciphertext differs per render) and needs
-            // its own design pass.
             const isRscEnv = this.environment?.name === "rsc";
 
             // Compute the normalised reference key that matches what
@@ -4391,7 +4384,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
             try {
               // Hoisted function metadata collected during the transform so the
               // RSC branch can emit the module-level wrapping afterwards.
-              const hoisted: { name: string; variant: string }[] = [];
+              const hoisted: { name: string; variant: string; hasBoundArgs: boolean }[] = [];
               const result = transformHoistInlineDirective(code, ast, {
                 directive: /^use cache(:\s*\w+)?$/,
                 runtime: (value: string, name: string, meta: { directiveMatch: string[] }) => {
@@ -4399,15 +4392,22 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                   if (isRscEnv) {
                     // The hoisted export is wrapped once at module level
                     // (below); the call site just references it. `.bind()` on
-                    // the wrapped export is handled by registerServerReference's
+                    // the wrapped export is handled by the server reference's
                     // patched bind, which tracks $$bound for serialisation.
-                    hoisted.push({ name, variant });
+                    hoisted.push({ name, variant, hasBoundArgs: false });
                     return value;
                   }
                   // Non-RSC env: no server-reference metadata needed — wrap the
                   // call site with the cache runtime only.
                   return `(await import(${JSON.stringify(runtimeModuleUrl2)})).registerCachedFunction(${value}, ${JSON.stringify(id + ":" + name)}, ${JSON.stringify(variant)})`;
                 },
+                encode: isRscEnv
+                  ? (value: string) => {
+                      const current = hoisted.at(-1);
+                      if (current) current.hasBoundArgs = true;
+                      return `__vinext_encryptActionBoundArgs(${value})`;
+                    }
+                  : undefined,
                 rejectNonAsyncFunction: false,
               });
 
@@ -4423,25 +4423,15 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                   // call sites, and the server-references manifest import on
                   // action POST — observes the wrapped function.
                   //
-                  // registerServerReference is imported via the vinext
-                  // cache-server-reference shim rather than from
-                  // @vitejs/plugin-rsc/react/rsc directly: the shim re-exports
-                  // it through the same bare specifier the cache runtime uses,
-                  // so the RSC environment shares one react/rsc module
-                  // instance by construction instead of relying on Vite
-                  // normalising a file:// URL of the package entry to the same
-                  // module id as the bare import (see the shim's header
-                  // comment).
                   const serverRefShimUrl = pathToFileURL(
                     resolveShimModulePath(shimsDir, "cache-server-reference"),
                   ).href;
                   const lines: string[] = [
-                    `import { registerCachedFunction as __vinext_registerCachedFunction } from ${JSON.stringify(runtimeModuleUrl2)};`,
-                    `import { registerServerReference as __vinext_registerServerReference } from ${JSON.stringify(serverRefShimUrl)};`,
+                    `import { encryptActionBoundArgs as __vinext_encryptActionBoundArgs, registerCachedServerReference as __vinext_registerCachedServerReference } from ${JSON.stringify(serverRefShimUrl)};`,
                   ];
-                  for (const { name, variant } of hoisted) {
+                  for (const { name, variant, hasBoundArgs } of hoisted) {
                     lines.push(
-                      `${name} = __vinext_registerServerReference(__vinext_registerCachedFunction(${name}, ${JSON.stringify(id + ":" + name)}, ${JSON.stringify(variant)}), ${JSON.stringify(normalizedRefKey)}, ${JSON.stringify(name)});`,
+                      `${name} = __vinext_registerCachedServerReference(${name}, ${JSON.stringify(id + ":" + name)}, ${JSON.stringify(variant)}, ${JSON.stringify(normalizedRefKey)}, ${JSON.stringify(name)}, ${hasBoundArgs});`,
                     );
                   }
                   result.output.prepend(lines.join("\n") + "\n");

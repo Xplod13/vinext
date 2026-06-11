@@ -11,11 +11,8 @@
  *    serializable-but-unresolvable server reference (which would surface as a
  *    silent 404 on action POST in production).
  * 2. The happy path's reference key: hashString(toRelativeId(id)) in build.
- * 3. The documented divergence from Next.js: closure-captured variables are
- *    hoisted into plain `.bind(null, ...)` bound args — no encryption wrapper
- *    is emitted. (Next.js encrypts bound args by default. Pinned here at the
- *    transform level; the production-server and Playwright round-trip tests
- *    pin the runtime behavior.)
+ * 3. Closure-captured variables use plugin-rsc's action encryption runtime,
+ *    matching the encryption path used by its own "use server" transform.
  */
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -128,15 +125,12 @@ describe("vinext:use-cache inline transform (RSC server references)", () => {
       .update(manager.toRelativeId(moduleId))
       .digest("hex")
       .slice(0, 12);
-    expect(result!.code).toContain("__vinext_registerServerReference");
+    expect(result!.code).toContain("__vinext_registerCachedServerReference");
     expect(result!.code).toContain(JSON.stringify(expectedKey));
 
-    // registerServerReference must be imported via the vinext
-    // cache-server-reference shim (which re-exports it through the same bare
-    // "@vitejs/plugin-rsc/react/rsc" specifier the cache runtime uses), NOT
-    // via a file:// URL of the plugin-rsc package entry — the latter would
-    // couple correctness to Vite normalising the file:// URL and the bare
-    // import to a single module id.
+    // Server-reference registration and action encryption are imported via a
+    // vinext-owned integration module so transformed application modules do
+    // not need to resolve plugin-rsc's runtime package from their location.
     const importSpecifiers = [...result!.code.matchAll(/from "([^"]+)"/g)].map((m) => m[1]);
     expect(importSpecifiers).toContainEqual(
       expect.stringContaining("/shims/cache-server-reference"),
@@ -144,14 +138,7 @@ describe("vinext:use-cache inline transform (RSC server references)", () => {
     expect(importSpecifiers).not.toContainEqual(expect.stringContaining("@vitejs/plugin-rsc"));
   });
 
-  it("emits closure-captured variables as plain (unencrypted) bound args", async () => {
-    // Pins the documented Next.js divergence at the transform level: the
-    // hoist transform is invoked without encode/decode options, so captured
-    // variables appear verbatim in a `.bind(null, ...)` call site instead of
-    // being encrypted like plugin-rsc's "use server" transform does. See the
-    // "Known limitation" note in packages/vinext/src/index.ts and the README
-    // "Known limitations" section. If encryption is implemented, update this
-    // test alongside the round-trip tests.
+  it("encrypts closure-captured variables before binding the server reference", async () => {
     const plugin = getUseCachePlugin();
     const manager = fakeManager(APP_FIXTURE_DIR);
     const configResolved = unwrapHook(plugin.configResolved)!;
@@ -176,7 +163,11 @@ describe("vinext:use-cache inline transform (RSC server references)", () => {
       moduleId,
     );
     expect(result).not.toBeNull();
-    // The captured variable is passed as a raw bind arg — no encrypt wrapper.
-    expect(result!.code).toMatch(/\.bind\(null,\s*capturedSecret\)/);
+    expect(result!.code).toMatch(
+      /\.bind\(null,\s*__vinext_encryptActionBoundArgs\(\[capturedSecret\]\)\)/,
+    );
+    expect(result!.code).not.toMatch(/\.bind\(null,\s*capturedSecret\)/);
+    expect(result!.code).toContain("__vinext_registerCachedServerReference");
+    expect(result!.code).toContain(", true);");
   });
 });
