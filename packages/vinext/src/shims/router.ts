@@ -47,7 +47,7 @@ import {
   getWindowOrigin,
   withBasePath,
 } from "./url-utils.js";
-import { stripBasePath } from "../utils/base-path.js";
+import { stripBasePath, removeTrailingSlash } from "../utils/base-path.js";
 import {
   addLocalePrefix,
   getDomainLocaleUrl,
@@ -1826,6 +1826,31 @@ async function performNavigation(
     routerEvents.emit("hashChangeComplete", eventUrl, { shallow });
     dispatchNavigateEvent();
     return true;
+  }
+
+  // If this destination was detected as an App Router route during prefetch,
+  // skip the Pages Router SPA fetch and do an immediate hard navigation.
+  // The Pages Router client-side stack cannot render App Router pages; a hard
+  // navigation lets the browser bootstrap the App Router runtime from scratch.
+  //
+  // Mirrors Next.js: packages/next/src/shared/lib/router/router.ts:1448-1453
+  //   if ((this.components[pathname] as any)?.__appRouter) {
+  //     handleHardNavigation({ url: as, router: this })
+  //     return new Promise(() => {})
+  //   }
+  //
+  // Key normalisation: strip trailing slash so the lookup always matches the
+  // canonical key written by markAppRouteDetectedOnPrefetch, regardless of
+  // whether trailingSlash:true added a slash to `resolved` above (line 1797).
+  // Mirrors Next.js: removeTrailingSlash(removeBasePath(pathname)) at line 1442.
+  const appPath = getLocalPathname(resolved);
+  const appPathNorm = appPath !== null ? removeTrailingSlash(appPath) : null;
+  const appPathEntry =
+    appPathNorm !== null ? getPagesRouterComponentsMap()[appPathNorm] : undefined;
+  if (appPathEntry !== undefined && "__appRouter" in appPathEntry && appPathEntry.__appRouter) {
+    if (mode === "push") window.location.assign(full);
+    else window.location.replace(full);
+    return new Promise<boolean>(() => {});
   }
 
   if (mode === "push") saveScrollPosition();
