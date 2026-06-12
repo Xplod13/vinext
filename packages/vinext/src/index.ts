@@ -18,7 +18,6 @@ import {
 import { createSSRHandler } from "./server/dev-server.js";
 import { handleApiRoute } from "./server/api-handler.js";
 import { isImageOptimizationPath } from "./server/image-optimization.js";
-
 import { installSocketErrorBackstop } from "./server/socket-error-backstop.js";
 import { shouldInvalidateAppRouteFile } from "./server/dev-route-files.js";
 import { createDirectRunner } from "./server/dev-module-runner.js";
@@ -175,9 +174,26 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import fs from "node:fs";
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import commonjs from "vite-plugin-commonjs";
 import { normalizePathSeparators } from "./utils/path.js";
+
+type ServerFunctionDirectiveContext = {
+  value: string;
+  name: string;
+  id: string;
+  directiveMatch: RegExpMatchArray;
+  location: "inline" | "module";
+  hasBoundArgs: boolean;
+  parameters?: { count: number; hasRest: boolean };
+  runtime?: string;
+};
+
+function parseUseCacheVariant(directive: string): string {
+  return directive === "use cache"
+    ? ""
+    : directive.replace("use cache:", "").replace("use cache: ", "").trim();
+}
 
 // Install the process-level peer-disconnect backstop at module load.
 // Vite plugin lifecycle hooks (config / configureServer) proved
@@ -888,37 +904,20 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
   // different class identities. Resolving from the project root ensures a
   // single shared vite instance.
   //
-  // Pre-resolve both the main plugin and the /transforms subpath eagerly
-  // so all import() calls in this module use consistent resolution.
+  // Pre-resolve the main plugin eagerly so all import() calls in this module
+  // use consistent resolution.
   let resolvedReactPath: string | null = null;
   let resolvedRscPath: string | null = null;
-  let resolvedRscTransformsPath: string | null = null;
   // Prefer the user's project graph so vinext shares the app's Vite/plugin
   // instances. In source/workspace development, test fixtures may not declare
   // peer deps explicitly, so fall back to vinext's own install location.
   resolvedReactPath = resolveOptionalDependency(earlyBaseDir, "@vitejs/plugin-react");
   resolvedRscPath = resolveOptionalDependency(earlyBaseDir, "@vitejs/plugin-rsc");
-  resolvedRscTransformsPath = resolveOptionalDependency(
-    earlyBaseDir,
-    "@vitejs/plugin-rsc/transforms",
-  );
 
   // If app/ exists and auto-RSC is enabled, create a lazy Promise that
   // resolves to the configured RSC plugin array. Vite's asyncFlatten
   // will resolve this before processing the plugin list.
   let rscPluginPromise: Promise<Plugin[]> | null = null;
-  // Captured in configResolved so the use-cache transform can register hoisted
-  // functions into the plugin-rsc server-reference manifest.
-  // oxlint-disable-next-line typescript/no-explicit-any
-  let rscPluginApi: { manager: any } | null = null;
-  // Hoisted "use cache" functions (per module id) pending registration in the
-  // plugin-rsc server-reference manifest. Written by the "vinext:use-cache"
-  // transform and consumed by "vinext:use-cache-server-references", which runs
-  // AFTER plugin-rsc's "rsc:use-server" transform. That ordering is load-bearing:
-  // rsc:use-server deletes manager.serverReferenceMetaMap[id] for any module
-  // whose code does not contain "use server", so writing the entry from the
-  // vinext:use-cache transform directly would be wiped out a moment later.
-  const useCacheServerRefMeta = new Map<string, { referenceKey: string; exportNames: string[] }>();
   if (earlyAppDirExists && autoRsc) {
     if (!resolvedRscPath) {
       throw new Error(
@@ -938,6 +937,74 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
             ssr: VIRTUAL_APP_SSR_ENTRY,
             client: VIRTUAL_APP_BROWSER_ENTRY,
           },
+          serverFunctionDirectives: [
+            {
+              directive: /^use cache.*$/,
+              test: (code: string) => code.includes("use cache"),
+              filter: (id: string) =>
+                /\.(tsx?|jsx?|mjs)$/.test(id) && !id.includes("/node_modules/"),
+              rejectNonAsyncFunction: true,
+              rejectNonAsyncModule: false,
+              runtime: pathToFileURL(resolveShimModulePath(shimsDir, "cache-runtime")).href,
+              validate: ({ directive }: { directive: string }) => {
+                if (!/^use cache(?:: ([^\s].*))?$/.test(directive)) {
+                  const cacheKind = directive.includes(":")
+                    ? directive.slice(directive.indexOf(":") + 1).trim()
+                    : directive.slice("use cache".length).trim();
+                  const expected = cacheKind ? `use cache: ${cacheKind}` : "use cache";
+                  throw new Error(
+                    `Invalid cache directive ${JSON.stringify(directive)}. Did you mean ${JSON.stringify(expected)}?`,
+                  );
+                }
+              },
+              clientError: ({ id, environment }: { id: string; environment: string }) =>
+                `It is not allowed to define inline "use cache" annotated functions in Client Components. Export them from a separate file with a module-level "use cache" or "use server" directive, or pass them down through props from a Server Component. (${environment}: ${id})`,
+              wrap: ({
+                value,
+                name,
+                id,
+                directiveMatch,
+                location,
+                parameters,
+                runtime,
+              }: ServerFunctionDirectiveContext) => {
+                const variant = parseUseCacheVariant(directiveMatch[0]);
+                const modulePath = stripViteModuleQuery(id);
+                const moduleFileName = path.basename(modulePath);
+                const isAppPageDefault =
+                  location === "module" &&
+                  name === "default" &&
+                  hasAppDir &&
+                  isInsideDirectory(appDir, modulePath) &&
+                  path.parse(moduleFileName).name === "page" &&
+                  fileMatcher.extensionRegex.test(moduleFileName);
+                const runtimeOptions = {
+                  ...(isAppPageDefault ? { appPageDefaultExport: true } : {}),
+                  ...(parameters ? { parameters } : {}),
+                };
+                const pageOptions =
+                  Object.keys(runtimeOptions).length > 0
+                    ? `, ${JSON.stringify(runtimeOptions)}`
+                    : "";
+                return `${runtime}.registerCachedFunction(${value}, ${JSON.stringify(id + ":" + name)}, ${JSON.stringify(variant)}${pageOptions})`;
+              },
+              filterExport: ({
+                name,
+                id,
+                meta,
+              }: {
+                name: string;
+                id: string;
+                meta: { isFunction?: boolean };
+              }) => {
+                if (meta.isFunction === false) return false;
+                if (/\/(layout|template)\.(tsx?|jsx?|mjs)$/.test(id) && name === "default") {
+                  return false;
+                }
+                return true;
+              },
+            },
+          ],
         });
       })
       .catch((cause) => {
@@ -4074,390 +4141,6 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
       () => nextConfig,
       () => root,
     ),
-    // "use cache" directive transform:
-    // Detects "use cache" at file-level or function-level and wraps the
-    // exports/functions with registerCachedFunction() from vinext/cache-runtime.
-    // Runs without enforce so it executes after JSX transform (parseAst needs plain JS).
-    {
-      name: "vinext:use-cache",
-
-      configResolved(config) {
-        // Capture the @vitejs/plugin-rsc manager so we can register hoisted
-        // "use cache" functions in the server-reference manifest (build) and
-        // use the correct normalised id for registerServerReference (dev+build).
-        // getPluginApi is defined on the "rsc:minimal" plugin's .api property.
-        if (resolvedRscPath) {
-          // oxlint-disable-next-line typescript/no-explicit-any
-          const api = (config.plugins as any[]).find(
-            // oxlint-disable-next-line typescript/no-explicit-any
-            (p: any) => p && typeof p === "object" && p.name === "rsc:minimal",
-          )?.api;
-          if (api) rscPluginApi = api;
-        }
-      },
-
-      transform: {
-        // Hook filter: only invoke JS when code contains 'use cache'.
-        // The vast majority of files don't use this directive.
-        filter: {
-          id: {
-            include: /\.(tsx?|jsx?|mjs)$/,
-            exclude: /node_modules/,
-          },
-          code: "use cache",
-        },
-        async handler(code, id) {
-          // Defensive guard — duplicates filter logic
-          if (id.includes("node_modules")) return null;
-          if (id.startsWith("\0")) return null;
-          if (!id.match(/\.(tsx?|jsx?|mjs)$/)) return null;
-          if (!code.includes("use cache")) return null;
-
-          // Parse the AST first to check for actual "use cache" directives before
-          // throwing the missing-RSC error. The fast-path string check above can
-          // fire on files that contain "use cache" only in comments or string
-          // literals (e.g., in error messages), not as real directives.
-          const ast = parseAst(code);
-
-          // Check for file-level "use cache" directive
-          const cacheDirective = ast.body.find(
-            (node) =>
-              node.type === "ExpressionStatement" &&
-              node.expression?.type === "Literal" &&
-              typeof node.expression.value === "string" &&
-              node.expression.value.startsWith("use cache"),
-          );
-
-          // Check for function-level "use cache" directives by walking function bodies.
-          // Accepts any function-like node: FunctionDeclaration/Expression, ArrowFunctionExpression,
-          // or MethodDefinition. MethodDefinition stores its FunctionExpression in `.value`, not
-          // `.body`, so we unwrap it here rather than at each call site to keep the callee safe.
-          function nodeHasInlineCacheDirective(node: ASTNode): boolean {
-            if (!node || typeof node !== "object") return false;
-            // MethodDefinition wraps its FunctionExpression in .value; unwrap to reach .body.
-            const fn = node.type === "MethodDefinition" ? node.value : node;
-            // fn.body is a BlockStatement node ({type:"BlockStatement", body:Statement[]}), not
-            // a raw array. Unwrap it. Arrow functions with expression bodies have a non-array
-            // .body — the BlockStatement check handles that case (body.body would be undefined).
-            const stmts: ASTNode[] | null =
-              // oxlint-disable-next-line typescript/no-explicit-any
-              (fn as any)?.body?.type === "BlockStatement" ? (fn as any).body.body : null;
-            if (Array.isArray(stmts)) {
-              for (const stmt of stmts) {
-                if (
-                  stmt?.type === "ExpressionStatement" &&
-                  stmt.expression?.type === "Literal" &&
-                  typeof stmt.expression?.value === "string" &&
-                  /^use cache(:\s*\w+)?$/.test(stmt.expression.value)
-                ) {
-                  return true;
-                }
-              }
-            }
-            return false;
-          }
-          function astHasInlineCache(nodes: ASTNode[]): boolean {
-            for (const node of nodes) {
-              if (!node || typeof node !== "object") continue;
-              if (
-                (node.type === "FunctionDeclaration" ||
-                  node.type === "FunctionExpression" ||
-                  node.type === "ArrowFunctionExpression" ||
-                  node.type === "MethodDefinition") &&
-                nodeHasInlineCacheDirective(node)
-              ) {
-                return true;
-              }
-              // Walk into variable declarations, export declarations, etc.
-              for (const key of Object.keys(node)) {
-                if (key === "type" || key === "start" || key === "end" || key === "loc") continue;
-                const child = node[key as keyof typeof node] as ASTNode;
-                if (Array.isArray(child) && child.some((c) => c && typeof c === "object")) {
-                  if (astHasInlineCache(child)) return true;
-                } else if (child && typeof child === "object" && child.type) {
-                  if (astHasInlineCache([child])) return true;
-                }
-              }
-            }
-            return false;
-          }
-          const hasInlineCache = !cacheDirective && astHasInlineCache(ast.body);
-
-          if (!cacheDirective && !hasInlineCache) return null;
-
-          if (!resolvedRscTransformsPath) {
-            throw new Error(
-              "vinext: 'use cache' requires @vitejs/plugin-rsc to be installed.\n" +
-                "Run: " +
-                detectPackageManager(process.cwd()) +
-                " @vitejs/plugin-rsc",
-            );
-          }
-          const { transformWrapExport, transformHoistInlineDirective } = await import(
-            pathToFileURL(resolvedRscTransformsPath).href
-          );
-
-          if (cacheDirective) {
-            // File-level "use cache" — wrap function exports with
-            // registerCachedFunction. Page default exports are wrapped directly
-            // (they're leaf components). Layout/template defaults are excluded
-            // because they receive {children} from the framework.
-            // oxlint-disable-next-line typescript/no-explicit-any
-            const directiveValue = (cacheDirective as any).expression.value;
-            const variant =
-              directiveValue === "use cache"
-                ? ""
-                : directiveValue.replace("use cache:", "").replace("use cache: ", "").trim();
-
-            // Only skip default export wrapping for layouts and templates —
-            // they receive {children} from the framework which requires
-            // temporary reference handling that registerCachedFunction doesn't
-            // support yet. Pages, not-found, loading, error, and default are
-            // leaf components with no {children} prop and can be cached directly.
-            const isLayoutOrTemplate = /\/(layout|template)\.(tsx?|jsx?|mjs)$/.test(id);
-            const modulePath = stripViteModuleQuery(id);
-            const moduleFileName = path.basename(modulePath);
-            const isAppPageModule =
-              hasAppDir &&
-              isInsideDirectory(appDir, modulePath) &&
-              path.parse(moduleFileName).name === "page" &&
-              fileMatcher.extensionRegex.test(moduleFileName);
-
-            const runtimeModuleUrl = pathToFileURL(
-              resolveShimModulePath(shimsDir, "cache-runtime"),
-            ).href;
-            const result = transformWrapExport(code, ast, {
-              runtime: (value: string, name: string) => {
-                const pageOptions =
-                  name === "default" && isAppPageModule ? `, { appPageDefaultExport: true }` : "";
-                return `(await import(${JSON.stringify(runtimeModuleUrl)})).registerCachedFunction(${value}, ${JSON.stringify(id + ":" + name)}, ${JSON.stringify(variant)}${pageOptions})`;
-              },
-              rejectNonAsyncFunction: false,
-              filter: (name: string, meta: { isFunction?: boolean }) => {
-                // Skip non-functions (constants, types, etc.)
-                if (meta.isFunction === false) return false;
-                // Skip the default export on layout/template files — these
-                // receive {children} from the framework, and caching them
-                // requires temporary reference handling for the children slot.
-                // Named exports (e.g. generateMetadata) are still wrapped.
-                if (isLayoutOrTemplate && name === "default") return false;
-                return true;
-              },
-            });
-
-            if (result.exportNames.length > 0) {
-              // Remove the directive itself so it doesn't cause runtime errors
-              const output = result.output;
-              output.overwrite(
-                cacheDirective.start,
-                cacheDirective.end,
-                `/* "use cache" — wrapped by vinext */`,
-              );
-              return {
-                code: output.toString(),
-                map: output.generateMap({ hires: "boundary" }),
-              };
-            }
-
-            // Even if no exports were wrapped, still strip the directive
-            // (e.g., layout/template file with only a default export)
-            const output = new MagicString(code);
-            output.overwrite(
-              cacheDirective.start,
-              cacheDirective.end,
-              `/* "use cache" — handled by vinext */`,
-            );
-            return {
-              code: output.toString(),
-              map: output.generateMap({ hires: "boundary" }),
-            };
-          }
-
-          // Check for function-level "use cache" directives
-          // (e.g., async function getData() { "use cache"; ... })
-          if (hasInlineCache) {
-            const runtimeModuleUrl2 = pathToFileURL(
-              resolveShimModulePath(shimsDir, "cache-runtime"),
-            ).href;
-
-            // In the RSC environment, inline "use cache" functions that are
-            // passed as props to client components must also be registered as
-            // server references. Without this, the RSC serializer cannot
-            // include them in the RSC payload (they're plain async functions
-            // with no server-reference metadata), so `useActionState` and
-            // `formAction` props fail to serialize.
-            //
-            // Strategy (mirrors Next.js' use-cache SWC transform, where the
-            // exported $$RSC_SERVER_CACHE_n binding IS the cache wrapper):
-            // after hoisting, reassign each hoisted export at module level to
-            // registerCachedServerReference(fn). Exported
-            // function declarations are live bindings, so both the original
-            // call sites and the server-reference manifest (which imports the
-            // module export by name on action POST) observe the wrapped
-            // function. This means a direct client→server invocation of the
-            // cached function goes through the cache, matching Next.js
-            // semantics — not just "callable but uncached".
-            //
-            // The $$id passed to registerServerReference must match how
-            // @vitejs/plugin-rsc resolves server references:
-            //   - build: hashString(toRelativeId(absoluteId))
-            //   - dev:   URL path relative to root (e.g. "/src/app/page.tsx")
-            //
-            // The hoisted export names are also queued for registration in the
-            // plugin-rsc serverReferenceMetaMap (via the
-            // "vinext:use-cache-server-references" plugin below) so the
-            // build-time virtual:vite-rsc/server-references manifest includes
-            // the module and dev-mode reference validation accepts the key.
-            //
-            const isRscEnv = this.environment?.name === "rsc";
-
-            // Compute the normalised reference key that matches what
-            // @vitejs/plugin-rsc's "use server" transform writes. Mirror the
-            // logic from vitePluginUseServer's getNormalizedId():
-            //   build → hashString(manager.toRelativeId(id))
-            //   dev   → URL path under the Vite root
-            let normalizedRefKey: string | null = null;
-            if (isRscEnv) {
-              // oxlint-disable-next-line typescript/no-explicit-any
-              const manager: any = rscPluginApi?.manager ?? null;
-              // Fail loudly when the plugin-rsc manager is unavailable.
-              // Without it, "vinext:use-cache-server-references" cannot write
-              // the serverReferenceMetaMap entry, so wrapping the hoisted
-              // exports anyway would emit a serializable-but-unresolvable
-              // server reference: the RSC payload serialises fine, but the
-              // action POST 404s because the key is absent from the built
-              // server-references manifest (and fails dev-mode reference
-              // validation). The manager is a structural invariant whenever
-              // the "rsc" environment exists ("rsc:minimal" is always part of
-              // the plugin-rsc set and exposes it via .api), so this throw is
-              // believed unreachable — but a loud transform error beats a
-              // silent production 404 if that invariant ever breaks.
-              if (!manager) {
-                throw new Error(
-                  `vinext: cannot register inline "use cache" function(s) in ${id} as server ` +
-                    `references: the @vitejs/plugin-rsc manager is unavailable (no "rsc:minimal" ` +
-                    `plugin with a manager api was found in the resolved Vite config). Refusing ` +
-                    `to emit a server reference that would serialize but never resolve (it would ` +
-                    `404 on action POST).`,
-                );
-              }
-              const projectRoot: string =
-                manager.config?.root ?? this.environment?.config?.root ?? root;
-              if (this.environment?.mode === "build") {
-                // Use the plugin's own toRelativeId so the hash input is
-                // byte-for-byte identical to what plugin-rsc would produce
-                // (path.relative against manager.config.root).
-                const relativeId: string = manager.toRelativeId(id);
-                // hashString from plugin-rsc: sha256 → hex → first 12 chars.
-                normalizedRefKey = createHash("sha256")
-                  .update(relativeId)
-                  .digest()
-                  .toString("hex")
-                  .slice(0, 12);
-              } else {
-                // Dev key. plugin-rsc's getNormalizedId() additionally runs
-                // cleanUrl() on node_modules ids and uses an /@fs/-prefixed
-                // URL for ids outside the project root. Those shapes are not
-                // replicated here on purpose: this transform's filter excludes
-                // node_modules entirely, and the extension-anchored id regex
-                // (/\.(tsx?|jsx?|mjs)$/) rejects ids carrying a ?query, so
-                // neither can reach this point. For under-root source files
-                // the plugin's normalisation reduces to exactly this
-                // root-prefix slice. Ids outside the root (e.g. linked
-                // packages) keep the raw absolute path — unlike the plugin's
-                // /@fs/ URL, but still self-consistent: the same key is
-                // registered in serverReferenceMetaMap (which dev validation
-                // checks) and passed to the dev loader's import(id), which
-                // accepts absolute paths.
-                normalizedRefKey =
-                  id.startsWith(projectRoot + "/") || id.startsWith(projectRoot + "\\")
-                    ? id.slice(projectRoot.length)
-                    : id;
-              }
-            }
-
-            const parseVariant = (directiveMatch: string): string =>
-              directiveMatch === "use cache"
-                ? ""
-                : directiveMatch.replace("use cache:", "").replace("use cache: ", "").trim();
-
-            try {
-              // Hoisted function metadata collected during the transform so the
-              // RSC branch can emit the module-level wrapping afterwards.
-              const hoisted: { name: string; variant: string; hasBoundArgs: boolean }[] = [];
-              const result = transformHoistInlineDirective(code, ast, {
-                directive: /^use cache(:\s*\w+)?$/,
-                runtime: (value: string, name: string, meta: { directiveMatch: string[] }) => {
-                  const variant = parseVariant(meta.directiveMatch[0]);
-                  if (isRscEnv) {
-                    // The hoisted export is wrapped once at module level
-                    // (below); the call site just references it. `.bind()` on
-                    // the wrapped export is handled by the server reference's
-                    // patched bind, which tracks $$bound for serialisation.
-                    hoisted.push({ name, variant, hasBoundArgs: false });
-                    return value;
-                  }
-                  // Non-RSC env: no server-reference metadata needed — wrap the
-                  // call site with the cache runtime only.
-                  return `(await import(${JSON.stringify(runtimeModuleUrl2)})).registerCachedFunction(${value}, ${JSON.stringify(id + ":" + name)}, ${JSON.stringify(variant)})`;
-                },
-                encode: isRscEnv
-                  ? (value: string) => {
-                      const current = hoisted.at(-1);
-                      if (current) current.hasBoundArgs = true;
-                      return `__vinext_encryptActionBoundArgs(${value})`;
-                    }
-                  : undefined,
-                rejectNonAsyncFunction: false,
-              });
-
-              if (result.names.length > 0) {
-                if (isRscEnv && normalizedRefKey !== null) {
-                  // Reassign each hoisted export to the cached + registered
-                  // wrapper at module level. The assignments are PREPENDED:
-                  // hoisted function declarations are initialised before any
-                  // statement executes, so the reassignment runs first and
-                  // every later reader — top-level call sites (e.g.
-                  // `const getData = <inline cache fn>` initialisers, which
-                  // copy the binding value at evaluation time), render-time
-                  // call sites, and the server-references manifest import on
-                  // action POST — observes the wrapped function.
-                  //
-                  const serverRefShimUrl = pathToFileURL(
-                    resolveShimModulePath(shimsDir, "cache-server-reference"),
-                  ).href;
-                  const lines: string[] = [
-                    `import { encryptActionBoundArgs as __vinext_encryptActionBoundArgs, registerCachedServerReference as __vinext_registerCachedServerReference } from ${JSON.stringify(serverRefShimUrl)};`,
-                  ];
-                  for (const { name, variant, hasBoundArgs } of hoisted) {
-                    lines.push(
-                      `${name} = __vinext_registerCachedServerReference(${name}, ${JSON.stringify(id + ":" + name)}, ${JSON.stringify(variant)}, ${JSON.stringify(normalizedRefKey)}, ${JSON.stringify(name)}, ${hasBoundArgs});`,
-                    );
-                  }
-                  result.output.prepend(lines.join("\n") + "\n");
-
-                  // Queue the manifest registration — performed by
-                  // "vinext:use-cache-server-references" after rsc:use-server
-                  // has run (see useCacheServerRefMeta for why).
-                  useCacheServerRefMeta.set(id, {
-                    referenceKey: normalizedRefKey,
-                    exportNames: result.names,
-                  });
-                }
-                return {
-                  code: result.output.toString(),
-                  map: result.output.generateMap({ hires: "boundary" }),
-                };
-              }
-            } catch {
-              // If hoisting fails (e.g., complex closure), fall through
-            }
-          }
-
-          return null;
-        },
-      },
-    },
     createImportMetaUrlPlugin({
       getRoot: () => root,
     }),
@@ -5132,44 +4815,6 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
   if (rscPluginPromise) {
     plugins.push(rscPluginPromise);
     plugins.push(createRscClientReferenceLoadersPlugin());
-    // Registers hoisted "use cache" functions in the plugin-rsc
-    // serverReferenceMetaMap so the build-time
-    // virtual:vite-rsc/server-references manifest includes their modules and
-    // dev-mode reference validation accepts their keys. This plugin MUST be
-    // placed after the plugin-rsc plugins: plugin-rsc's "rsc:use-server"
-    // transform deletes serverReferenceMetaMap[id] for every module whose code
-    // lacks "use server", which would wipe an entry written earlier in the
-    // same transform pipeline by "vinext:use-cache".
-    plugins.push({
-      name: "vinext:use-cache-server-references",
-      transform: {
-        handler(_code, id) {
-          // Consume (get + delete) the pending entry so a later re-transform
-          // of a module that no longer contains "use cache" can't re-register
-          // stale export names.
-          const pending = useCacheServerRefMeta.get(id);
-          if (!pending || this.environment?.name !== "rsc" || !rscPluginApi?.manager) {
-            return null;
-          }
-          useCacheServerRefMeta.delete(id);
-          const metaMap = rscPluginApi.manager.serverReferenceMetaMap;
-          const existing = metaMap[id];
-          // A module can contain both inline "use server" and inline
-          // "use cache" functions. In that case rsc:use-server has already
-          // written an entry for this id — its referenceKey is computed with
-          // the same formula as ours, so the keys agree and only the export
-          // names need to be unioned.
-          metaMap[id] = {
-            importId: id,
-            referenceKey: pending.referenceKey,
-            exportNames: existing
-              ? Array.from(new Set([...existing.exportNames, ...pending.exportNames]))
-              : pending.exportNames,
-          };
-          return null;
-        },
-      },
-    });
   }
 
   return plugins;
