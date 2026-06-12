@@ -51,6 +51,7 @@ import { resolveAppPageMethodResponse } from "./app-page-method.js";
 import { resolveAppPageNavigationParams } from "./app-page-element-builder.js";
 import {
   buildAppPageElement,
+  observeAppPagePreload,
   resolveAppPageInterceptionRerenderTarget,
   resolveAppPageIntercept,
   validateAppPageDynamicParams,
@@ -838,6 +839,12 @@ async function dispatchAppPageInner<TRoute extends AppPageDispatchRoute>(
     return interceptResult.response;
   }
 
+  const pagePreload =
+    !shouldSuppressLoadingBoundaries(options.renderMode ?? APP_RSC_RENDER_MODE_NAVIGATION) &&
+    route.loading?.default
+      ? null
+      : observeAppPagePreload(() => options.probePage());
+
   const pageBuildResult = await buildAppPageElement({
     buildPageElement() {
       if (options.actionFailed) {
@@ -851,6 +858,7 @@ async function dispatchAppPageInner<TRoute extends AppPageDispatchRoute>(
         layoutParamAccess,
       );
     },
+    pagePreload,
     renderErrorBoundaryPage(buildError) {
       return options.renderErrorBoundaryPage(buildError);
     },
@@ -951,7 +959,7 @@ async function dispatchAppPageInner<TRoute extends AppPageDispatchRoute>(
       return options.probeLayoutAt(layoutIndex, layoutParamAccess);
     },
     probePage() {
-      return options.probePage();
+      return pagePreload?.promise ?? options.probePage();
     },
     classification: {
       getLayoutId(index) {

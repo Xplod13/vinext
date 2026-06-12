@@ -38,6 +38,7 @@ type ResolveAppPageGenerateStaticParamsSourcesOptions = {
 
 type BuildAppPageElementOptions<TElement> = {
   buildPageElement: () => Promise<TElement>;
+  pagePreload?: AppPagePreload | null;
   renderErrorBoundaryPage: (error: unknown) => Promise<Response | null>;
   renderSpecialError: (specialError: AppPageSpecialError) => Promise<Response>;
   resolveSpecialError: (error: unknown) => AppPageSpecialError | null;
@@ -47,6 +48,35 @@ type BuildAppPageElementResult<TElement> = {
   element: TElement | null;
   response: Response | null;
 };
+
+export type AppPagePreload = {
+  error: unknown;
+  failed: boolean;
+  promise: Promise<unknown>;
+  settled: boolean;
+};
+
+export function observeAppPagePreload(preload: () => unknown): AppPagePreload {
+  const state: AppPagePreload = {
+    error: undefined,
+    failed: false,
+    promise: Promise.resolve(),
+    settled: false,
+  };
+  const promise = Promise.resolve().then(preload);
+  state.promise = promise;
+  void promise.then(
+    () => {
+      state.settled = true;
+    },
+    (error) => {
+      state.error = error;
+      state.failed = true;
+      state.settled = true;
+    },
+  );
+  return state;
+}
 
 type AppPageInterceptMatch<TPage = unknown> = {
   matchedParams: AppPageParams;
@@ -461,7 +491,11 @@ export async function buildAppPageElement<TElement>(
       response: null,
     };
   } catch (error) {
-    const specialError = options.resolveSpecialError(error);
+    const pageSpecialError =
+      options.pagePreload?.settled && options.pagePreload.failed
+        ? options.resolveSpecialError(options.pagePreload.error)
+        : null;
+    const specialError = pageSpecialError ?? options.resolveSpecialError(error);
     if (specialError) {
       return {
         element: null,
