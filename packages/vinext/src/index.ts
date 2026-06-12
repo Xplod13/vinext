@@ -922,16 +922,11 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
   // so all import() calls in this module use consistent resolution.
   let resolvedReactPath: string | null = null;
   let resolvedRscPath: string | null = null;
-  let resolvedRscTransformsPath: string | null = null;
   // Prefer the user's project graph so vinext shares the app's Vite/plugin
   // instances. In source/workspace development, test fixtures may not declare
   // peer deps explicitly, so fall back to vinext's own install location.
   resolvedReactPath = resolveOptionalDependency(earlyBaseDir, "@vitejs/plugin-react");
   resolvedRscPath = resolveOptionalDependency(earlyBaseDir, "@vitejs/plugin-rsc");
-  resolvedRscTransformsPath = resolveOptionalDependency(
-    earlyBaseDir,
-    "@vitejs/plugin-rsc/transforms",
-  );
 
   // If app/ exists and auto-RSC is enabled, create a lazy Promise that
   // resolves to the configured RSC plugin array. Vite's asyncFlatten
