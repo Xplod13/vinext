@@ -88,6 +88,7 @@ import { emitNextClientRuntimeManifests } from "./build/next-client-runtime-mani
 import { collectInlineCssManifest, injectInlineCssManifestGlobal } from "./build/inline-css.js";
 import { validateDevRequest } from "./server/dev-origin-check.js";
 import { installDevStackSourcemapMiddleware } from "./server/dev-stack-sourcemap.js";
+import { storeDevMiddlewareContext } from "./server/dev-middleware-context-registry.js";
 
 import { scanMetadataFiles } from "./server/metadata-routes.js";
 
@@ -804,7 +805,6 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
   let hasNitroPlugin = false;
   let rscCompatibilityId: string | undefined;
   const draftModeSecret = randomUUID();
-  const middlewareContextSecret = randomBytes(32).toString("hex");
 
   // Per-plugin-instance binding of the Sass-aware CSS Modules Loader. The
   // `config` hook injects `Loader` as `css.modules.Loader` and
@@ -2659,7 +2659,6 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
               publicFiles: scanPublicFileRoutes(root),
               globalNotFoundPath,
               draftModeSecret,
-              middlewareContextSecret,
             },
             instrumentationPath,
           );
@@ -3641,11 +3640,10 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                           }
                         }
                         const mwStatus = result.status ?? result.rewriteStatus;
-                        req.headers[VINEXT_MW_CTX_HEADER] = JSON.stringify({
-                          h: mwCtxEntries,
-                          s: mwStatus ?? null,
-                          r: result.rewriteUrl ?? null,
-                          t: middlewareContextSecret,
+                        req.headers[VINEXT_MW_CTX_HEADER] = storeDevMiddlewareContext({
+                          headers: mwCtxEntries,
+                          status: mwStatus ?? null,
+                          rewriteUrl: result.rewriteUrl ?? null,
                         });
                       }
 

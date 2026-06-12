@@ -171,8 +171,6 @@ type AppRouterConfig = {
   publicFiles?: string[];
   /** Server-only token used to validate the draft-mode bypass cookie. */
   draftModeSecret?: string;
-  /** Server-only token authenticating hybrid dev middleware context. */
-  middlewareContextSecret?: string;
 };
 
 /**
@@ -212,7 +210,6 @@ export function generateRscEntry(
   const hasPagesDir = config?.hasPagesDir ?? false;
   const publicFiles = config?.publicFiles ?? [];
   const draftModeSecret = config?.draftModeSecret ?? randomUUID();
-  const middlewareContextSecret = config?.middlewareContextSecret;
   const manifestCode = buildAppRscManifestCode({
     routes,
     metadataRoutes,
@@ -611,7 +608,6 @@ export default __createAppRscHandler({
   configRedirects: __configRedirects,
   configRewrites: __configRewrites,
   draftModeSecret: __draftModeSecret,
-  middlewareContextSecret: ${JSON.stringify(middlewareContextSecret)},
   dispatchMatchedPage({
     clientReuseManifest,
     cleanPathname,

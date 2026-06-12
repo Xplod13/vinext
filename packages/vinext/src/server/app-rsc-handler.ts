@@ -256,7 +256,6 @@ type CreateAppRscHandlerOptions<TRoute extends AppRscHandlerRoute> = {
   ) => Promise<Response | null>;
   i18nConfig: NextI18nConfig | null;
   isMiddlewareProxy: boolean;
-  middlewareContextSecret?: string;
   loadPrerenderPagesRoutes?: () => Promise<unknown>;
   makeThenableParams: MakeThenableParams;
   matchRoute: (pathname: string) => AppRscRouteMatch<TRoute> | null;
@@ -501,7 +500,6 @@ async function handleAppRscRequest<TRoute extends AppRscHandlerRoute>(
       i18nConfig: options.i18nConfig,
       isDataRequest,
       isProxy: options.isMiddlewareProxy,
-      middlewareContextSecret: options.middlewareContextSecret,
       module: options.middlewareModule,
       request: userlandRequest,
       trailingSlash: options.trailingSlash,
@@ -859,8 +857,8 @@ export function createAppRscHandler<TRoute extends AppRscHandlerRoute>(
     // back to req.headers for .get() / .has(). In the dev server we add
     // x-vinext-mw-ctx to req.headers after the Request is built, so it is
     // visible to .get() but lost when filterInternalHeaders iterates. Read it
-    // BEFORE iterating so the authenticated bridge survives internal-header
-    // filtering. applyForwardedMiddlewareContext verifies its secret before use.
+    // BEFORE iterating so the one-time process-local bridge survives
+    // internal-header filtering. The value is only an opaque registry handle.
     const mwCtx = rawRequest.headers.get(VINEXT_MW_CTX_HEADER);
     // Capture `x-nextjs-data` before filtering — the middleware redirect
     // protocol needs to know whether the inbound request was a `_next/data`
