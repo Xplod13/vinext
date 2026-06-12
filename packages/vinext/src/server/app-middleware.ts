@@ -27,6 +27,7 @@ export type ApplyAppMiddlewareOptions = {
    */
   isDataRequest?: boolean;
   isProxy: boolean;
+  middlewareContextSecret?: string;
   module: MiddlewareModule;
   request: Request;
   /**
@@ -53,6 +54,7 @@ type ForwardedMiddlewareContext = {
   h?: unknown;
   r?: unknown;
   s?: unknown;
+  t?: unknown;
 };
 
 // Re-exported from headers.ts for backward compatibility.
@@ -173,8 +175,9 @@ export async function proxyExternalMiddlewareRewrite(
 function applyForwardedMiddlewareContext(
   request: Request,
   context: AppMiddlewareContext,
+  secret: string | undefined,
 ): { applied: boolean; rewriteUrl?: string } {
-  if (process.env.NODE_ENV === "production") {
+  if (process.env.NODE_ENV === "production" || !secret) {
     return { applied: false };
   }
 
@@ -184,6 +187,7 @@ function applyForwardedMiddlewareContext(
   try {
     const data = JSON.parse(header);
     if (!isForwardedMiddlewareContext(data)) return { applied: false };
+    if (data.t !== secret) return { applied: false };
 
     if (Array.isArray(data.h) && data.h.length > 0) {
       context.headers = new Headers();
@@ -207,7 +211,11 @@ function applyForwardedMiddlewareContext(
 export async function applyAppMiddleware(
   options: ApplyAppMiddlewareOptions,
 ): Promise<ApplyAppMiddlewareResult> {
-  const forwarded = applyForwardedMiddlewareContext(options.request, options.context);
+  const forwarded = applyForwardedMiddlewareContext(
+    options.request,
+    options.context,
+    options.middlewareContextSecret,
+  );
   const middlewareRequest = requestWithoutFlightHeaders(options.request);
   let cleanPathname = options.cleanPathname;
   let search: string | null = null;

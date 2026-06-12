@@ -804,6 +804,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
   let hasNitroPlugin = false;
   let rscCompatibilityId: string | undefined;
   const draftModeSecret = randomUUID();
+  const middlewareContextSecret = randomBytes(32).toString("hex");
 
   // Per-plugin-instance binding of the Sass-aware CSS Modules Loader. The
   // `config` hook injects `Loader` as `css.modules.Loader` and
@@ -2658,6 +2659,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
               publicFiles: scanPublicFileRoutes(root),
               globalNotFoundPath,
               draftModeSecret,
+              middlewareContextSecret,
             },
             instrumentationPath,
           );
@@ -3643,6 +3645,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                           h: mwCtxEntries,
                           s: mwStatus ?? null,
                           r: result.rewriteUrl ?? null,
+                          t: middlewareContextSecret,
                         });
                       }
 
