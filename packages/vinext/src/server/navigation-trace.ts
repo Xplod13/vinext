@@ -5,6 +5,8 @@ type NavigationTraceSchemaVersion = 0;
 export const NavigationTraceReasonCodes = {
   cacheProofRejected: "NC_CACHE_REJECT",
   commitCurrent: "NC_COMMIT",
+  crossDocumentFlight: "NC_CROSS_DOC_FLIGHT",
+  invalidRscPayload: "NC_RSC_INVALID",
   interceptedCommitCurrent: "NC_INTERCEPT_COMMIT",
   interceptedRejectedIncompatibleRoot: "NC_INTERCEPT_REJECT_ROOT",
   interceptedRejectedMissingProof: "NC_INTERCEPT_REJECT_MISSING_PROOF",
@@ -13,13 +15,23 @@ export const NavigationTraceReasonCodes = {
   interceptedRejectedUndeclaredTopology: "NC_INTERCEPT_REJECT_GRAPH",
   interceptedRejectedUnknownSource: "NC_INTERCEPT_REJECT_SOURCE",
   prefetchOnly: "NC_PREFETCH_ONLY",
+  proceedToCommit: "NC_RSC_PROCEED",
+  redirectFollow: "NC_RSC_REDIRECT_FOLLOW",
+  redirectTerminalDepth: "NC_RSC_REDIRECT_DEPTH",
+  redirectTerminalExternal: "NC_RSC_REDIRECT_EXTERNAL",
   requestWork: "NC_REQUEST",
   rootBoundaryChanged: "NC_ROOT",
   rootBoundaryUnknown: "NC_ROOT_UNKNOWN",
+  rscCompatibilityMismatch: "NC_RSC_COMPAT_MISMATCH",
+  sameDocumentScroll: "NC_SAME_DOC_SCROLL",
+  samePageSearch: "NC_SAME_PAGE_SEARCH",
   staleOperation: "NC_STALE",
+  streamedRedirectLoop: "NC_RSC_STREAMED_REDIRECT_LOOP",
 } satisfies Readonly<{
   cacheProofRejected: "NC_CACHE_REJECT";
   commitCurrent: "NC_COMMIT";
+  crossDocumentFlight: "NC_CROSS_DOC_FLIGHT";
+  invalidRscPayload: "NC_RSC_INVALID";
   interceptedCommitCurrent: "NC_INTERCEPT_COMMIT";
   interceptedRejectedIncompatibleRoot: "NC_INTERCEPT_REJECT_ROOT";
   interceptedRejectedMissingProof: "NC_INTERCEPT_REJECT_MISSING_PROOF";
@@ -28,10 +40,18 @@ export const NavigationTraceReasonCodes = {
   interceptedRejectedUndeclaredTopology: "NC_INTERCEPT_REJECT_GRAPH";
   interceptedRejectedUnknownSource: "NC_INTERCEPT_REJECT_SOURCE";
   prefetchOnly: "NC_PREFETCH_ONLY";
+  proceedToCommit: "NC_RSC_PROCEED";
+  redirectFollow: "NC_RSC_REDIRECT_FOLLOW";
+  redirectTerminalDepth: "NC_RSC_REDIRECT_DEPTH";
+  redirectTerminalExternal: "NC_RSC_REDIRECT_EXTERNAL";
   requestWork: "NC_REQUEST";
   rootBoundaryChanged: "NC_ROOT";
   rootBoundaryUnknown: "NC_ROOT_UNKNOWN";
+  rscCompatibilityMismatch: "NC_RSC_COMPAT_MISMATCH";
+  sameDocumentScroll: "NC_SAME_DOC_SCROLL";
+  samePageSearch: "NC_SAME_PAGE_SEARCH";
   staleOperation: "NC_STALE";
+  streamedRedirectLoop: "NC_RSC_STREAMED_REDIRECT_LOOP";
 }>;
 
 export const NavigationTraceTransactionCodes = {
@@ -62,8 +82,11 @@ type NavigationTraceFieldName =
   | "currentVisibleCommitVersion"
   | "nextRootLayoutTreePath"
   | "eventKind"
+  | "fetchResultSource"
   | "operationLane"
   | "pendingOperationId"
+  | "redirectDepth"
+  | "redirectSignal"
   | "startedVisibleCommitVersion"
   | "startedNavigationId"
   | "targetHref"

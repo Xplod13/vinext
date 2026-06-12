@@ -47,6 +47,7 @@ import {
   type LayoutClassificationOptions,
 } from "./app-page-execution.js";
 import { resolveAppPageMethodResponse } from "./app-page-method.js";
+import { resolveAppPageNavigationParams } from "./app-page-element-builder.js";
 import {
   buildAppPageElement,
   resolveAppPageInterceptionRerenderTarget,
@@ -140,6 +141,13 @@ type AppPageModule = {
   revalidate?: unknown;
 };
 
+type AppPageDispatchSlot = {
+  default?: AppPageModule | null;
+  page?: AppPageModule | null;
+  slotPatternParts?: readonly string[] | null;
+  slotParamNames?: readonly string[] | null;
+};
+
 type LayoutSegmentConfigClassification = Readonly<{
   kind: "dynamic" | "static";
   reason: ClassificationReason;
@@ -166,6 +174,7 @@ type AppPageDispatchRoute = {
   params: readonly string[];
   pattern: string;
   routeSegments: readonly string[];
+  slots?: Readonly<Record<string, AppPageDispatchSlot>>;
   unauthorized?: AppPageModule | null;
   unauthorizeds?: readonly (AppPageModule | null | undefined)[];
 };
@@ -204,6 +213,7 @@ type DispatchAppPageOptions<TRoute extends AppPageDispatchRoute> = {
   ) => Promise<AppPageElement>;
   clientReuseManifest?: ClientReuseManifestParseResult;
   cleanPathname: string;
+  displayPathname?: string;
   clearRequestContext: () => void;
   createRscOnErrorHandler: (pathname: string, routePath: string) => AppPageBoundaryOnError;
   debugClassification?: (layoutId: string, reason: ClassificationReason) => void;
@@ -412,6 +422,7 @@ async function runAppPageRevalidationContext<
 >(
   options: {
     cleanPathname: string;
+    displayPathname?: string;
     currentFetchCacheMode?: FetchCacheMode | null;
     draftModeSecret: string;
     dynamicConfig?: string;
@@ -439,7 +450,7 @@ async function runAppPageRevalidationContext<
     ensureFetchPatch();
     setCurrentFetchSoftTags(buildAppPageTags(options.cleanPathname, [], options.routeSegments));
     options.setNavigationContext({
-      pathname: options.cleanPathname,
+      pathname: options.displayPathname ?? options.cleanPathname,
       searchParams: new URLSearchParams(),
       params: options.params,
     });
@@ -522,10 +533,16 @@ async function dispatchAppPageInner<TRoute extends AppPageDispatchRoute>(
         routePattern: route.pattern,
       }),
     );
+    const staticNavigationParams = resolveAppPageNavigationParams(
+      route,
+      options.params,
+      options.cleanPathname,
+      null,
+    );
     options.setNavigationContext({
-      pathname: options.cleanPathname,
+      pathname: options.displayPathname ?? options.cleanPathname,
       searchParams: new URLSearchParams(),
-      params: options.params,
+      params: staticNavigationParams,
     });
   }
 
@@ -577,6 +594,18 @@ async function dispatchAppPageInner<TRoute extends AppPageDispatchRoute>(
             return toInterceptOptions(options.interceptionContext, intercept);
           },
         });
+        // Use the full navigationParams (not narrowed params) as the base so
+        // interception-specific extras from a source-route intercept survive
+        // the slot param merge.  resolveAppPageNavigationParams preserves all
+        // base keys and overlays active slot params on top; when narrowed
+        // params were used here, non-slot extras were silently dropped.
+        const mergedNavigationParams = resolveAppPageNavigationParams(
+          revalidationTarget.route,
+          revalidationTarget.navigationParams,
+          options.cleanPathname,
+          revalidationTarget.interceptOpts,
+        );
+        revalidationTarget.navigationParams = mergedNavigationParams;
 
         // Hydrate the (possibly different) source route before reading its
         // page module for fetch-cache-mode resolution.
@@ -584,6 +613,7 @@ async function dispatchAppPageInner<TRoute extends AppPageDispatchRoute>(
         return runAppPageRevalidationContext(
           {
             cleanPathname: options.cleanPathname,
+            displayPathname: options.displayPathname,
             currentFetchCacheMode:
               options.resolveRouteFetchCacheMode?.(revalidationTarget.route) ??
               (revalidationTarget.route === route ? (options.fetchCache ?? null) : null),
@@ -759,6 +789,9 @@ async function dispatchAppPageInner<TRoute extends AppPageDispatchRoute>(
     },
     isRscRequest: options.isRscRequest,
     layoutParamAccess,
+    resolveNavigationParams(sourceRoute, navigationParams, pathname, interceptOpts) {
+      return resolveAppPageNavigationParams(sourceRoute, navigationParams, pathname, interceptOpts);
+    },
     renderInterceptResponse(sourceRoute, interceptElement) {
       const interceptOnError = options.createRscOnErrorHandler(
         options.cleanPathname,
@@ -814,6 +847,17 @@ async function dispatchAppPageInner<TRoute extends AppPageDispatchRoute>(
   if (pageBuildResult.response) {
     return pageBuildResult.response;
   }
+  const navigationParams = resolveAppPageNavigationParams(
+    route,
+    options.params,
+    options.cleanPathname,
+    interceptResult.interceptOpts,
+  );
+  options.setNavigationContext({
+    pathname: options.displayPathname ?? options.cleanPathname,
+    searchParams: options.searchParams,
+    params: navigationParams,
+  });
 
   const layoutClassifications = getEffectiveLayoutClassifications(
     route,
@@ -878,6 +922,7 @@ async function dispatchAppPageInner<TRoute extends AppPageDispatchRoute>(
     layoutCount: route.layouts.length,
     loadSsrHandler: options.loadSsrHandler,
     middlewareContext: options.middlewareContext,
+    navigationParams,
     params: options.params,
     layoutParamAccess,
     rootParams: options.rootParams,
@@ -934,9 +979,6 @@ async function dispatchAppPageInner<TRoute extends AppPageDispatchRoute>(
       return renderPageSpecialError(options, specialError);
     },
     renderToReadableStream: options.renderToReadableStream,
-    routeHasLocalBoundary: Boolean(
-      route.error?.default || route.errors?.some((errorModule) => errorModule?.default),
-    ),
     routePattern: route.pattern,
     runWithSuppressedHookWarning(probe) {
       return options.runWithSuppressedHookWarning(probe);

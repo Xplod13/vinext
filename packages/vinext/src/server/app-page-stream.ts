@@ -205,11 +205,6 @@ type AppPageRscErrorTracker = {
   onRenderError: (error: unknown, requestInfo: unknown, errorContext: unknown) => unknown;
 };
 
-type ShouldRerenderAppPageWithGlobalErrorOptions = {
-  capturedError: unknown;
-  hasLocalBoundary: boolean;
-};
-
 export function createAppPageFontData(options: CreateAppPageFontDataOptions): AppPageFontData {
   return {
     links: options.getLinks(),
@@ -400,10 +395,4 @@ export function createAppPageRscErrorTracker(
       return baseOnError(error, requestInfo, errorContext);
     },
   };
-}
-
-export function shouldRerenderAppPageWithGlobalError(
-  options: ShouldRerenderAppPageWithGlobalErrorOptions,
-): boolean {
-  return Boolean(options.capturedError) && !options.hasLocalBoundary;
 }

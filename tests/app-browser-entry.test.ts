@@ -1,6 +1,9 @@
 import React from "react";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
-import { createOnUncaughtError } from "../packages/vinext/src/server/app-browser-error.js";
+import {
+  createOnUncaughtError,
+  prodOnCaughtError,
+} from "../packages/vinext/src/server/app-browser-error.js";
 import {
   createDiscardedServerActionRefreshScheduler,
   createServerActionInitiationSnapshot,
@@ -93,7 +96,10 @@ import {
   HistoryStateSnapshotCache,
   RestorableClientStateController,
 } from "../packages/vinext/src/server/app-history-state.js";
-import { resolveRscRedirectLifecycleHop } from "../packages/vinext/src/server/app-browser-rsc-redirect.js";
+import {
+  resolveRscRedirectLifecycleHop,
+  resolveStreamedRscRedirectLifecycleHop,
+} from "../packages/vinext/src/server/app-browser-rsc-redirect.js";
 import {
   applyApprovedVisibleCommit,
   approveHmrVisibleCommit,
@@ -5726,6 +5732,113 @@ describe("app browser RSC redirect lifecycle", () => {
       redirectDepth: 2,
     });
   });
+
+  it("preserves streamed redirect target hashes", () => {
+    const decision = resolveStreamedRscRedirectLifecycleHop({
+      currentHref: "/old#old",
+      historyUpdateMode: "replace",
+      origin: "https://example.com",
+      redirectDepth: 0,
+      requestPreviousNextUrl: null,
+      streamedRedirectTarget: "/new#new",
+    });
+
+    expect(decision).toEqual({
+      href: "/new#new",
+      historyUpdateMode: "replace",
+      kind: "follow",
+      previousNextUrl: null,
+      redirectDepth: 1,
+    });
+  });
+
+  it("treats streamed hash-only same-path changes as redirects", () => {
+    const decision = resolveStreamedRscRedirectLifecycleHop({
+      currentHref: "/same#old",
+      historyUpdateMode: "push",
+      origin: "https://example.com",
+      redirectDepth: 0,
+      requestPreviousNextUrl: "/feed",
+      streamedRedirectTarget: "/same#new",
+    });
+
+    expect(decision).toEqual({
+      href: "/same#new",
+      historyUpdateMode: "push",
+      kind: "follow",
+      previousNextUrl: "/feed",
+      redirectDepth: 1,
+    });
+  });
+
+  it("preserves streamed redirect visible query params and hash", () => {
+    const decision = resolveStreamedRscRedirectLifecycleHop({
+      currentHref: "/source",
+      historyUpdateMode: "replace",
+      origin: "https://example.com",
+      redirectDepth: 1,
+      requestPreviousNextUrl: null,
+      streamedRedirectTarget: "/target.rsc?visible=1&_rsc=abc#details",
+    });
+
+    expect(decision).toEqual({
+      href: "/target.rsc?visible=1&_rsc=abc#details",
+      historyUpdateMode: "replace",
+      kind: "follow",
+      previousNextUrl: null,
+      redirectDepth: 2,
+    });
+  });
+
+  it("turns same-target streamed redirects into no-redirect decisions", () => {
+    const decision = resolveStreamedRscRedirectLifecycleHop({
+      currentHref: "/same?tab=1#section",
+      historyUpdateMode: "replace",
+      origin: "https://example.com",
+      redirectDepth: 0,
+      requestPreviousNextUrl: null,
+      streamedRedirectTarget: "/same?tab=1#section",
+    });
+
+    expect(decision).toEqual({ href: "/same?tab=1#section", kind: "no-redirect" });
+  });
+
+  it("turns external streamed redirects into terminal hard navigations", () => {
+    const decision = resolveStreamedRscRedirectLifecycleHop({
+      currentHref: "/account",
+      historyUpdateMode: "replace",
+      origin: "https://example.com",
+      redirectDepth: 0,
+      requestPreviousNextUrl: null,
+      streamedRedirectTarget: "https://idp.example/login#step",
+    });
+
+    expect(decision).toEqual({
+      href: "https://idp.example/login#step",
+      kind: "terminal-hard-navigation",
+      reason: "externalRedirect",
+      redirectDepth: 0,
+    });
+  });
+
+  it("turns over-budget streamed redirects into terminal hard navigations", () => {
+    const decision = resolveStreamedRscRedirectLifecycleHop({
+      currentHref: "/a",
+      historyUpdateMode: "replace",
+      maxRedirectDepth: 2,
+      origin: "https://example.com",
+      redirectDepth: 2,
+      requestPreviousNextUrl: null,
+      streamedRedirectTarget: "/b#target",
+    });
+
+    expect(decision).toEqual({
+      href: "/b#target",
+      kind: "terminal-hard-navigation",
+      reason: "maxRedirectsExceeded",
+      redirectDepth: 2,
+    });
+  });
 });
 
 describe("devOnCaughtError (hydrateRoot dev handler)", () => {
@@ -6338,6 +6451,91 @@ describe("createOnUncaughtError (hydrateRoot uncaught handler)", () => {
         handler(new Error("late error"), {});
         expect(assignSpy).toHaveBeenCalledWith("/second");
       });
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+});
+
+describe("prodOnCaughtError (hydrateRoot prod handler)", () => {
+  it("ignores redirect sentinels handled by RedirectBoundary", () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      prodOnCaughtError(
+        Object.assign(new Error("NEXT_REDIRECT:/result"), {
+          digest: "NEXT_REDIRECT;;%2Fresult",
+        }),
+        { componentStack: "\n    at Root" },
+      );
+      expect(consoleSpy).not.toHaveBeenCalled();
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it("ignores notFound and HTTP fallback sentinels (notFound/forbidden/unauthorized)", () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      prodOnCaughtError(Object.assign(new Error("NEXT_NOT_FOUND"), { digest: "NEXT_NOT_FOUND" }), {
+        componentStack: "\n    at Page",
+      });
+      prodOnCaughtError(
+        Object.assign(new Error("NEXT_HTTP_ERROR_FALLBACK;403"), {
+          digest: "NEXT_HTTP_ERROR_FALLBACK;403",
+        }),
+        { componentStack: "\n    at Page" },
+      );
+      expect(consoleSpy).not.toHaveBeenCalled();
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it("forwards real caught errors to console.error", () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const err = new Error("Maximum update depth exceeded");
+      prodOnCaughtError(err, { componentStack: "\n    at List\n    at Apps" });
+      const loggedErrors = consoleSpy.mock.calls.map((args) => args[0]);
+      expect(loggedErrors).toContain(err);
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it("includes the React component stack in the log when provided", () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      prodOnCaughtError(new Error("boom"), {
+        componentStack: "\n    at List (apps/list.tsx:202)",
+      });
+      expect(consoleSpy).toHaveBeenCalledTimes(2);
+      expect(String(consoleSpy.mock.calls[1][0])).toContain("apps/list.tsx:202");
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it("logs only the error when no component stack is provided", () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const err = new Error("no stack");
+      prodOnCaughtError(err, {});
+      expect(consoleSpy).toHaveBeenCalledTimes(1);
+      expect(consoleSpy.mock.calls[0][0]).toBe(err);
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it("does not swallow a plain error that merely mentions NEXT_REDIRECT (no digest)", () => {
+    // Classification is digest-based; an error whose *message* contains the
+    // sentinel text but has no framework digest must still be logged.
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const err = new Error("user code threw: NEXT_REDIRECT");
+      prodOnCaughtError(err, {});
+      expect(consoleSpy.mock.calls.map((args) => args[0])).toContain(err);
     } finally {
       consoleSpy.mockRestore();
     }

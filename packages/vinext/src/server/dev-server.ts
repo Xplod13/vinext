@@ -7,6 +7,13 @@ import type { ModuleImporter } from "./instrumentation.js";
 import { importModule, reportRequestError } from "./instrumentation.js";
 import type { NextI18nConfig } from "../config/next-config.js";
 import { buildCacheStateHeaders } from "./cache-headers.js";
+import { NEXTJS_DEPLOYMENT_ID_HEADER } from "./headers.js";
+import {
+  decideIsr,
+  buildMissIsrCacheControl,
+  ISR_NEVER_CACHE_CONTROL,
+  ISR_NO_STORE_CACHE_CONTROL,
+} from "./isr-decision.js";
 import {
   isrGet,
   isrSet,
@@ -114,7 +121,14 @@ function writeGsspRedirect(
   }
 
   if (isDataReq) {
-    res.writeHead(200, { "Content-Type": "application/json" });
+    // Mirror Next.js pages-handler.ts: set x-nextjs-deployment-id on all
+    // `_next/data` redirect exits for deployment-skew protection. Fixes #1829.
+    const deploymentId = process.env.__VINEXT_DEPLOYMENT_ID || process.env.NEXT_DEPLOYMENT_ID;
+    const dataHeaders: Record<string, string> = { "Content-Type": "application/json" };
+    if (deploymentId) {
+      dataHeaders[NEXTJS_DEPLOYMENT_ID_HEADER] = deploymentId;
+    }
+    res.writeHead(200, dataHeaders);
     res.end(JSON.stringify({ pageProps: { __N_REDIRECT: dest, __N_REDIRECT_STATUS: status } }));
     return;
   }
@@ -504,7 +518,12 @@ export function createSSRHandler(
       if (isDataReq) {
         // Stale client requested data for a page that no longer exists.
         // Emit a JSON 404 so the client hard-navigates (matches Next.js).
-        res.writeHead(404, { "Content-Type": "application/json" });
+        // Mirror Next.js pages-handler.ts: set x-nextjs-deployment-id on
+        // `_next/data` notFound exits for deployment-skew protection. Fixes #1829.
+        const deploymentId = process.env.__VINEXT_DEPLOYMENT_ID || process.env.NEXT_DEPLOYMENT_ID;
+        const notFoundHeaders: Record<string, string> = { "Content-Type": "application/json" };
+        if (deploymentId) notFoundHeaders[NEXTJS_DEPLOYMENT_ID_HEADER] = deploymentId;
+        res.writeHead(404, notFoundHeaders);
         res.end("{}");
         return;
       }
@@ -692,7 +711,15 @@ export function createSSRHandler(
             if (isDataReq) {
               // Data requests get a JSON 404 so the client router can
               // hard-navigate instead of trying to parse HTML as JSON.
-              res.writeHead(404, { "Content-Type": "application/json" });
+              // Mirror Next.js pages-handler.ts: set x-nextjs-deployment-id on
+              // `_next/data` notFound exits for deployment-skew protection. Fixes #1829.
+              const deploymentId =
+                process.env.__VINEXT_DEPLOYMENT_ID || process.env.NEXT_DEPLOYMENT_ID;
+              const notFoundHeaders: Record<string, string> = {
+                "Content-Type": "application/json",
+              };
+              if (deploymentId) notFoundHeaders[NEXTJS_DEPLOYMENT_ID_HEADER] = deploymentId;
+              res.writeHead(404, notFoundHeaders);
               res.end("{}");
               return;
             }
@@ -775,7 +802,15 @@ export function createSSRHandler(
           }
           if (result && "notFound" in result && result.notFound) {
             if (isDataReq) {
-              res.writeHead(404, { "Content-Type": "application/json" });
+              // Mirror Next.js pages-handler.ts: set x-nextjs-deployment-id on
+              // `_next/data` notFound exits for deployment-skew protection. Fixes #1829.
+              const deploymentId =
+                process.env.__VINEXT_DEPLOYMENT_ID || process.env.NEXT_DEPLOYMENT_ID;
+              const notFoundHeaders: Record<string, string> = {
+                "Content-Type": "application/json",
+              };
+              if (deploymentId) notFoundHeaders[NEXTJS_DEPLOYMENT_ID_HEADER] = deploymentId;
+              res.writeHead(404, notFoundHeaders);
               res.end("{}");
               return;
             }
@@ -833,8 +868,7 @@ export function createSSRHandler(
             (k) => k.toLowerCase() === "cache-control",
           );
           if (!hasUserCacheControl) {
-            gsspExtraHeaders["Cache-Control"] =
-              "private, no-cache, no-store, max-age=0, must-revalidate";
+            gsspExtraHeaders["Cache-Control"] = ISR_NEVER_CACHE_CONTROL;
           }
         }
         // Collect font preloads early so ISR cached responses can include
@@ -894,10 +928,15 @@ export function createSSRHandler(
             const cachedHtml = cachedPage.html;
             const transformedHtml = await server.transformIndexHtml(url, cachedHtml);
             const revalidateSecs = getRevalidateDuration(cacheKey) ?? 60;
+            const { cacheControl: hitCacheControl } = decideIsr({
+              cacheState: "HIT",
+              kind: "dev",
+              revalidateSeconds: revalidateSecs,
+            });
             const hitHeaders: Record<string, string> = {
               "Content-Type": "text/html",
               ...buildCacheStateHeaders("HIT"),
-              "Cache-Control": `s-maxage=${revalidateSecs}, stale-while-revalidate`,
+              "Cache-Control": hitCacheControl,
             };
             if (earlyFontLinkHeader) hitHeaders["Link"] = earlyFontLinkHeader;
             res.writeHead(200, hitHeaders);
@@ -1058,10 +1097,18 @@ export function createSSRHandler(
             );
 
             const revalidateSecs = getRevalidateDuration(cacheKey) ?? 60;
+            // Deliberate parity fix: dev STALE now emits s-maxage=0, stale-while-revalidate
+            // matching prod Pages Router and the canonical buildCachedRevalidateCacheControl
+            // helper. Previously emitted s-maxage=<secs> which was a dev/prod divergence.
+            const { cacheControl: staleCacheControl } = decideIsr({
+              cacheState: "STALE",
+              kind: "dev",
+              revalidateSeconds: revalidateSecs,
+            });
             const staleHeaders: Record<string, string> = {
               "Content-Type": "text/html",
               ...buildCacheStateHeaders("STALE"),
-              "Cache-Control": `s-maxage=${revalidateSecs}, stale-while-revalidate`,
+              "Cache-Control": staleCacheControl,
             };
             if (earlyFontLinkHeader) staleHeaders["Link"] = earlyFontLinkHeader;
             res.writeHead(200, staleHeaders);
@@ -1095,7 +1142,15 @@ export function createSSRHandler(
           }
           if (result && "notFound" in result && result.notFound) {
             if (isDataReq) {
-              res.writeHead(404, { "Content-Type": "application/json" });
+              // Mirror Next.js pages-handler.ts: set x-nextjs-deployment-id on
+              // `_next/data` notFound exits for deployment-skew protection. Fixes #1829.
+              const deploymentId =
+                process.env.__VINEXT_DEPLOYMENT_ID || process.env.NEXT_DEPLOYMENT_ID;
+              const notFoundHeaders: Record<string, string> = {
+                "Content-Type": "application/json",
+              };
+              if (deploymentId) notFoundHeaders[NEXTJS_DEPLOYMENT_ID_HEADER] = deploymentId;
+              res.writeHead(404, notFoundHeaders);
               res.end("{}");
               return;
             }
@@ -1165,6 +1220,19 @@ export function createSSRHandler(
           if (gsspExtraHeaders) {
             for (const [k, v] of Object.entries(gsspExtraHeaders)) {
               dataHeaders[k] = v;
+            }
+          }
+          // Mirror Next.js pages-handler.ts: set x-nextjs-deployment-id on
+          // every _next/data response so the client router can detect a new
+          // deployment and trigger a hard navigation (deployment-skew
+          // protection). Next.js skips the success path for /_error and /500
+          // (`!isErrorPage && !is500Page`). Fixes #1829.
+          const dataRoutePattern = patternToNextFormat(route.pattern);
+          if (dataRoutePattern !== "/_error" && dataRoutePattern !== "/500") {
+            const deploymentId =
+              process.env.__VINEXT_DEPLOYMENT_ID || process.env.NEXT_DEPLOYMENT_ID;
+            if (deploymentId) {
+              dataHeaders[NEXTJS_DEPLOYMENT_ID_HEADER] = deploymentId;
             }
           }
           res.writeHead(statusCode ?? 200, dataHeaders);
@@ -1378,10 +1446,9 @@ hydrate();
         };
         if (isrRevalidateSeconds) {
           if (scriptNonce) {
-            extraHeaders["Cache-Control"] = "no-store, must-revalidate";
+            extraHeaders["Cache-Control"] = ISR_NO_STORE_CACHE_CONTROL;
           } else {
-            extraHeaders["Cache-Control"] =
-              `s-maxage=${isrRevalidateSeconds}, stale-while-revalidate`;
+            extraHeaders["Cache-Control"] = buildMissIsrCacheControl(isrRevalidateSeconds);
             Object.assign(extraHeaders, buildCacheStateHeaders("MISS"));
           }
         }

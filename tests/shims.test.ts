@@ -1456,118 +1456,6 @@ describe("next/error shim — unstable_catchError", () => {
     expect(html).toContain("hello");
   });
 
-  it("class-component lifecycle catches non-router errors and renders the fallback", async () => {
-    // React 19's renderToStaticMarkup does NOT invoke error boundaries during
-    // SSR — errors propagate up by design (boundaries only run during client
-    // commit). To validate behavior without spinning up a real browser, we
-    // exercise the lifecycle hooks directly: `getDerivedStateFromError` is
-    // the canonical predicate driving the class component's behavior, and
-    // its return value is the only thing the React runtime feeds into the
-    // next render.
-    const React = (await import("react")).default;
-    const { renderToStaticMarkup } = await import("react-dom/server");
-    const { unstable_catchError } = await import("../packages/vinext/src/shims/error.js");
-
-    const seenErrors: unknown[] = [];
-    function Fallback(
-      props: { title: string },
-      info: { error: unknown; reset: () => void; unstable_retry: () => void },
-    ) {
-      seenErrors.push(info.error);
-      const message = info.error instanceof Error ? info.error.message : String(info.error);
-      return React.createElement(
-        "div",
-        null,
-        React.createElement("p", { id: "title" }, props.title),
-        React.createElement("p", { id: "msg" }, message),
-      );
-    }
-
-    const Boundary = unstable_catchError<{ title: string }>(Fallback);
-
-    // Locate the inner class component by inspecting what the HOC renders.
-    // The wrapper function returns `React.createElement(_CatchError, ...)`.
-    const wrapperResult = (
-      Boundary as unknown as (props: {
-        title: string;
-        children?: React.ReactNode;
-      }) => React.ReactElement
-    )({
-      title: "hello-title",
-      children: React.createElement("span", null, "child"),
-    });
-    const InnerCatchError = wrapperResult.type as unknown as React.ComponentClass<{
-      fallback: typeof Fallback;
-      forwardedProps: { title: string };
-      children?: React.ReactNode;
-    }>;
-
-    const props = {
-      fallback: Fallback,
-      forwardedProps: { title: "hello-title" },
-      children: React.createElement("span", null, "child"),
-    };
-    // Cast through unknown to instantiate without engaging React's renderer.
-    const instance = new (InnerCatchError as unknown as new (p: typeof props) => InstanceType<
-      typeof InnerCatchError
-    > & {
-      state: { error: { thrownValue: unknown } | null };
-      render(): React.ReactNode;
-    })(props);
-    instance.state = { error: null };
-
-    // 1. No error → renders children.
-    const childrenOutput = renderToStaticMarkup(instance.render() as React.ReactElement);
-    expect(childrenOutput).toContain("child");
-
-    // 2. After getDerivedStateFromError, renders the fallback with ErrorInfo.
-    const thrown = new Error("boom");
-    const derived = (
-      InnerCatchError as unknown as {
-        getDerivedStateFromError(e: unknown): { error: { thrownValue: unknown } | null };
-      }
-    ).getDerivedStateFromError(thrown);
-    expect(derived).toEqual({ error: { thrownValue: thrown } });
-    instance.state = derived;
-    const fallbackOutput = renderToStaticMarkup(instance.render() as React.ReactElement);
-    expect(fallbackOutput).toContain('id="msg"');
-    expect(fallbackOutput).toContain("boom");
-    expect(fallbackOutput).toContain("hello-title");
-    expect(seenErrors[seenErrors.length - 1]).toBe(thrown);
-  });
-
-  it("class-component getDerivedStateFromError re-throws Next.js router errors", async () => {
-    const { unstable_catchError } = await import("../packages/vinext/src/shims/error.js");
-    const { redirect } = await import("../packages/vinext/src/shims/navigation.js");
-
-    function Fallback() {
-      return null;
-    }
-    const Boundary = unstable_catchError(Fallback);
-
-    // Probe the inner class through the wrapper.
-    const wrapperResult = (Boundary as unknown as (p: Record<string, never>) => { type: unknown })(
-      {},
-    );
-    const InnerCatchError = wrapperResult.type as unknown as {
-      getDerivedStateFromError(e: unknown): unknown;
-    };
-
-    let captured: unknown = null;
-    try {
-      redirect("/login");
-    } catch (e) {
-      captured = e;
-    }
-    expect(() => InnerCatchError.getDerivedStateFromError(captured)).toThrow();
-    try {
-      InnerCatchError.getDerivedStateFromError(captured);
-    } catch (rethrown) {
-      // Identity-preserving rethrow.
-      expect(rethrown).toBe(captured);
-    }
-  });
-
   it("rethrows Next.js navigation signals (redirect, notFound) instead of catching them", async () => {
     const React = (await import("react")).default;
     const { renderToStaticMarkup } = await import("react-dom/server");
@@ -1626,16 +1514,25 @@ describe("next/error shim — unstable_catchError", () => {
   // (`isNextRouterError`) must not crash on null/undefined inputs.
   it("class-component getDerivedStateFromError accepts null thrown values", async () => {
     const React = (await import("react")).default;
+    const { renderToStaticMarkup } = await import("react-dom/server");
     const { unstable_catchError } = await import("../packages/vinext/src/shims/error.js");
 
     function Fallback() {
       return null;
     }
     const Boundary = unstable_catchError(Fallback);
-    const wrapperResult = (Boundary as unknown as (p: Record<string, never>) => { type: unknown })(
-      {},
-    );
-    const InnerCatchError = wrapperResult.type as unknown as {
+
+    // The Boundary wrapper is a function component that calls hooks
+    // (usePathname, useContext). We must call it inside a React render
+    // so React's dispatcher is active.
+    let wrapperResult: React.ReactElement | null = null;
+    function Capture() {
+      wrapperResult = (Boundary as unknown as (p: Record<string, never>) => React.ReactElement)({});
+      return React.createElement("span");
+    }
+    renderToStaticMarkup(React.createElement(Capture));
+
+    const InnerCatchError = wrapperResult!.type as unknown as {
       getDerivedStateFromError(e: unknown): { error: { thrownValue: unknown } | null };
     };
 
@@ -1656,42 +1553,137 @@ describe("next/error shim — unstable_catchError", () => {
     });
   });
 
-  // unstable_retry behavior parity. Next.js refreshes the App Router segment
-  // and resets the boundary. vinext does the same on the client; on the
-  // server we throw (refresh is meaningless during SSR setup).
-  it("unstable_retry throws on the server (where refresh is meaningless)", async () => {
+  // class-component lifecycle catches non-router errors and renders the fallback
+  it("class-component lifecycle catches non-router errors and renders the fallback", async () => {
+    // React 19's renderToStaticMarkup does NOT invoke error boundaries during
+    // SSR — errors propagate up by design (boundaries only run during client
+    // commit). To validate behavior without spinning up a real browser, we
+    // exercise the lifecycle hooks directly: `getDerivedStateFromError` is
+    // the canonical predicate driving the class component's behavior, and
+    // its return value is the only thing the React runtime feeds into the
+    // next render.
     const React = (await import("react")).default;
+    const { renderToStaticMarkup } = await import("react-dom/server");
     const { unstable_catchError } = await import("../packages/vinext/src/shims/error.js");
 
-    function Fallback(
-      _props: Record<string, never>,
-      info: { error: unknown; reset: () => void; unstable_retry: () => void },
-    ) {
-      return React.createElement("button", { onClick: info.unstable_retry }, "retry");
+    const seenErrors: unknown[] = [];
+    function Fallback({
+      props,
+      errorInfo,
+    }: {
+      props: { title: string };
+      errorInfo: { error: unknown; reset: () => void; unstable_retry: () => void };
+    }) {
+      seenErrors.push(errorInfo.error);
+      const message =
+        errorInfo.error instanceof Error ? errorInfo.error.message : String(errorInfo.error);
+      return React.createElement(
+        "div",
+        null,
+        React.createElement("p", { id: "title" }, props.title),
+        React.createElement("p", { id: "msg" }, message),
+      );
+    }
+
+    // `as any` is necessary here because this test probes the inner
+    // `_CatchError` class component directly, where `Fallback` is used
+    // as a React component type (receives `{ props, errorInfo }` as a
+    // single props object per React.createElement semantics), matching
+    // the internal wrapper shape rather than the public API signature
+    // `(props: P, errorInfo: ErrorInfo) => React.ReactNode`.
+    const Boundary = unstable_catchError<{ title: string }>(Fallback as any);
+
+    // The Boundary wrapper is a function component that calls hooks.
+    // We must call it inside a React render so React's dispatcher is active.
+    let wrapperResult: React.ReactElement | null = null;
+    function Capture() {
+      wrapperResult = (
+        Boundary as unknown as (props: {
+          title: string;
+          children?: React.ReactNode;
+        }) => React.ReactElement
+      )({
+        title: "hello-title",
+        children: React.createElement("span", null, "child"),
+      });
+      return React.createElement("span");
+    }
+    renderToStaticMarkup(React.createElement(Capture));
+
+    const InnerCatchError = wrapperResult!.type as unknown as React.ComponentClass<{
+      fallback: typeof Fallback;
+      props: { title: string };
+      children?: React.ReactNode;
+    }> & {
+      getDerivedStateFromError(thrownValue: unknown): { error: { thrownValue: unknown } | null };
+    };
+
+    const props = {
+      fallback: Fallback,
+      props: { title: "hello-title" },
+      children: React.createElement("span", null, "child"),
+    };
+    // Cast through unknown to instantiate without engaging React's renderer.
+    const instance = new (InnerCatchError as unknown as new (p: typeof props) => InstanceType<
+      typeof InnerCatchError
+    > & {
+      state: { error: { thrownValue: unknown } | null };
+      render(): React.ReactNode;
+    })(props);
+
+    // Before an error: children render untouched.
+    expect(renderToStaticMarkup(instance.render() as React.ReactElement)).toContain("child");
+
+    // Simulate React calling getDerivedStateFromError with a thrown Error.
+    const thrown = new Error("boom");
+    const derived = InnerCatchError.getDerivedStateFromError(thrown);
+    expect(derived).toEqual({ error: { thrownValue: thrown } });
+
+    // Feed the derived state into the instance and render the fallback.
+    instance.state = derived as { error: { thrownValue: unknown } | null };
+    const fallbackOutput = renderToStaticMarkup(instance.render() as React.ReactElement);
+    expect(fallbackOutput).toContain("boom");
+    expect(fallbackOutput).toContain("hello-title");
+    expect(seenErrors[seenErrors.length - 1]).toBe(thrown);
+  });
+
+  it("class-component getDerivedStateFromError re-throws Next.js router errors", async () => {
+    const React = (await import("react")).default;
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { unstable_catchError } = await import("../packages/vinext/src/shims/error.js");
+    const { redirect } = await import("../packages/vinext/src/shims/navigation.js");
+
+    function Fallback() {
+      return null;
     }
     const Boundary = unstable_catchError(Fallback);
-    // Probe the inner class for its instance shape.
-    const wrapperResult = (Boundary as unknown as (p: Record<string, never>) => { type: unknown })(
-      {},
-    );
-    const InnerCatchError = wrapperResult.type as unknown as new (props: object) => {
-      state: { error: { thrownValue: unknown } | null };
-      unstable_retry: () => void;
-    };
-    const instance = new InnerCatchError({
-      fallback: Fallback,
-      forwardedProps: {},
-    });
-    // Manually instantiating the class skips React's context machinery,
-    // so `this.context` is undefined. Seed it to `null` (matching the
-    // App Router default) so the Pages Router branch in `unstable_retry`
-    // doesn't fire.
-    (instance as unknown as { context: null }).context = null;
-    instance.state = { error: { thrownValue: new Error("boom") } };
 
-    // typeof window === "undefined" in this Node test environment, so
-    // unstable_retry should throw a clear "client only" error.
-    expect(() => instance.unstable_retry()).toThrow(/client/i);
+    // The Boundary wrapper is a function component that calls hooks.
+    // We must call it inside a React render so React's dispatcher is active.
+    let wrapperResult: React.ReactElement | null = null;
+    function Capture() {
+      wrapperResult = (Boundary as unknown as (p: Record<string, never>) => React.ReactElement)({});
+      return React.createElement("span");
+    }
+    renderToStaticMarkup(React.createElement(Capture));
+
+    const InnerCatchError = wrapperResult!.type as unknown as {
+      getDerivedStateFromError(e: unknown): unknown;
+    };
+
+    let captured: unknown = null;
+    try {
+      redirect("/login");
+    } catch (e) {
+      captured = e;
+    }
+    expect(() => InnerCatchError.getDerivedStateFromError(captured)).toThrow();
+    try {
+      InnerCatchError.getDerivedStateFromError(captured);
+    } catch (rethrown) {
+      // Identity-preserving rethrow.
+      expect(rethrown).toBe(captured);
+    }
   });
 
   it("unstable_retry on the client calls appRouterInstance.refresh and resets the boundary", async () => {
@@ -1700,61 +1692,70 @@ describe("next/error shim — unstable_catchError", () => {
     // installed BEFORE re-importing the shims, otherwise navigation.ts will
     // initialize its client navigation state against a bare `{}` and crash.
     // Mutable view over globalThis that allows assigning/deleting `window`.
-    // We avoid `as Window & typeof globalThis` because the stub doesn't have
-    // the full DOM surface — just the bits navigation.ts touches at
-    // module-load.
     const globalAny = globalThis as unknown as { window?: unknown };
     const previousWindow = globalAny.window;
-    const stubWindow = {
+    const win = {
       location: {
-        search: "",
         pathname: "/",
+        search: "",
+        hash: "",
         href: "http://localhost/",
         origin: "http://localhost",
       },
       history: {
-        pushState: () => {},
-        replaceState: () => {},
-        back: () => {},
-        forward: () => {},
         state: null,
+        pushState() {},
+        replaceState() {},
       },
-      addEventListener: () => {},
-      scrollTo: () => {},
+      addEventListener() {},
+      dispatchEvent() {
+        return true;
+      },
+      removeEventListener() {},
+      scrollTo() {},
+      scrollX: 0,
+      scrollY: 0,
     };
-    globalAny.window = stubWindow;
+    globalAny.window = win;
 
     try {
       vi.resetModules();
 
       const React = (await import("react")).default;
+      const { renderToStaticMarkup } = await import("react-dom/server");
       const { unstable_catchError } = await import("../packages/vinext/src/shims/error.js");
-      const navigation = await import("../packages/vinext/src/shims/navigation.js");
 
-      const refreshSpy = vi
-        .spyOn(navigation.appRouterInstance, "refresh")
-        .mockImplementation(() => {});
+      const refreshSpy = vi.fn();
 
       function Fallback() {
         return null;
       }
       const Boundary = unstable_catchError(Fallback);
-      const wrapperResult = (
-        Boundary as unknown as (p: Record<string, never>) => { type: unknown }
-      )({});
-      const InnerCatchError = wrapperResult.type as unknown as new (props: object) => {
+      // The Boundary wrapper is a function component that calls hooks.
+      // We must call it inside a React render so React's dispatcher is active.
+      let wrapperResult: React.ReactElement | null = null;
+      function Capture() {
+        wrapperResult = (Boundary as unknown as (p: Record<string, never>) => React.ReactElement)(
+          {},
+        );
+        return React.createElement("span");
+      }
+      renderToStaticMarkup(React.createElement(Capture));
+
+      const InnerCatchError = wrapperResult!.type as unknown as new (props: object) => {
         state: { error: { thrownValue: unknown } | null };
         unstable_retry: () => void;
       };
       const instance = new InnerCatchError({
         fallback: Fallback,
-        forwardedProps: {},
+        props: {},
       });
-      // Manually instantiating the class skips React's context machinery,
-      // so `this.context` is undefined. Seed it to `null` (matching the
-      // App Router default) so the Pages Router branch in `unstable_retry`
-      // doesn't fire — this test exercises the App Router branch.
-      (instance as unknown as { context: null }).context = null;
+      // Manually instantiating the class skips React's context machinery.
+      // Seed `this.context` with a mock App Router instance so the App Router
+      // branch in `unstable_retry` fires and calls `context.refresh()`.
+      (instance as unknown as { context: { refresh: typeof refreshSpy } }).context = {
+        refresh: refreshSpy,
+      };
 
       // Seed an error so reset has something to clear, and replace setState
       // with a spy so we can confirm the boundary self-resets.
@@ -1771,58 +1772,45 @@ describe("next/error shim — unstable_catchError", () => {
       instance.unstable_retry();
 
       expect(refreshSpy).toHaveBeenCalledTimes(1);
-      expect(setStateCalls).toEqual([{ error: null }]);
-
-      refreshSpy.mockRestore();
+      expect(setStateCalls).toHaveLength(1);
+      expect(setStateCalls[0]).toEqual({ error: null });
     } finally {
-      if (previousWindow === undefined) {
-        delete globalAny.window;
-      } else {
-        globalAny.window = previousWindow;
-      }
+      globalAny.window = previousWindow;
       vi.resetModules();
     }
   });
 
-  // Regression for cloudflare/vinext#1448.
-  // Ported from Next.js test:
-  //   .nextjs-ref/test/e2e/app-dir/catch-error/catch-error.test.ts
-  //   "should throw when unstable_retry is called on Pages Router"
-  // Mirrors the App Router-only branch in Next.js's catch-error source:
-  //   .nextjs-ref/packages/next/src/client/components/catch-error.tsx
-  // The boundary detects Pages Router via `RouterContext` (set as the inner
   // class component's `contextType`). When a non-null Pages Router instance
   // is in context, `unstable_retry()` must throw the verbatim Next.js
   // message instead of calling App Router's `refresh()`.
   it("unstable_retry under Pages Router throws Next.js parity error message", async () => {
     const React = (await import("react")).default;
+    const { renderToStaticMarkup } = await import("react-dom/server");
     const { unstable_catchError } = await import("../packages/vinext/src/shims/error.js");
 
     function Fallback() {
       return null;
     }
     const Boundary = unstable_catchError(Fallback);
-    const wrapperResult = (Boundary as unknown as (p: Record<string, never>) => { type: unknown })(
-      {},
-    );
-    const InnerCatchError = wrapperResult.type as unknown as new (props: object) => {
+    // The Boundary wrapper is a function component that calls hooks.
+    // We must call it inside a React render so React's dispatcher is active.
+    let wrapperResult: React.ReactElement | null = null;
+    function Capture() {
+      wrapperResult = (Boundary as unknown as (p: Record<string, never>) => React.ReactElement)({});
+      return React.createElement("span");
+    }
+    renderToStaticMarkup(React.createElement(Capture));
+
+    const InnerCatchError = wrapperResult!.type as unknown as new (props: object) => {
       state: { error: { thrownValue: unknown } | null };
       unstable_retry: () => void;
     };
     const instance = new InnerCatchError({
       fallback: Fallback,
-      forwardedProps: {},
+      isPagesRouter: true,
+      props: {},
     });
     instance.state = { error: { thrownValue: new Error("boom") } };
-
-    // Seed `this.context` with a truthy value so the Pages Router branch
-    // fires. In production React fills this from RouterContext when the
-    // boundary is rendered under `RouterContext.Provider` (every Pages
-    // Router page). Casting via unknown keeps the seed type-safe under
-    // the class's declared `context` type.
-    (instance as unknown as { context: object }).context = {
-      route: "/some-page",
-    };
 
     void React; // keep React import for parity with sibling tests
 
@@ -3638,6 +3626,21 @@ describe("next/server shim", () => {
     const result = connection();
     expect(result).toBeInstanceOf(Promise);
     await expect(result).resolves.toBeUndefined();
+  });
+
+  it("connection() interrupts speculative probes before post-connection user code runs", async () => {
+    const { runWithConnectionProbe } = await import("../packages/vinext/src/shims/headers.js");
+    const { connection } = await import("../packages/vinext/src/shims/server.js");
+
+    let ranAfterConnection = false;
+    const outcome = await runWithConnectionProbe(async () => {
+      await connection();
+      ranAfterConnection = true;
+      return "completed";
+    });
+
+    expect(outcome).toEqual({ completed: false });
+    expect(ranAfterConnection).toBe(false);
   });
 
   it("URLPattern is exported and available in Node 20+", async () => {
@@ -8235,12 +8238,26 @@ describe("NextURL basePath and locale properties", () => {
     expect(url.basePath).toBe("");
   });
 
-  it("basePath returns the configured value", async () => {
+  it("basePath is empty when URL does not start with the configured prefix", async () => {
+    // Matches Next.js getNextPathnameInfo behavior: basePath is only set when
+    // the URL's pathname actually starts with the configured basePath prefix.
+    // This is critical for middleware "absolute path" support — middleware
+    // receiving a request without the basePath prefix should see basePath === "".
     const { NextURL } = await import("../packages/vinext/src/shims/server.js");
     const url = new NextURL("http://localhost/dashboard", undefined, {
       basePath: "/app",
     });
+    expect(url.basePath).toBe("");
+  });
+
+  it("basePath is set when URL starts with the configured prefix", async () => {
+    const { NextURL } = await import("../packages/vinext/src/shims/server.js");
+    const url = new NextURL("http://localhost/app/dashboard", undefined, {
+      basePath: "/app",
+    });
     expect(url.basePath).toBe("/app");
+    // pathname is stripped of the basePath prefix
+    expect(url.pathname).toBe("/dashboard");
   });
 
   it("basePath setter normalizes leading slash", async () => {
@@ -8250,9 +8267,41 @@ describe("NextURL basePath and locale properties", () => {
     expect(url.basePath).toBe("/app");
   });
 
-  it("basePath is preserved through clone()", async () => {
+  it("href reassignment re-derives basePath from the configured value", async () => {
+    // Next.js's NextURL.analyze() re-runs getNextPathnameInfo on every href
+    // set, so basePath toggles based on whether the new pathname carries the
+    // configured prefix.
     const { NextURL } = await import("../packages/vinext/src/shims/server.js");
     const url = new NextURL("http://localhost/dashboard", undefined, {
+      basePath: "/app",
+    });
+    expect(url.basePath).toBe("");
+
+    // Moving inside the basePath re-activates it from the configured value.
+    url.href = "http://localhost/app/settings";
+    expect(url.basePath).toBe("/app");
+    expect(url.pathname).toBe("/settings");
+
+    // Moving back outside the basePath clears it again.
+    url.href = "http://localhost/elsewhere";
+    expect(url.basePath).toBe("");
+    expect(url.pathname).toBe("/elsewhere");
+  });
+
+  it("basePath is empty in clone when URL does not have the prefix", async () => {
+    // When the URL doesn't have the basePath prefix, basePath is cleared during
+    // construction, and the clone reflects that empty basePath.
+    const { NextURL } = await import("../packages/vinext/src/shims/server.js");
+    const url = new NextURL("http://localhost/dashboard", undefined, {
+      basePath: "/docs",
+    });
+    const cloned = url.clone();
+    expect(cloned.basePath).toBe("");
+  });
+
+  it("basePath is preserved through clone() when URL has the prefix", async () => {
+    const { NextURL } = await import("../packages/vinext/src/shims/server.js");
+    const url = new NextURL("http://localhost/docs/page", undefined, {
       basePath: "/docs",
     });
     const cloned = url.clone();
@@ -8346,7 +8395,7 @@ describe("NextURL basePath and locale properties", () => {
 
   it("href includes basePath prefix", async () => {
     const { NextURL } = await import("../packages/vinext/src/shims/server.js");
-    const url = new NextURL("http://localhost/dashboard", undefined, {
+    const url = new NextURL("http://localhost/app/dashboard", undefined, {
       basePath: "/app",
     });
     expect(url.pathname).toBe("/dashboard");
@@ -8355,7 +8404,7 @@ describe("NextURL basePath and locale properties", () => {
 
   it("href includes both basePath and locale prefix", async () => {
     const { NextURL } = await import("../packages/vinext/src/shims/server.js");
-    const url = new NextURL("http://localhost/fr/about", undefined, {
+    const url = new NextURL("http://localhost/app/fr/about", undefined, {
       basePath: "/app",
       ...i18nConfig,
     });
@@ -8403,7 +8452,7 @@ describe("NextURL basePath and locale properties", () => {
 
   it("basePath setter to empty string clears basePath", async () => {
     const { NextURL } = await import("../packages/vinext/src/shims/server.js");
-    const url = new NextURL("http://localhost/dashboard", undefined, {
+    const url = new NextURL("http://localhost/app/dashboard", undefined, {
       basePath: "/app",
     });
     expect(url.basePath).toBe("/app");
@@ -8469,7 +8518,7 @@ describe("NextURL basePath and locale properties", () => {
 
   it("searchParams mutations are reflected in href with basePath and locale", async () => {
     const { NextURL } = await import("../packages/vinext/src/shims/server.js");
-    const url = new NextURL("http://localhost/fr/about", undefined, {
+    const url = new NextURL("http://localhost/app/fr/about", undefined, {
       basePath: "/app",
       ...i18nConfig,
     });
@@ -8481,7 +8530,7 @@ describe("NextURL basePath and locale properties", () => {
 
   it("clone() preserves locale, basePath, and config through constructor", async () => {
     const { NextURL } = await import("../packages/vinext/src/shims/server.js");
-    const url = new NextURL("http://localhost/fr/about", undefined, {
+    const url = new NextURL("http://localhost/app/fr/about", undefined, {
       basePath: "/app",
       ...i18nConfig,
     });
@@ -8500,7 +8549,7 @@ describe("NextURL basePath and locale properties", () => {
 
   it("NextRequest passes basePath and i18n config through to nextUrl", async () => {
     const { NextRequest } = await import("../packages/vinext/src/shims/server.js");
-    const req = new NextRequest("http://localhost/fr/dashboard", {
+    const req = new NextRequest("http://localhost/app/fr/dashboard", {
       nextConfig: {
         basePath: "/app",
         i18n: {
@@ -8518,7 +8567,7 @@ describe("NextURL basePath and locale properties", () => {
 
   it("NextRequest.url reflects the normalized nextUrl href", async () => {
     const { NextRequest } = await import("../packages/vinext/src/shims/server.js");
-    const req = new NextRequest("http://localhost/fr/dashboard?tab=settings", {
+    const req = new NextRequest("http://localhost/app/fr/dashboard?tab=settings", {
       nextConfig: {
         basePath: "/app",
         i18n: { locales: ["en", "fr"], defaultLocale: "en" },
@@ -8534,7 +8583,7 @@ describe("NextURL basePath and locale properties", () => {
     process.env.__NEXT_NO_MIDDLEWARE_URL_NORMALIZE = "1";
     try {
       const { NextRequest } = await import("../packages/vinext/src/shims/server.js");
-      const req = new NextRequest("http://localhost/fr/dashboard?tab=settings", {
+      const req = new NextRequest("http://localhost/app/fr/dashboard?tab=settings", {
         nextConfig: {
           basePath: "/app",
           i18n: { locales: ["en", "fr"], defaultLocale: "en" },
@@ -8542,7 +8591,7 @@ describe("NextURL basePath and locale properties", () => {
       });
 
       expect(req.nextUrl.href).toBe("http://localhost/app/fr/dashboard?tab=settings");
-      expect(req.url).toBe("http://localhost/fr/dashboard?tab=settings");
+      expect(req.url).toBe("http://localhost/app/fr/dashboard?tab=settings");
     } finally {
       if (previous === undefined) {
         delete process.env.__NEXT_NO_MIDDLEWARE_URL_NORMALIZE;
@@ -8569,7 +8618,7 @@ describe("NextURL basePath and locale properties", () => {
 
   it("NextRequest.url normalizes Request input through nextUrl", async () => {
     const { NextRequest } = await import("../packages/vinext/src/shims/server.js");
-    const raw = new Request("http://localhost/fr/dashboard?tab=settings");
+    const raw = new Request("http://localhost/app/fr/dashboard?tab=settings");
     const req = new NextRequest(raw, {
       nextConfig: {
         basePath: "/app",
@@ -8641,7 +8690,7 @@ describe("NextURL trailingSlash policy", () => {
 
   it("applies trailingSlash with basePath", async () => {
     const { NextURL } = await import("../packages/vinext/src/shims/server.js");
-    const url = new NextURL("http://localhost/dashboard", undefined, {
+    const url = new NextURL("http://localhost/app/dashboard", undefined, {
       basePath: "/app",
       nextConfig: { trailingSlash: true },
     });

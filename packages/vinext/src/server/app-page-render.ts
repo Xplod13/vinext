@@ -35,7 +35,6 @@ import {
   deferUntilStreamConsumed,
   renderAppPageHtmlStream,
   renderAppPageHtmlStreamWithRecovery,
-  shouldRerenderAppPageWithGlobalError,
   type AppPageSsrHandler,
 } from "./app-page-stream.js";
 import type { AppRscRenderMode } from "./app-rsc-render-mode.js";
@@ -152,6 +151,7 @@ type RenderAppPageLifecycleOptions = {
   layoutCount: number;
   loadSsrHandler: () => Promise<AppPageSsrHandler>;
   middlewareContext: AppPageMiddlewareContext;
+  navigationParams: Record<string, unknown>;
   params: Record<string, unknown>;
   rootParams?: RootParams;
   peekRenderObservationState?: () => AppPageRenderObservationState;
@@ -170,7 +170,6 @@ type RenderAppPageLifecycleOptions = {
     element: ReactNode | AppOutgoingElements,
     options: { onError: AppPageBoundaryOnError },
   ) => ReadableStream<Uint8Array>;
-  routeHasLocalBoundary: boolean;
   routePattern: string;
   runWithSuppressedHookWarning<T>(probe: () => Promise<T>): Promise<T>;
   scriptNonce?: string;
@@ -631,7 +630,7 @@ export async function renderAppPageLifecycle(
     cleanPathname: options.cleanPathname,
     completeness: "partial",
     output: rscOutputScope,
-    params: options.params,
+    params: options.navigationParams,
     state: options.peekRenderObservationState?.() ?? createEmptyAppPageRenderObservationState(),
   });
   const skipDisposition =
@@ -739,7 +738,7 @@ export async function renderAppPageLifecycle(
       isEdgeRuntime: options.isEdgeRuntime,
       middlewareContext: options.middlewareContext,
       mountedSlotsHeader: options.mountedSlotsHeader,
-      params: options.params,
+      params: options.navigationParams,
       policy: rscResponsePolicy,
       timing: buildResponseTiming({
         compileEnd,
@@ -780,7 +779,7 @@ export async function renderAppPageLifecycle(
           cleanPathname: options.cleanPathname,
           completeness: "complete",
           output: rscOutputScope,
-          params: options.params,
+          params: options.navigationParams,
           state: input.state,
         });
       },
@@ -889,20 +888,6 @@ export async function renderAppPageLifecycle(
     }
   }
 
-  if (
-    shouldRerenderAppPageWithGlobalError({
-      capturedError: rscErrorTracker.getCapturedError(),
-      hasLocalBoundary: options.routeHasLocalBoundary,
-    })
-  ) {
-    const cleanResponse = await options.renderErrorBoundaryResponse(
-      rscErrorTracker.getCapturedError(),
-    );
-    if (cleanResponse) {
-      return cleanResponse;
-    }
-  }
-
   // Eagerly read values that must be captured before the stream is consumed.
   if (options.isPrerender === true) {
     await settleCapturedRscRenderForCacheMetadata(htmlRender.capturedRscData);
@@ -988,7 +973,7 @@ export async function renderAppPageLifecycle(
           cleanPathname: options.cleanPathname,
           completeness: "complete",
           output: htmlOutputScope,
-          params: options.params,
+          params: options.navigationParams,
           state: input.state,
         });
       },
@@ -1000,7 +985,7 @@ export async function renderAppPageLifecycle(
           cleanPathname: options.cleanPathname,
           completeness: "complete",
           output: rscOutputScope,
-          params: options.params,
+          params: options.navigationParams,
           state: input.state,
         });
       },

@@ -92,8 +92,32 @@ export type BuildPageElementsOptions<
    * so file-based metadata route URLs emitted in <head> are prefixed.
    */
   basePath?: string;
+  /** Configured next.config `trailingSlash`, threaded into canonical URL rendering. */
+  trailingSlash?: boolean;
   /** Serialized next.config `htmlLimitedBots` regexp source. */
   htmlLimitedBots?: string;
+};
+
+type AppPageNavigationParamModule = {
+  default?: unknown;
+};
+
+type AppPageNavigationParamSlot = {
+  default?: AppPageNavigationParamModule | null;
+  page?: AppPageNavigationParamModule | null;
+  slotPatternParts?: readonly string[] | null;
+  slotParamNames?: readonly string[] | null;
+};
+
+type AppPageNavigationParamRoute = {
+  params?: readonly string[] | null;
+  slots?: Readonly<Record<string, AppPageNavigationParamSlot>> | null;
+};
+
+type AppPageNavigationParamInterceptOptions = {
+  interceptPage?: unknown;
+  interceptParams?: AppPageParams | null;
+  interceptSlotKey?: string | null;
 };
 
 /**
@@ -306,6 +330,7 @@ export async function buildPageElements<
     searchParams: pageSearchParamsThenable,
     slotOverrides,
     renderMode,
+    trailingSlash: options.trailingSlash,
   });
 }
 
@@ -344,6 +369,20 @@ function buildSlotOverrides<TModule extends AppPageModule, TErrorModule extends 
     };
   }
 
+  const slotParamOverrides = resolveSlotParamOverrides(route, routePath);
+  for (const [slotKey, params] of Object.entries(slotParamOverrides ?? {})) {
+    const existing = overrides[slotKey];
+    overrides[slotKey] = existing ? { ...existing, params } : { params };
+  }
+
+  return Object.keys(overrides).length > 0 ? overrides : null;
+}
+
+function resolveSlotParamOverrides(
+  route: AppPageNavigationParamRoute,
+  routePath: string,
+): Readonly<Record<string, AppPageParams>> | null {
+  const overrides: Record<string, AppPageParams> = {};
   const slots = route.slots;
   if (slots) {
     let urlParts: string[] | null = null;
@@ -364,12 +403,63 @@ function buildSlotOverrides<TModule extends AppPageModule, TErrorModule extends 
       const matched = matchRoutePattern(urlParts, patternParts);
       if (!matched) continue;
 
-      const existing = overrides[slotKey];
-      overrides[slotKey] = existing ? { ...existing, params: matched } : { params: matched };
+      overrides[slotKey] = matched;
     }
   }
 
   return Object.keys(overrides).length > 0 ? overrides : null;
+}
+
+function mergeAppPageParams(target: AppPageParams, source: AppPageParams): void {
+  for (const [key, value] of Object.entries(source)) {
+    target[key] = value;
+  }
+}
+
+function isDefaultExportModule(module: unknown): module is AppPageNavigationParamModule {
+  return typeof module === "object" && module !== null;
+}
+
+function hasDefaultExport(module: unknown): boolean {
+  if (!isDefaultExportModule(module)) return false;
+  return module?.default !== null && module?.default !== undefined;
+}
+
+export function resolveAppPageNavigationParams(
+  route: AppPageNavigationParamRoute,
+  routeParams: AppPageParams,
+  routePath: string,
+  opts?: AppPageNavigationParamInterceptOptions | null,
+): AppPageParams {
+  const navigationParams: AppPageParams = { ...routeParams };
+  const slotParamOverrides = resolveSlotParamOverrides(route, routePath);
+
+  for (const [slotKey, slot] of Object.entries(route.slots ?? {})) {
+    const isInterceptedSlot =
+      opts?.interceptSlotKey === slotKey &&
+      opts.interceptSlotKey !== SIBLING_PAGE_INTERCEPT_SLOT_KEY &&
+      hasDefaultExport(opts.interceptPage);
+    // A slot is considered active here if it exports a default component (page or fallback).
+    // This is distinct from the optimistic-routing path (which keys off manifest bindings)
+    // and the route graph (which keys off pagePath existence), but functionally equivalent
+    // for param extraction today since default-only slots do not specify pattern parts.
+    if (!isInterceptedSlot && !hasDefaultExport(slot.page) && !hasDefaultExport(slot.default)) {
+      continue;
+    }
+
+    mergeAppPageParams(
+      navigationParams,
+      isInterceptedSlot
+        ? (opts?.interceptParams ?? routeParams)
+        : // Fallback to routeParams when slotParamOverrides missing — the slot
+          // is active but contributes no new params (all its param names are
+          // already route params, or the slot has no pattern parts). Merging
+          // routeParams here is a deliberate no-op that keeps the loop uniform.
+          (slotParamOverrides?.[slotKey] ?? routeParams),
+    );
+  }
+
+  return navigationParams;
 }
 
 function collectParamNameSet(params: readonly string[] | undefined | null): Set<string> {
