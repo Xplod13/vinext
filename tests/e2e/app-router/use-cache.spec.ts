@@ -30,9 +30,7 @@ async function writeUseCacheHmrActions(content: string, forceUpdate = false) {
 async function waitForUseCacheHmrTransform(request: APIRequestContext) {
   await expect
     .poll(async () => {
-      const response = await request.get(
-        `${BASE}/app/use-cache-hmr/actions.ts?t=${Date.now()}`,
-      );
+      const response = await request.get(`${BASE}/app/use-cache-hmr/actions.ts?t=${Date.now()}`);
       return response.ok();
     })
     .toBe(true);
