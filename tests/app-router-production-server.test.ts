@@ -915,9 +915,9 @@ describe("App Router Production server (startProdServer)", () => {
 
     // The flight payload embeds each cached function prop as a server
     // reference whose id is "<12-hex normalised key>#<hoisted export name>".
-    // Serialization order follows the props order: getDate first, getRandom
-    // second, getMessage third.
-    const refIds = [...new Set(html.match(/[0-9a-f]{12}#\$\$hoist_\d+_[A-Za-z0-9_$]+/g) ?? [])];
+    const refIds = [
+      ...new Set(html.match(/[0-9a-f]{12}#\$\$hoist_[a-z0-9]+_\d+_[A-Za-z0-9_$]+/g) ?? []),
+    ];
     expect(refIds.length).toBe(3);
     const [getDateRefId, getRandomRefId, getMessageRefId] = refIds;
 

@@ -1,6 +1,30 @@
 import { test, expect } from "@playwright/test";
+import { readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
 
 const BASE = "http://localhost:4174";
+const USE_CACHE_HMR_ACTIONS_FILE = path.join(
+  process.cwd(),
+  "tests/fixtures/app-basic/app/use-cache-hmr/actions.ts",
+);
+const USE_CACHE_HMR_CACHED = `"use cache";
+
+export async function getMode() {
+  return "cached";
+}
+`;
+const USE_CACHE_HMR_PLAIN = `"use server";
+
+export async function getMode() {
+  return "plain";
+}
+`;
+
+async function writeUseCacheHmrActions(content: string) {
+  if ((await readFile(USE_CACHE_HMR_ACTIONS_FILE, "utf8")) !== content) {
+    await writeFile(USE_CACHE_HMR_ACTIONS_FILE, content);
+  }
+}
 
 test.describe('"use cache" file-level directive', () => {
   test("use-cache page renders correctly", async ({ page }) => {
@@ -96,6 +120,68 @@ test.describe('"use cache" function-level directive', () => {
     const dataValue2 = html2.match(/data-testid="data-value">(\d+)</)?.[1];
 
     expect(Number(dataValue2)).toBeGreaterThan(Number(dataValue1));
+  });
+});
+
+test.describe('"use cache" direct client imports', () => {
+  test("file-level cached exports become callable server references", async ({ page }) => {
+    await page.goto(`${BASE}/use-cache-client-import`);
+    await expect(async () => {
+      await page.locator("#call-client-imported-cache").click();
+      await expect(page.getByTestId("client-imported-cache-result")).toHaveText(
+        /^client-cache:direct:[0-9.e+-]+$/,
+        { timeout: 2000 },
+      );
+    }).toPass({ timeout: 15_000 });
+  });
+});
+
+test.describe('"use cache" transform coverage', () => {
+  test("supports advanced function and export forms", async ({ page }) => {
+    await page.goto(`${BASE}/use-cache-transform-coverage`);
+    await expect(page.getByTestId("use-cache-transform-coverage")).toHaveText(
+      "destructured|export-star|object-method|static-method|server-boundary|custom-kind",
+    );
+    await expect(async () => {
+      await page.locator("#call-cached-server-boundary").click();
+      await expect(page.getByTestId("cached-server-boundary-result")).toHaveText(
+        "server-boundary",
+        { timeout: 2000 },
+      );
+    }).toPass({ timeout: 15_000 });
+  });
+
+  test("removes and restores directive metadata during HMR", async ({ page }) => {
+    await writeUseCacheHmrActions(USE_CACHE_HMR_CACHED);
+    try {
+      await page.goto(`${BASE}/use-cache-hmr`);
+      await expect(async () => {
+        await page.locator("#call-use-cache-hmr").click();
+        await expect(page.getByTestId("use-cache-hmr-result")).toHaveText("cached", {
+          timeout: 2000,
+        });
+      }).toPass({ timeout: 15_000 });
+
+      await writeUseCacheHmrActions(USE_CACHE_HMR_PLAIN);
+      await expect(async () => {
+        await page.reload();
+        await page.locator("#call-use-cache-hmr").click();
+        await expect(page.getByTestId("use-cache-hmr-result")).toHaveText("plain", {
+          timeout: 2000,
+        });
+      }).toPass({ timeout: 15_000 });
+
+      await writeUseCacheHmrActions(USE_CACHE_HMR_CACHED);
+      await expect(async () => {
+        await page.reload();
+        await page.locator("#call-use-cache-hmr").click();
+        await expect(page.getByTestId("use-cache-hmr-result")).toHaveText("cached", {
+          timeout: 2000,
+        });
+      }).toPass({ timeout: 15_000 });
+    } finally {
+      await writeUseCacheHmrActions(USE_CACHE_HMR_CACHED);
+    }
   });
 });
 
