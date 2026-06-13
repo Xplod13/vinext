@@ -25,7 +25,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import zlib from "node:zlib";
 import { StaticFileCache, CONTENT_TYPES, etagFromFilenameHash } from "./static-file-cache.js";
-import { matchHeaders, requestContextFromRequest } from "../config/config-matchers.js";
+import { requestContextFromRequest } from "../config/config-matchers.js";
 import type { RequestContext } from "../config/config-matchers.js";
 import type { NextHeader, NextI18nConfig } from "../config/next-config.js";
 import {
@@ -39,7 +39,12 @@ import {
 } from "./image-optimization.js";
 import { normalizePath } from "./normalize-path.js";
 import { normalizeDefaultLocalePathname } from "./pages-i18n.js";
-import { filterInternalHeaders, isOpenRedirectShaped } from "./request-pipeline.js";
+import {
+  applyConfigHeadersToHeaderRecord,
+  filterInternalHeaders,
+  isOpenRedirectShaped,
+  type HeaderRecord,
+} from "./request-pipeline.js";
 import { notFoundResponse } from "./http-error-responses.js";
 import {
   runPagesRequest,
@@ -387,33 +392,14 @@ function buildStaticAssetConfigHeaders(
   basePathState: { basePath: string; hadBasePath: boolean },
 ): Record<string, string | string[]> | undefined {
   if (!configHeaders.length) return undefined;
-  const matched = matchHeaders(matchPathname, configHeaders, reqCtx, basePathState);
-  if (!matched.length) return undefined;
-  const out: Record<string, string | string[]> = {};
-  for (const { key, value } of matched) {
-    const lower = key.toLowerCase();
-    if (lower === "set-cookie") {
-      const existing = out[key] ?? out[lower];
-      const existingArr = Array.isArray(existing)
-        ? existing
-        : existing !== undefined
-          ? [existing]
-          : [];
-      out[key] = [...existingArr, value];
-    } else if (lower === "vary") {
-      const existingKey = Object.keys(out).find((k) => k.toLowerCase() === "vary") ?? key;
-      const existing = out[existingKey];
-      out[existingKey] =
-        existing === undefined
-          ? value
-          : Array.isArray(existing)
-            ? existing.join(", ") + ", " + value
-            : existing + ", " + value;
-    } else {
-      out[key] = value;
-    }
-  }
-  return out;
+  const headers: HeaderRecord = {};
+  applyConfigHeadersToHeaderRecord(headers, {
+    configHeaders,
+    pathname: matchPathname,
+    requestContext: reqCtx,
+    basePathState,
+  });
+  return Object.keys(headers).length > 0 ? headers : undefined;
 }
 
 /**
@@ -424,14 +410,7 @@ function buildStaticAssetConfigHeaders(
  * never carry a body).
  */
 function reqCtxFromNodeReqForStaticHeaders(req: IncomingMessage, url: string): RequestContext {
-  // Use a placeholder host; matchHeaders normalises host via the Host header
-  // already present in the WHATWG Headers we hand to requestContextFromRequest.
-  const headers = nodeHeadersToWebHeaders(req.headers);
-  const webReq = new Request(`http://localhost${url.startsWith("/") ? url : "/" + url}`, {
-    method: req.method ?? "GET",
-    headers,
-  });
-  return requestContextFromRequest(webReq);
+  return requestContextFromRequest(nodeToWebRequest(req, url));
 }
 
 /**
